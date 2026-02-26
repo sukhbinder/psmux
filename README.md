@@ -38,6 +38,8 @@ psmux is a **native Windows terminal multiplexer** built from the ground up in R
 
 > 💡 **Tip:** psmux ships with `tmux` and `pmux` aliases. Just type `tmux` and it works!
 
+👀 On Windows 👇
+
 ![psmux in action](demo.gif)
 
 ## Installation
