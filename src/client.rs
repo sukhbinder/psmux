@@ -958,7 +958,7 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, input: 
                                 KeyCode::Char(c) if key.modifiers.contains(KeyModifiers::CONTROL) => {
                                     cmd_batch.push(format!("send-key C-{}\n", c.to_ascii_lowercase()));
                                 }
-                                KeyCode::Char(c) if (c as u8) >= 0x01 && (c as u8) <= 0x1A => {
+                                KeyCode::Char(c) if (c as u32) >= 0x01 && (c as u32) <= 0x1A => {
                                     let ctrl_letter = ((c as u8) + b'a' - 1) as char;
                                     cmd_batch.push(format!("send-key C-{}\n", ctrl_letter));
                                 }

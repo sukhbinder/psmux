@@ -1098,7 +1098,7 @@ pub fn forward_key_to_active(app: &mut AppState, key: KeyEvent) -> io::Result<()
             let ctrl_char = (c.to_ascii_lowercase() as u8).wrapping_sub(b'a' - 1);
             vec![ctrl_char]
         }
-        KeyCode::Char(c) if (c as u8) >= 0x01 && (c as u8) <= 0x1A => {
+        KeyCode::Char(c) if (c as u32) >= 0x01 && (c as u32) <= 0x1A => {
             vec![c as u8]
         }
         KeyCode::Char(c) => {
