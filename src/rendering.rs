@@ -52,19 +52,42 @@ pub fn dim_predictions_enabled() -> bool {
 
 // ─── Cursor ─────────────────────────────────────────────────────────────────
 
-pub fn apply_cursor_style<W: Write>(out: &mut W) -> io::Result<()> {
-    let style = env::var("PSMUX_CURSOR_STYLE").unwrap_or_else(|_| "default".to_string());
+/// Returns `true` when ConPTY passthrough mode is available (Windows 11 22H2+,
+/// build ≥ 22621).  Cached after the first call.
+///
+/// On Windows 10 (classic ConPTY without passthrough), the child's CSI ?25h
+/// (show cursor) is often lost or delayed by the translation layer, which
+/// makes the vt100 parser's `hide_cursor` flag unreliable — it gets stuck on
+/// `true`.  We only trust `hide_cursor` when passthrough mode is active.
+pub fn has_conpty_passthrough() -> bool {
+    use std::sync::OnceLock;
+    static CACHED: OnceLock<bool> = OnceLock::new();
+    *CACHED.get_or_init(|| {
+        crate::ssh_input::windows_build_number()
+            .map(|b| b >= 22621)
+            .unwrap_or(false)
+    })
+}
+
+/// Resolve the DECSCUSR code (0-6) from the PSMUX_CURSOR_STYLE / PSMUX_CURSOR_BLINK
+/// configuration.  Returns 0 ("default") when no explicit style is configured.
+///
+/// Used as the fallback cursor shape when ConPTY doesn't forward DECSCUSR from
+/// the child process (Windows 10 without passthrough mode).
+pub fn configured_cursor_code() -> u8 {
+    let style = env::var("PSMUX_CURSOR_STYLE").unwrap_or_else(|_| "bar".to_string());
     let blink = env::var("PSMUX_CURSOR_BLINK").unwrap_or_else(|_| "1".to_string()) != "0";
-    let code = match style.as_str() {
+    match style.as_str() {
         "block" => if blink { 1 } else { 2 },
         "underline" => if blink { 3 } else { 4 },
         "bar" | "beam" => if blink { 5 } else { 6 },
-        // "default" or anything else: send \x1b[0 q to reset cursor to
-        // the terminal emulator's configured shape.  This lets child apps
-        // (e.g. Claude) that set their own cursor via DECSCUSR look correct
-        // because ConPTY forwards DECSCUSR to the hosting terminal directly.
+        "default" => 0,
         _ => 0,
-    };
+    }
+}
+
+pub fn apply_cursor_style<W: Write>(out: &mut W) -> io::Result<()> {
+    let code = configured_cursor_code();
     execute!(out, Print(format!("\x1b[{} q", code)))?;
     Ok(())
 }
@@ -181,8 +204,7 @@ pub fn render_node(
                 while c < target_cols {
                     if let Some(cell) = screen.cell(r, c) {
                         let mut fg = vt_to_color(cell.fgcolor());
-                        let mut bg = vt_to_color(cell.bgcolor());
-                        if cell.inverse() { std::mem::swap(&mut fg, &mut bg); }
+                        let bg = vt_to_color(cell.bgcolor());
                         if dim_preds && !screen.alternate_screen()
                             && (r > cur_r || (r == cur_r && c >= cur_c))
                         {
@@ -193,6 +215,9 @@ pub fn render_node(
                         if cell.bold() { style = style.add_modifier(Modifier::BOLD); }
                         if cell.italic() { style = style.add_modifier(Modifier::ITALIC); }
                         if cell.underline() { style = style.add_modifier(Modifier::UNDERLINED); }
+                        if cell.inverse() { style = style.add_modifier(Modifier::REVERSED); }
+                        if cell.blink() { style = style.add_modifier(Modifier::SLOW_BLINK); }
+                        if cell.hidden() { style = style.add_modifier(Modifier::HIDDEN); }
                         let text = cell.contents().to_string();
                         let w = UnicodeWidthStr::width(text.as_str()) as u16;
                         if w == 0 {
@@ -221,7 +246,15 @@ pub fn render_node(
                 let cc = cc.min(target_cols.saturating_sub(1));
                 let cx = inner.x + cc;
                 let cy = inner.y + cr;
-                f.set_cursor_position((cx, cy));
+                // Respect the child process's cursor visibility flag,
+                // but ONLY when ConPTY passthrough mode is active (Win11
+                // 22H2+).  On Windows 10 classic ConPTY, CSI ?25h (show
+                // cursor) is often lost by the translation layer, leaving
+                // hide_cursor stuck on true and the cursor invisible (#52).
+                let child_hides = has_conpty_passthrough() && screen.hide_cursor();
+                if !child_hides || copy_cursor.is_some() {
+                    f.set_cursor_position((cx, cy));
+                }
             }
         }
         Node::Split { kind, sizes, children } => {

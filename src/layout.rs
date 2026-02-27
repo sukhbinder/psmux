@@ -22,7 +22,7 @@ pub fn cycle_top_layout(app: &mut AppState) {
 }
 
 #[derive(Serialize, Deserialize)]
-pub struct CellJson { pub text: String, pub fg: String, pub bg: String, pub bold: bool, pub italic: bool, pub underline: bool, pub inverse: bool, pub dim: bool }
+pub struct CellJson { pub text: String, pub fg: String, pub bg: String, pub bold: bool, pub italic: bool, pub underline: bool, pub inverse: bool, pub dim: bool, pub blink: bool, pub hidden: bool }
 
 #[derive(Serialize, Deserialize)]
 pub struct CellRunJson {
@@ -52,6 +52,8 @@ pub enum LayoutJson {
         cursor_col: u16,
         #[serde(default)]
         alternate_screen: bool,
+        #[serde(default)]
+        hide_cursor: bool,
         #[serde(default)]
         cursor_shape: u8,
         active: bool,
@@ -96,11 +98,14 @@ pub fn dump_layout_json(app: &mut AppState) -> io::Result<String> {
                 const FLAG_ITALIC: u8 = 4;
                 const FLAG_UNDERLINE: u8 = 8;
                 const FLAG_INVERSE: u8 = 16;
+                const FLAG_BLINK: u8 = 32;
+                const FLAG_HIDDEN: u8 = 64;
 
                 let Ok(parser) = p.term.lock() else {
                     return LayoutJson::Leaf {
                         id: p.id, rows: p.last_rows, cols: p.last_cols,
                         cursor_row: 0, cursor_col: 0, alternate_screen: false,
+                        hide_cursor: false,
                         cursor_shape: p.cursor_shape.load(std::sync::atomic::Ordering::Relaxed),
                         active: *cur_path == active_path, copy_mode: false,
                         scroll_offset: 0,
@@ -113,6 +118,7 @@ pub fn dump_layout_json(app: &mut AppState) -> io::Result<String> {
                 };
                 let screen = parser.screen();
                 let (cr, cc) = screen.cursor_position();
+                let hide_cursor_flag = screen.hide_cursor();
                 // ConPTY never passes through ESC[?1049h, so alternate_screen()
                 // is always false.  Use a heuristic instead: if the last row of
                 // the screen has non-blank content, this is a fullscreen TUI app.
@@ -174,6 +180,8 @@ pub fn dump_layout_json(app: &mut AppState) -> io::Result<String> {
                             if cell.italic() { fl |= FLAG_ITALIC; }
                             if cell.underline() { fl |= FLAG_UNDERLINE; }
                             if cell.inverse() { fl |= FLAG_INVERSE; }
+                            if cell.blink() { fl |= FLAG_BLINK; }
+                            if cell.hidden() { fl |= FLAG_HIDDEN; }
 
                             // Run merging — push &str directly, no String allocation
                             let merged = if let Some(last) = runs.last_mut() {
@@ -196,12 +204,14 @@ pub fn dump_layout_json(app: &mut AppState) -> io::Result<String> {
                                     text: t.to_string(), fg: fg_str.clone(), bg: bg_str.clone(),
                                     bold: cell.bold(), italic: cell.italic(),
                                     underline: cell.underline(), inverse: cell.inverse(), dim: cell.dim(),
+                                    blink: cell.blink(), hidden: cell.hidden(),
                                 });
                                 for _ in 1..w {
                                     row.push(CellJson {
                                         text: String::new(), fg: fg_str.clone(), bg: bg_str.clone(),
                                         bold: cell.bold(), italic: cell.italic(),
                                         underline: cell.underline(), inverse: cell.inverse(), dim: cell.dim(),
+                                        blink: cell.blink(), hidden: cell.hidden(),
                                     });
                                 }
                             }
@@ -223,6 +233,7 @@ pub fn dump_layout_json(app: &mut AppState) -> io::Result<String> {
                                 row.push(CellJson {
                                     text: " ".to_string(), fg: "default".to_string(), bg: "default".to_string(),
                                     bold: false, italic: false, underline: false, inverse: false, dim: false,
+                                    blink: false, hidden: false,
                                 });
                             }
                             (1u16, vt100::Color::Default, vt100::Color::Default, 0u8)
@@ -243,6 +254,8 @@ pub fn dump_layout_json(app: &mut AppState) -> io::Result<String> {
                                 underline: false,
                                 inverse: false,
                                 dim: false,
+                                blink: false,
+                                hidden: false,
                             });
                         }
                         lines.push(row);
@@ -256,6 +269,7 @@ pub fn dump_layout_json(app: &mut AppState) -> io::Result<String> {
                     cursor_row: cr,
                     cursor_col: cc,
                     alternate_screen,
+                    hide_cursor: hide_cursor_flag,
                     cursor_shape: p.cursor_shape.load(std::sync::atomic::Ordering::Relaxed),
                     active: false,
                     copy_mode: false,
@@ -452,6 +466,8 @@ pub fn dump_layout_json_fast(app: &mut AppState) -> io::Result<String> {
                 const FLAG_ITALIC: u8   = 4;
                 const FLAG_UNDERLINE: u8 = 8;
                 const FLAG_INVERSE: u8  = 16;
+                const FLAG_BLINK: u8    = 32;
+                const FLAG_HIDDEN: u8   = 64;
 
                 let is_active    = cur_path.as_slice() == active_path;
                 let need_content = in_copy && is_active;
@@ -463,9 +479,10 @@ pub fn dump_layout_json_fast(app: &mut AppState) -> io::Result<String> {
                 // in the ConPTY pipe while we build the JSON string.
                 struct Run { text: String, fg: vt100::Color, bg: vt100::Color, flags: u8, width: u16 }
                 struct RowSnap { runs: Vec<Run> }
-                struct CopyCell { text: String, fg: vt100::Color, bg: vt100::Color, bold: bool, italic: bool, underline: bool, inverse: bool, dim: bool, width: u16 }
+                struct CopyCell { text: String, fg: vt100::Color, bg: vt100::Color, bold: bool, italic: bool, underline: bool, inverse: bool, dim: bool, blink: bool, hidden: bool, width: u16 }
                 struct LeafSnap {
                     cr: u16, cc: u16, alt: bool,
+                    hide_cursor: bool,
                     rows_v2: Vec<RowSnap>,
                     content: Vec<Vec<CopyCell>>,
                 }
@@ -473,10 +490,11 @@ pub fn dump_layout_json_fast(app: &mut AppState) -> io::Result<String> {
                 let snap = 'snap: {
                     let parser = match p.term.lock() {
                         Ok(g) => g,
-                        Err(_) => break 'snap LeafSnap { cr: 0, cc: 0, alt: false, rows_v2: vec![], content: vec![] },
+                        Err(_) => break 'snap LeafSnap { cr: 0, cc: 0, alt: false, hide_cursor: false, rows_v2: vec![], content: vec![] },
                     };
                     let screen = parser.screen();
                     let (cr, cc) = screen.cursor_position();
+                    let hide_cursor = screen.hide_cursor();
 
                     // Alternate-screen heuristic
                     let alt = screen.alternate_screen() || {
@@ -521,6 +539,8 @@ pub fn dump_layout_json_fast(app: &mut AppState) -> io::Result<String> {
                                 if cell.italic(){ fl |= FLAG_ITALIC; }
                                 if cell.underline() { fl |= FLAG_UNDERLINE; }
                                 if cell.inverse()   { fl |= FLAG_INVERSE; }
+                                if cell.blink()     { fl |= FLAG_BLINK; }
+                                if cell.hidden()    { fl |= FLAG_HIDDEN; }
 
                                 if prev_fg == Some(cfg) && prev_bg == Some(cbg) && prev_fl == fl {
                                     if let Some(last) = runs.last_mut() {
@@ -569,13 +589,13 @@ pub fn dump_layout_json_fast(app: &mut AppState) -> io::Result<String> {
                                     row_cells.push(CopyCell {
                                         text: t.to_string(), fg: cell.fgcolor(), bg: cell.bgcolor(),
                                         bold: cell.bold(), italic: cell.italic(), underline: cell.underline(),
-                                        inverse: cell.inverse(), dim: cell.dim(), width: w,
+                                        inverse: cell.inverse(), dim: cell.dim(), blink: cell.blink(), hidden: cell.hidden(), width: w,
                                     });
                                     c += w;
                                 } else {
                                     row_cells.push(CopyCell {
                                         text: " ".to_string(), fg: vt100::Color::Default, bg: vt100::Color::Default,
-                                        bold: false, italic: false, underline: false, inverse: false, dim: false, width: 1,
+                                        bold: false, italic: false, underline: false, inverse: false, dim: false, blink: false, hidden: false, width: 1,
                                     });
                                     c += 1;
                                 }
@@ -584,7 +604,7 @@ pub fn dump_layout_json_fast(app: &mut AppState) -> io::Result<String> {
                         }
                     }
 
-                    LeafSnap { cr, cc, alt, rows_v2: snap_rows, content: snap_content }
+                    LeafSnap { cr, cc, alt, hide_cursor, rows_v2: snap_rows, content: snap_content }
                 };
                 // ── Parser mutex is now RELEASED ──
                 // All JSON string building below happens without holding the lock,
@@ -598,10 +618,12 @@ pub fn dump_layout_json_fast(app: &mut AppState) -> io::Result<String> {
                         "\"rows\":{},\"cols\":{},",
                         "\"cursor_row\":{},\"cursor_col\":{},",
                         "\"alternate_screen\":{},",
+                        "\"hide_cursor\":{},",
                         "\"active\":{},\"copy_mode\":{},",
                         "\"scroll_offset\":{},"),
                     p.id, p.last_rows, p.last_cols,
-                    snap.cr, snap.cc, snap.alt, is_active, need_content, so,
+                    snap.cr, snap.cc, snap.alt, snap.hide_cursor,
+                    is_active, need_content, so,
                 ));
 
                 // selection bounds + copy cursor position
@@ -676,8 +698,8 @@ pub fn dump_layout_json_fast(app: &mut AppState) -> io::Result<String> {
                             out.push_str("\",\"bg\":\"");
                             push_color(cell.bg, out);
                             let _ = std::fmt::Write::write_fmt(out, format_args!(
-                                "\",\"bold\":{},\"italic\":{},\"underline\":{},\"inverse\":{},\"dim\":{}}}",
-                                cell.bold, cell.italic, cell.underline, cell.inverse, cell.dim,
+                                "\",\"bold\":{},\"italic\":{},\"underline\":{},\"inverse\":{},\"dim\":{},\"blink\":{},\"hidden\":{}}}",
+                                cell.bold, cell.italic, cell.underline, cell.inverse, cell.dim, cell.blink, cell.hidden,
                             ));
                             // Emit width-2 filler cells
                             for _ in 1..cell.width {
@@ -686,15 +708,15 @@ pub fn dump_layout_json_fast(app: &mut AppState) -> io::Result<String> {
                                 out.push_str("\",\"bg\":\"");
                                 push_color(cell.bg, out);
                                 let _ = std::fmt::Write::write_fmt(out, format_args!(
-                                    "\",\"bold\":{},\"italic\":{},\"underline\":{},\"inverse\":{},\"dim\":{}}}",
-                                    cell.bold, cell.italic, cell.underline, cell.inverse, cell.dim,
+                                    "\",\"bold\":{},\"italic\":{},\"underline\":{},\"inverse\":{},\"dim\":{},\"blink\":{},\"hidden\":{}}}",
+                                    cell.bold, cell.italic, cell.underline, cell.inverse, cell.dim, cell.blink, cell.hidden,
                                 ));
                             }
                         }
                         // pad to full column width
                         let total_w: u16 = row.iter().map(|c| c.width).sum();
                         for _ in total_w..p.last_cols {
-                            out.push_str(",{\"text\":\" \",\"fg\":\"default\",\"bg\":\"default\",\"bold\":false,\"italic\":false,\"underline\":false,\"inverse\":false,\"dim\":false}");
+                            out.push_str(",{\"text\":\" \",\"fg\":\"default\",\"bg\":\"default\",\"bold\":false,\"italic\":false,\"underline\":false,\"inverse\":false,\"dim\":false,\"blink\":false,\"hidden\":false}");
                         }
                         out.push(']');
                     }

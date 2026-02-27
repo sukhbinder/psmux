@@ -963,8 +963,7 @@ checksum = "c33a9471896f1c69cecef8d20cbe2f7accd12527ce60845ff44c153bb2a21b49"
 [[package]]
 name = "portable-pty"
 version = "0.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b4a596a2b3d2752d94f51fac2d4a96737b8705dddd311a32b9af47211f08671e"
+source = "git+https://github.com/marlocarlo/portable-pty-patched.git?branch=main#8efdc9bc4e33110bad9bbd94f18a03c1139e83d9"
 dependencies = [
  "anyhow",
  "bitflags 1.3.2",
@@ -1619,8 +1618,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 [[package]]
 name = "vt100"
 version = "0.16.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "054ff75fb8fa83e609e685106df4faeffdf3a735d3c74ebce97ec557d5d36fd9"
+source = "git+https://github.com/marlocarlo/vt100-rust-patched.git?branch=main#772355f52fbddbeb2810e2e1ec08f32766829629"
 dependencies = [
  "itoa",
  "unicode-width",

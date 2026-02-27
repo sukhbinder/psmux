@@ -8,6 +8,13 @@ use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 use crate::types::{AppState, Pane, Node, LayoutKind, Window};
 use crate::tree::{replace_leaf_with_split, active_pane_mut, kill_leaf};
 
+/// Sentinel value for cursor_shape: means "no DECSCUSR received from child yet".
+/// When ConPTY passthrough mode is unavailable, DECSCUSR sequences from child
+/// processes are consumed by ConPTY and never forwarded.  Using this sentinel
+/// lets the rendering code skip emitting any cursor-shape override, so the
+/// real terminal keeps its user-configured default cursor.
+pub const CURSOR_SHAPE_UNSET: u8 = 255;
+
 /// Send a preemptive cursor-position report (\x1b[1;1R) to the ConPTY input pipe.
 ///
 /// Windows ConPTY sends a Device Status Report (\x1b[6n]) during initialization
@@ -94,7 +101,7 @@ pub fn create_window(pty_system: &dyn portable_pty::PtySystem, app: &mut AppStat
     let term_reader = term.clone();
     let data_version = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
     let dv_writer = data_version.clone();
-    let cursor_shape = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(0));
+    let cursor_shape = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(CURSOR_SHAPE_UNSET));
     let cs_writer = cursor_shape.clone();
     let reader = pair
         .master
@@ -145,7 +152,7 @@ pub fn create_window_raw(pty_system: &dyn portable_pty::PtySystem, app: &mut App
     let term_reader = term.clone();
     let data_version = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
     let dv_writer = data_version.clone();
-    let cursor_shape = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(0));
+    let cursor_shape = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(CURSOR_SHAPE_UNSET));
     let cs_writer = cursor_shape.clone();
     let reader = pair
         .master
@@ -254,7 +261,7 @@ pub fn split_active_with_command(app: &mut AppState, kind: LayoutKind, command: 
     let reader = pair.master.try_clone_reader().map_err(|e| io::Error::new(io::ErrorKind::Other, format!("clone reader error: {e}")))?;
     let data_version = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
     let dv_writer = data_version.clone();
-    let cursor_shape = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(0));
+    let cursor_shape = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(CURSOR_SHAPE_UNSET));
     let cs_writer = cursor_shape.clone();
     spawn_reader_thread(reader, term_reader, dv_writer, cs_writer);
     let child_pid = crate::platform::mouse_inject::get_child_pid(&*child);
@@ -459,13 +466,12 @@ pub fn build_raw_command(raw_args: &[String]) -> CommandBuilder {
 ///
 /// Uses an 8KB read buffer (down from 64KB) to reduce mutex hold time during
 /// `parser.process()`, which improves DumpState latency under heavy output.
+
 /// Scan raw ConPTY output for DECSCUSR cursor shape sequences (`\x1b[N q`).
-/// Returns the last non-bar cursor shape value found, or None.
+/// Returns the last cursor shape value found, or None.
 ///
-/// We intentionally ignore bar cursor values (5, 6) and resets (0) because
-/// ConPTY's renderer re-emits its default cursor shape during frame renders,
-/// which would overwrite a TUI app's intentional block/underline cursor.
-/// Bar cursors match psmux's own default so there's no need to forward them.
+/// We accept all DECSCUSR cursor shape values (0-6) from child processes.
+/// Value 0 resets to default, 1-2 = block, 3-4 = underline, 5-6 = bar.
 fn scan_cursor_shape(data: &[u8]) -> Option<u8> {
     let mut last_shape: Option<u8> = None;
     let mut i = 0;
@@ -479,22 +485,8 @@ fn scan_cursor_shape(data: &[u8]) -> Option<u8> {
             }
             // Check for SP q (space 0x20 + 'q') = DECSCUSR
             if j + 1 < data.len() && data[j] == b' ' && data[j + 1] == b'q' {
-                // Only capture block (1,2) and underline (3,4) cursor shapes.
-                // Ignore bar (5,6) and reset-to-default (0) — these are either
-                // ConPTY frame-render noise or match psmux's own default.
-                if param >= 1 && param <= 4 {
+                if param <= 6 {
                     last_shape = Some(param);
-                }
-                // Debug: log ALL detected shapes when PSMUX_DEBUG_CURSOR=1
-                if std::env::var("PSMUX_DEBUG_CURSOR").ok().as_deref() == Some("1") {
-                    use std::io::Write;
-                    if let Ok(mut f) = std::fs::OpenOptions::new()
-                        .create(true).append(true)
-                        .open(format!("{}\\psmux_cursor_debug.log",
-                            std::env::var("TEMP").unwrap_or_else(|_| ".".to_string())))
-                    {
-                        let _ = writeln!(f, "[scan] DECSCUSR param={} accepted={}", param, param >= 1 && param <= 4);
-                    }
                 }
                 i = j + 2;
                 continue;
@@ -519,8 +511,7 @@ pub fn spawn_reader_thread(
                 Ok(n) if n > 0 => {
                     zero_reads = 0;
                     // Scan for DECSCUSR cursor shape before vt100 parser consumes data.
-                    // Only non-bar shapes (1-4) are accepted; bar shapes (5-6) and
-                    // resets (0) are filtered out by scan_cursor_shape.
+                    // All valid DECSCUSR values (0-6) are accepted.
                     if let Some(shape) = scan_cursor_shape(&local[..n]) {
                         cursor_shape.store(shape, std::sync::atomic::Ordering::Release);
                     }

@@ -503,6 +503,8 @@ pub fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<
                                     if cell.italic() { style = style.add_modifier(Modifier::ITALIC); }
                                     if cell.underline() { style = style.add_modifier(Modifier::UNDERLINED); }
                                     if cell.inverse() { style = style.add_modifier(Modifier::REVERSED); }
+                                    if cell.blink() { style = style.add_modifier(Modifier::SLOW_BLINK); }
+                                    if cell.hidden() { style = style.add_modifier(Modifier::HIDDEN); }
                                     let ch = cell.contents();
                                     if style != current_style {
                                         if !current_text.is_empty() {
@@ -572,23 +574,34 @@ pub fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<
         // Forward active pane's cursor shape (DECSCUSR) to the real terminal.
         // Write directly to stdout (not through ratatui backend) to avoid
         // any buffering interference with the next draw cycle.
+        //
+        // When cursor_shape is CURSOR_SHAPE_UNSET (255), ConPTY consumed the
+        // child's DECSCUSR (Windows 10 without passthrough mode).  In that
+        // case, fall back to the user-configured cursor-style option so TUI
+        // apps like Claude still get a sensible cursor (default: bar).
         {
             let win = &app.windows[app.active_idx];
             if let Some(pane) = crate::tree::active_pane(&win.root, &win.active_path) {
                 let shape = pane.cursor_shape.load(std::sync::atomic::Ordering::Relaxed);
-                if shape >= 1 && shape <= 6 {
-                    use crossterm::cursor::SetCursorStyle;
-                    let style = match shape {
-                        1 => SetCursorStyle::BlinkingBlock,
-                        2 => SetCursorStyle::SteadyBlock,
-                        3 => SetCursorStyle::BlinkingUnderScore,
-                        4 => SetCursorStyle::SteadyUnderScore,
-                        5 => SetCursorStyle::BlinkingBar,
-                        6 => SetCursorStyle::SteadyBar,
-                        _ => SetCursorStyle::DefaultUserShape,
-                    };
-                    let _ = crossterm::execute!(std::io::stdout(), style);
-                }
+                // Resolve effective shape: child's DECSCUSR if received,
+                // otherwise the configured cursor-style fallback.
+                let effective = if shape <= 6 {
+                    shape
+                } else {
+                    crate::rendering::configured_cursor_code()
+                };
+                use crossterm::cursor::SetCursorStyle;
+                let style = match effective {
+                    0 => SetCursorStyle::DefaultUserShape,
+                    1 => SetCursorStyle::BlinkingBlock,
+                    2 => SetCursorStyle::SteadyBlock,
+                    3 => SetCursorStyle::BlinkingUnderScore,
+                    4 => SetCursorStyle::SteadyUnderScore,
+                    5 => SetCursorStyle::BlinkingBar,
+                    6 => SetCursorStyle::SteadyBar,
+                    _ => SetCursorStyle::DefaultUserShape,
+                };
+                let _ = crossterm::execute!(std::io::stdout(), style);
             }
         }
 

@@ -1401,6 +1401,7 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, input: 
                         cursor_row,
                         cursor_col,
                         alternate_screen,
+                        hide_cursor,
                         cursor_shape: _,
                         active,
                         copy_mode,
@@ -1536,9 +1537,17 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, input: 
                             if clock_mode {
                                 render_clock_overlay(f, inner);
                             }
-                            let cy = inner.y + (*cursor_row).min(inner.height.saturating_sub(1));
-                            let cx = inner.x + (*cursor_col).min(inner.width.saturating_sub(1));
-                            f.set_cursor_position((cx, cy));
+                            // Respect the child process's cursor visibility flag,
+                            // but ONLY when ConPTY passthrough mode is active
+                            // (Win11 22H2+).  On Windows 10 classic ConPTY,
+                            // CSI ?25h is often lost, leaving hide_cursor stuck
+                            // true and the cursor invisible (#52).
+                            let child_hides = crate::rendering::has_conpty_passthrough() && *hide_cursor;
+                            if !child_hides {
+                                let cy = inner.y + (*cursor_row).min(inner.height.saturating_sub(1));
+                                let cx = inner.x + (*cursor_col).min(inner.width.saturating_sub(1));
+                                f.set_cursor_position((cx, cy));
+                            }
                         }
 
                         // In copy mode, show cursor at copy_pos with a
@@ -1962,7 +1971,9 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, input: 
             }
         })?;
 
-        // Forward active pane's cursor shape (DECSCUSR) to the real terminal
+        // Forward active pane's cursor shape (DECSCUSR) to the real terminal.
+        // If no child DECSCUSR was received (ConPTY ate it on Win10), fall
+        // back to the user-configured cursor-style option.
         {
             fn find_active_cursor_shape(node: &LayoutJson) -> Option<u8> {
                 match node {
@@ -1974,19 +1985,20 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, input: 
                     }
                 }
             }
-            if let Some(shape) = find_active_cursor_shape(&root) {
-                use crossterm::cursor::SetCursorStyle;
-                let style = match shape {
-                    1 => SetCursorStyle::BlinkingBlock,
-                    2 => SetCursorStyle::SteadyBlock,
-                    3 => SetCursorStyle::BlinkingUnderScore,
-                    4 => SetCursorStyle::SteadyUnderScore,
-                    5 => SetCursorStyle::BlinkingBar,
-                    6 => SetCursorStyle::SteadyBar,
-                    _ => SetCursorStyle::DefaultUserShape,
-                };
-                let _ = crossterm::execute!(std::io::stdout(), style);
-            }
+            let effective = find_active_cursor_shape(&root)
+                .unwrap_or_else(crate::rendering::configured_cursor_code);
+            use crossterm::cursor::SetCursorStyle;
+            let style = match effective {
+                0 => SetCursorStyle::DefaultUserShape,
+                1 => SetCursorStyle::BlinkingBlock,
+                2 => SetCursorStyle::SteadyBlock,
+                3 => SetCursorStyle::BlinkingUnderScore,
+                4 => SetCursorStyle::SteadyUnderScore,
+                5 => SetCursorStyle::BlinkingBar,
+                6 => SetCursorStyle::SteadyBar,
+                _ => SetCursorStyle::DefaultUserShape,
+            };
+            let _ = crossterm::execute!(std::io::stdout(), style);
         }
 
         let _render_us = _t_parse.elapsed().as_micros().saturating_sub(_parse_us as u128);
