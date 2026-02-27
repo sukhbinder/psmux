@@ -246,13 +246,12 @@ pub fn render_node(
                 let cc = cc.min(target_cols.saturating_sub(1));
                 let cx = inner.x + cc;
                 let cy = inner.y + cr;
-                // Respect the child process's cursor visibility flag,
-                // but ONLY when ConPTY passthrough mode is active (Win11
-                // 22H2+).  On Windows 10 classic ConPTY, CSI ?25h (show
-                // cursor) is often lost by the translation layer, leaving
-                // hide_cursor stuck on true and the cursor invisible (#52).
-                let child_hides = has_conpty_passthrough() && screen.hide_cursor();
-                if !child_hides || copy_cursor.is_some() {
+                // Respect the child's cursor-visibility state.
+                // TUI apps like Claude draw their own cursor via cell
+                // inverse-video and hide the real terminal cursor —
+                // honour that so we don't place a stray cursor at
+                // ConPTY's parking position.
+                if !screen.hide_cursor() {
                     f.set_cursor_position((cx, cy));
                 }
             }

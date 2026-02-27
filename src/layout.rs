@@ -612,6 +612,7 @@ pub fn dump_layout_json_fast(app: &mut AppState) -> io::Result<String> {
 
                 // ── leaf header ──────────────────────────────────────
                 let so = if is_active && in_copy { scroll_off } else { 0 };
+                let cs = p.cursor_shape.load(std::sync::atomic::Ordering::Relaxed);
                 let _ = std::fmt::Write::write_fmt(out, format_args!(
                     concat!(
                         "{{\"type\":\"leaf\",\"id\":{},",
@@ -619,10 +620,12 @@ pub fn dump_layout_json_fast(app: &mut AppState) -> io::Result<String> {
                         "\"cursor_row\":{},\"cursor_col\":{},",
                         "\"alternate_screen\":{},",
                         "\"hide_cursor\":{},",
+                        "\"cursor_shape\":{},",
                         "\"active\":{},\"copy_mode\":{},",
                         "\"scroll_offset\":{},"),
                     p.id, p.last_rows, p.last_cols,
                     snap.cr, snap.cc, snap.alt, snap.hide_cursor,
+                    cs,
                     is_active, need_content, so,
                 ));
 

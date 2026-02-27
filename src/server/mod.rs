@@ -41,7 +41,7 @@ use crate::util::{list_windows_json, list_tree_json, list_windows_tmux};
 use crate::format::{expand_format, format_list_windows, format_list_panes, set_buffer_idx_override};
 use crate::help;
 
-pub fn run_server(session_name: String, socket_name: Option<String>, initial_command: Option<String>, raw_command: Option<Vec<String>>) -> io::Result<()> {
+pub fn run_server(session_name: String, socket_name: Option<String>, initial_command: Option<String>, raw_command: Option<Vec<String>>, start_dir: Option<String>, window_name: Option<String>, init_size: Option<(u16, u16)>) -> io::Result<()> {
     // Write crash info to a log file when stderr is unavailable (detached server)
     std::panic::set_hook(Box::new(|info| {
         let home = std::env::var("USERPROFILE").or_else(|_| std::env::var("HOME")).unwrap_or_default();
@@ -106,11 +106,21 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
     // Create initial window with optional command (this spawns ConPTY + pwsh,
     // which is the slowest step — but the port file is already written so the
     // client can connect immediately without waiting)
+    // Apply initial dimensions if specified via -x/-y
+    if let Some((w, h)) = init_size {
+        app.last_window_area = ratatui::layout::Rect { x: 0, y: 0, width: w, height: h };
+    }
+    // Apply start directory if specified via -c (new-session) / -d (server)
+    let saved_dir = if start_dir.is_some() { env::current_dir().ok() } else { None };
+    if let Some(ref dir) = start_dir { env::set_current_dir(dir).ok(); }
     if let Some(ref raw_args) = raw_command {
         create_window_raw(&*pty_system, &mut app, raw_args)?;
     } else {
         create_window(&*pty_system, &mut app, initial_command.as_deref())?;
     }
+    if let Some(prev) = saved_dir { env::set_current_dir(prev).ok(); }
+    // Apply window name if specified via -n
+    if let Some(n) = window_name { app.windows.last_mut().map(|w| w.name = n); }
     
     // Shared command aliases map — updated by main loop, read by handler threads
     let shared_aliases: std::sync::Arc<std::sync::RwLock<std::collections::HashMap<String, String>>> =
@@ -1465,35 +1475,59 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         }
                     }
                 }
-                CtrlReq::PipePane(cmd, stdin, stdout) => {
+                CtrlReq::PipePane(cmd, stdin, stdout, toggle) => {
                     let win = &app.windows[app.active_idx];
                     let pane_id = get_active_pane_id(&win.root, &win.active_path).unwrap_or(0);
+                    let has_existing = app.pipe_panes.iter().any(|p| p.pane_id == pane_id);
                     
                     if cmd.is_empty() {
-                        app.pipe_panes.retain(|p| p.pane_id != pane_id);
-                    } else {
+                        // No command: close any existing pipe on this pane
                         if let Some(idx) = app.pipe_panes.iter().position(|p| p.pane_id == pane_id) {
                             if let Some(ref mut proc) = app.pipe_panes[idx].process {
                                 let _ = proc.kill();
                             }
                             app.pipe_panes.remove(idx);
-                        } else {
-                            #[cfg(windows)]
-                            let process = std::process::Command::new("pwsh")
-                                .args(["-NoProfile", "-Command", &cmd])
-                                .stdin(if stdout { std::process::Stdio::piped() } else { std::process::Stdio::null() })
-                                .stdout(if stdin { std::process::Stdio::piped() } else { std::process::Stdio::null() })
-                                .stderr(std::process::Stdio::null())
-                                .spawn()
-                                .ok();
-                            
-                            app.pipe_panes.push(PipePaneState {
-                                pane_id,
-                                process,
-                                stdin,
-                                stdout,
-                            });
                         }
+                    } else if toggle && has_existing {
+                        // -o flag with existing pipe: close it (toggle off), don't start new
+                        if let Some(idx) = app.pipe_panes.iter().position(|p| p.pane_id == pane_id) {
+                            if let Some(ref mut proc) = app.pipe_panes[idx].process {
+                                let _ = proc.kill();
+                            }
+                            app.pipe_panes.remove(idx);
+                        }
+                    } else {
+                        // Close any existing pipe first (replace)
+                        if let Some(idx) = app.pipe_panes.iter().position(|p| p.pane_id == pane_id) {
+                            if let Some(ref mut proc) = app.pipe_panes[idx].process {
+                                let _ = proc.kill();
+                            }
+                            app.pipe_panes.remove(idx);
+                        }
+                        // Start new pipe
+                        #[cfg(windows)]
+                        let process = std::process::Command::new("pwsh")
+                            .args(["-NoProfile", "-Command", &cmd])
+                            .stdin(if stdout { std::process::Stdio::piped() } else { std::process::Stdio::null() })
+                            .stdout(if stdin { std::process::Stdio::piped() } else { std::process::Stdio::null() })
+                            .stderr(std::process::Stdio::null())
+                            .spawn()
+                            .ok();
+                        #[cfg(not(windows))]
+                        let process = std::process::Command::new("sh")
+                            .args(["-c", &cmd])
+                            .stdin(if stdout { std::process::Stdio::piped() } else { std::process::Stdio::null() })
+                            .stdout(if stdin { std::process::Stdio::piped() } else { std::process::Stdio::null() })
+                            .stderr(std::process::Stdio::null())
+                            .spawn()
+                            .ok();
+                        
+                        app.pipe_panes.push(PipePaneState {
+                            pane_id,
+                            process,
+                            stdin,
+                            stdout,
+                        });
                     }
                 }
                 CtrlReq::SelectLayout(layout) => {

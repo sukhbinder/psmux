@@ -728,14 +728,14 @@ match cmd {
     "pipe-pane" | "pipep" => {
         let stdin_flag = args.iter().any(|a| *a == "-I");
         let stdout_flag = args.iter().any(|a| *a == "-O");
-        let _toggle = args.iter().any(|a| *a == "-o");
+        let toggle = args.iter().any(|a| *a == "-o");
         let cmd = args.iter().filter(|a| !a.starts_with('-')).cloned().collect::<Vec<&str>>().join(" ");
         let (stdin, stdout) = if !stdin_flag && !stdout_flag {
             (false, true)
         } else {
             (stdin_flag, stdout_flag)
         };
-        let _ = tx.send(CtrlReq::PipePane(cmd, stdin, stdout));
+        let _ = tx.send(CtrlReq::PipePane(cmd, stdin, stdout, toggle));
     }
     "select-layout" | "selectl" => {
         let layout = args.iter().find(|a| !a.starts_with('-')).unwrap_or(&"tiled").to_string();

@@ -716,7 +716,7 @@ pub fn respawn_active_pane(app: &mut AppState, pty_system_ref: Option<&dyn porta
     
     let data_version = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
     let dv_writer = data_version.clone();
-    let cursor_shape = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(0));
+    let cursor_shape = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(crate::pane::CURSOR_SHAPE_UNSET));
     let cs_writer = cursor_shape.clone();
     
     crate::pane::spawn_reader_thread(reader, term_reader, dv_writer, cs_writer);

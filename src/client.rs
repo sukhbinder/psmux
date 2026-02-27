@@ -1429,8 +1429,7 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, input: 
                                 while c < max_c {
                                     let cell = &row[c as usize];
                                     let mut fg = map_color(&cell.fg);
-                                    let mut bg = map_color(&cell.bg);
-                                    if cell.inverse { std::mem::swap(&mut fg, &mut bg); }
+                                    let bg = map_color(&cell.bg);
                                     let in_selection = if *copy_mode && *active {
                                         if let (Some(sr), Some(sc), Some(er), Some(ec)) = (sel_start_row, sel_start_col, sel_end_row, sel_end_col) {
                                             let mode = sel_mode.as_deref().unwrap_or("char");
@@ -1463,6 +1462,7 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, input: 
                                         let ms = crate::rendering::parse_tmux_style(&mode_style_str);
                                         style = ms;
                                     }
+                                    if cell.inverse { style = style.add_modifier(Modifier::REVERSED); }
                                     if cell.dim { style = style.add_modifier(Modifier::DIM); }
                                     if cell.bold { style = style.add_modifier(Modifier::BOLD); }
                                     if cell.italic { style = style.add_modifier(Modifier::ITALIC); }
@@ -1485,18 +1485,20 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, input: 
                                 for run in &rows_v2[r as usize].runs {
                                     if c >= inner.width { break; }
                                     let mut fg = map_color(&run.fg);
-                                    let mut bg = map_color(&run.bg);
-                                    if run.flags & 16 != 0 { std::mem::swap(&mut fg, &mut bg); }
+                                    let bg = map_color(&run.bg);
                                     if *active && dim_preds && !*alternate_screen
                                         && (r > *cursor_row || (r == *cursor_row && c >= *cursor_col))
                                     {
                                         fg = dim_color(fg);
                                     }
                                     let mut style = Style::default().fg(fg).bg(bg);
+                                    if run.flags & 16 != 0 { style = style.add_modifier(Modifier::REVERSED); }
                                     if run.flags & 1 != 0 { style = style.add_modifier(Modifier::DIM); }
                                     if run.flags & 2 != 0 { style = style.add_modifier(Modifier::BOLD); }
                                     if run.flags & 4 != 0 { style = style.add_modifier(Modifier::ITALIC); }
                                     if run.flags & 8 != 0 { style = style.add_modifier(Modifier::UNDERLINED); }
+                                    if run.flags & 32 != 0 { style = style.add_modifier(Modifier::SLOW_BLINK); }
+                                    if run.flags & 64 != 0 { style = style.add_modifier(Modifier::HIDDEN); }
                                     let text: &str = if run.text.is_empty() { " " } else { &run.text };
                                     spans.push(Span::styled(text, style));
                                     c = c.saturating_add(run.width.max(1));
@@ -1537,13 +1539,12 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, input: 
                             if clock_mode {
                                 render_clock_overlay(f, inner);
                             }
-                            // Respect the child process's cursor visibility flag,
-                            // but ONLY when ConPTY passthrough mode is active
-                            // (Win11 22H2+).  On Windows 10 classic ConPTY,
-                            // CSI ?25h is often lost, leaving hide_cursor stuck
-                            // true and the cursor invisible (#52).
-                            let child_hides = crate::rendering::has_conpty_passthrough() && *hide_cursor;
-                            if !child_hides {
+                            // Respect the child's cursor-visibility state.
+                            // TUI apps like Claude draw their own cursor via
+                            // cell inverse-video and hide the real terminal
+                            // cursor — honour that so we don't place a stray
+                            // cursor at ConPTY's parking position.
+                            if !*hide_cursor {
                                 let cy = inner.y + (*cursor_row).min(inner.height.saturating_sub(1));
                                 let cx = inner.x + (*cursor_col).min(inner.width.saturating_sub(1));
                                 f.set_cursor_position((cx, cy));
@@ -1978,7 +1979,7 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, input: 
             fn find_active_cursor_shape(node: &LayoutJson) -> Option<u8> {
                 match node {
                     LayoutJson::Leaf { active, cursor_shape, .. } => {
-                        if *active && *cursor_shape > 0 && *cursor_shape <= 6 { Some(*cursor_shape) } else { None }
+                        if *active && *cursor_shape >= 1 && *cursor_shape <= 6 { Some(*cursor_shape) } else { None }
                     }
                     LayoutJson::Split { children, .. } => {
                         children.iter().find_map(find_active_cursor_shape)

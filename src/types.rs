@@ -635,7 +635,7 @@ pub enum CtrlReq {
     UnlinkWindow,
     FindWindow(mpsc::Sender<String>, String),
     MovePane(usize),
-    PipePane(String, bool, bool),
+    PipePane(String, bool, bool, bool),
     SelectLayout(String),
     NextLayout,
     ListClients(mpsc::Sender<String>),
