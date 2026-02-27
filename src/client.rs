@@ -15,6 +15,7 @@ use crate::rendering::{dim_predictions_enabled, map_color, dim_color, centered_r
 use crate::style::parse_tmux_style_components;
 use crate::config::{parse_key_string, normalize_key_for_binding};
 use crate::copy_mode::{copy_to_system_clipboard, read_from_system_clipboard};
+use crate::debug_log::{client_log, client_log_enabled};
 use crate::layout::RowRunsJson;
 use crate::tree::split_with_gaps;
 
@@ -443,6 +444,9 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, input: 
                             force_dump = true;
                         }
                     } else {
+                        if client_log_enabled() {
+                            client_log("frame", &format!("received {} bytes", line.len()));
+                        }
                         dump_buf = line; got_frame = true; dump_in_flight = false;
                     }
                 }
@@ -1196,7 +1200,9 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, input: 
         // ── STEP 3: Render if we have a frame ────────────────────────────
         // Also render if selection changed (for highlight overlay) even without new frame
         // Always render when overlays are active (command prompt, rename, choosers)
-        if !got_frame && !selection_changed && !overlays_active { continue; }
+        if !got_frame && !selection_changed && !overlays_active {
+            continue;
+        }
 
         // Skip parse + render when the raw JSON is identical to the previous
         // frame AND selection hasn't changed AND no overlays are active.
@@ -1210,13 +1216,17 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, input: 
         let _t_parse = Instant::now();
         let state: DumpState = match serde_json::from_str(frame_to_parse) {
             Ok(s) => s,
-            Err(_) => {
+            Err(_e) => {
+                client_log("parse", &format!("JSON parse error: {} (len={})", _e, frame_to_parse.len()));
                 force_dump = true;
                 selection_changed = false;
                 continue;
             }
         };
         let _parse_us = _t_parse.elapsed().as_micros();
+        if client_log_enabled() {
+            client_log("parse", &format!("OK in {}us, {} windows", _parse_us, state.windows.len()));
+        }
 
         let root = state.layout;
         let windows = state.windows;
@@ -1274,16 +1284,16 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, input: 
         // Update status-left / status-right from server (already format-expanded)
         if let Some(sl) = state.status_left {
             if !sl.is_empty() {
-                // Truncate to status_left_length (Unicode-aware, char count)
-                let truncated: String = sl.chars().take(state.status_left_length).collect();
-                custom_status_left = Some(truncated);
+                // Pass full string — visual truncation is handled by ratatui
+                // when rendering into the allocated status bar area.
+                // Do NOT naively truncate by char count as that can split
+                // inside #[...] style directives, causing parse failures.
+                custom_status_left = Some(sl);
             }
         }
         if let Some(sr) = state.status_right {
             if !sr.is_empty() {
-                // Truncate to status_right_length (Unicode-aware, char count)
-                let truncated: String = sr.chars().take(state.status_right_length).collect();
-                custom_status_right = Some(truncated);
+                custom_status_right = Some(sr);
             }
         }
         let status_lines = state.status_lines;
@@ -1331,6 +1341,10 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, input: 
         let sel_s = rsel_start;
         let sel_e = rsel_end;
         let status_at_top = status_position_str == "top";
+        if client_log_enabled() {
+            let sz = terminal.size().unwrap_or_default();
+            client_log("draw", &format!("pre-draw terminal_size={}x{}", sz.width, sz.height));
+        }
         terminal.draw(|f| {
             let area = f.area();
             let constraints = if status_at_top {
@@ -1854,6 +1868,10 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, input: 
                 Some(ref sl) => sl.clone(),
                 None => format!("[{}] ", name),
             };
+            if client_log_enabled() {
+                client_log("status", &format!("parsing left_prefix ({} chars): [{}]",
+                    left_prefix.len(), left_prefix.chars().take(100).collect::<String>()));
+            }
             let mut status_spans: Vec<Span> = crate::rendering::parse_inline_styles(&left_prefix, sb_base);
             for (i, w) in windows.iter().enumerate() {
                 // Use pre-expanded tab_text from server (full format expansion)
@@ -1904,6 +1922,10 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, input: 
             // Right portion: custom status_right (already expanded by server)
             // Parse inline #[...] style directives for theme support
             let right_text = custom_status_right.as_deref().unwrap_or("").to_string();
+            if client_log_enabled() {
+                client_log("status", &format!("parsing right_text ({} chars): [{}]",
+                    right_text.len(), right_text.chars().take(100).collect::<String>()));
+            }
             let right_spans = crate::rendering::parse_inline_styles(&right_text, sb_base);
             // Compute how many columns are used by left + window tabs
             let left_used: usize = status_spans.iter().map(|s| s.content.len()).sum();
@@ -1970,7 +1992,12 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, input: 
                 let para = Paragraph::new(format!("{}? (y/n)", cmd));
                 f.render_widget(para, overlay.inner(oa));
             }
+
         })?;
+        if client_log_enabled() {
+            client_log("draw", &format!("draw OK, render={}us",
+                _t_parse.elapsed().as_micros().saturating_sub(_parse_us as u128)));
+        }
 
         // Forward active pane's cursor shape (DECSCUSR) to the real terminal.
         // If no child DECSCUSR was received (ConPTY ate it on Win10), fall

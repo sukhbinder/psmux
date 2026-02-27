@@ -8,6 +8,7 @@ mod cli;
 mod session;
 mod tree;
 mod style;
+mod debug_log;
 mod rendering;
 mod config;
 mod commands;

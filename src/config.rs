@@ -436,6 +436,14 @@ pub fn normalize_key_for_binding(key: (KeyCode, KeyModifiers)) -> (KeyCode, KeyM
 
 pub fn parse_key_name(name: &str) -> Option<(KeyCode, KeyModifiers)> {
     let name = name.trim();
+    // Strip surrounding quotes (single or double) — plugins often quote special chars
+    // e.g., bind-key '|' split-window -h
+    let name = if (name.starts_with('\'') && name.ends_with('\'') && name.len() >= 2)
+        || (name.starts_with('"') && name.ends_with('"') && name.len() >= 2) {
+        &name[1..name.len()-1]
+    } else {
+        name
+    };
     
     if name.starts_with("C-") || name.starts_with("^") {
         let ch = if name.starts_with("C-") {
@@ -458,6 +466,18 @@ pub fn parse_key_name(name: &str) -> Option<(KeyCode, KeyModifiers)> {
         let rest = &name[2..];
         if rest.eq_ignore_ascii_case("Tab") {
             return Some((KeyCode::BackTab, KeyModifiers::NONE));
+        }
+        // Handle S-Left, S-Right, S-Up, S-Down (Shift+Arrow)
+        match rest.to_lowercase().as_str() {
+            "left" => return Some((KeyCode::Left, KeyModifiers::SHIFT)),
+            "right" => return Some((KeyCode::Right, KeyModifiers::SHIFT)),
+            "up" => return Some((KeyCode::Up, KeyModifiers::SHIFT)),
+            "down" => return Some((KeyCode::Down, KeyModifiers::SHIFT)),
+            "home" => return Some((KeyCode::Home, KeyModifiers::SHIFT)),
+            "end" => return Some((KeyCode::End, KeyModifiers::SHIFT)),
+            "pageup" | "ppage" => return Some((KeyCode::PageUp, KeyModifiers::SHIFT)),
+            "pagedown" | "npage" => return Some((KeyCode::PageDown, KeyModifiers::SHIFT)),
+            _ => {}
         }
         if let Some(c) = rest.chars().next() {
             if rest.len() == 1 {

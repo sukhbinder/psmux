@@ -35,7 +35,13 @@ pub fn parse_command_to_action(cmd: &str) -> Option<Action> {
         "display-panes" | "displayp" => Some(Action::DisplayPanes),
         "new-window" | "neww" => Some(Action::NewWindow),
         "split-window" | "splitw" => {
-            if parts.iter().any(|p| *p == "-h") {
+            // If extra flags like -c, -d, -p, -F, or a shell command are present,
+            // store as Command to preserve the full argument string.
+            let has_extra = parts.iter().any(|p| matches!(*p, "-c" | "-d" | "-p" | "-l" | "-F" | "-P" | "-b" | "-f" | "-I" | "-Z" | "-e"))
+                || parts.iter().any(|p| !p.starts_with('-') && *p != "split-window" && *p != "splitw");
+            if has_extra {
+                Some(Action::Command(cmd.to_string()))
+            } else if parts.iter().any(|p| *p == "-h") {
                 Some(Action::SplitHorizontal)
             } else {
                 Some(Action::SplitVertical)
@@ -380,9 +386,9 @@ pub fn execute_command_string(app: &mut AppState, cmd: &str) -> io::Result<()> {
             }
         }
         "split-window" | "splitw" => {
-            let flag = if parts.iter().any(|p| *p == "-h") { "-h" } else { "-v" };
             if let Some(port) = app.control_port {
-                let _ = send_control_to_port(port, &format!("split-window {}\n", flag));
+                // Forward the full command string to preserve -c, -d, -p etc. flags
+                let _ = send_control_to_port(port, &format!("{}\n", cmd));
             }
         }
         "kill-pane" => {

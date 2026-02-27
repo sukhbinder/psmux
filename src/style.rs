@@ -7,6 +7,8 @@
 use ratatui::prelude::*;
 use ratatui::style::{Style, Modifier};
 
+use crate::debug_log::style_log;
+
 // ─── Color mapping ──────────────────────────────────────────────────────────
 
 /// Map a tmux color name/hex/index string to a ratatui `Color`.
@@ -179,6 +181,14 @@ pub fn parse_inline_styles(text: &str, base_style: Style) -> Vec<Span<'static>> 
                 i += 2 + end + 1;
                 continue;
             }
+            // No closing ']' found — treat remaining text as literal
+            style_log("parse_inline", &format!("WARN: unclosed #[ at pos {} in: [{}]",
+                i, text.chars().take(120).collect::<String>()));
+            let chunk = &text[i..];
+            if !chunk.is_empty() {
+                spans.push(Span::styled(chunk.to_string(), cur_style));
+            }
+            break;
         }
         let mut j = i;
         while j < bytes.len() && !(bytes[j] == b'#' && j + 1 < bytes.len() && bytes[j + 1] == b'[') {
@@ -231,6 +241,13 @@ pub fn parse_status(fmt: &str, session_name: &str, win_name: &str, win_idx: usiz
                 i += 2 + end + 1;
                 continue;
             }
+            // No closing ']' found — treat remaining text as literal
+            style_log("parse_status", &format!("WARN: unclosed #[ at pos {} in: [{}]",
+                i, fmt.chars().take(120).collect::<String>()));
+            let chunk = &fmt[i..];
+            let text = expand_status(chunk, session_name, win_name, win_idx, time_str);
+            spans.push(Span::styled(text, cur_style));
+            break;
         }
         let mut j = i;
         while j < fmt.len() && !(fmt.as_bytes()[j] == b'#' && j + 1 < fmt.len() && fmt.as_bytes()[j+1] == b'[') { j += 1; }
