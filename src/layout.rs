@@ -77,7 +77,7 @@ pub enum LayoutJson {
 }
 
 pub fn dump_layout_json(app: &mut AppState) -> io::Result<String> {
-    let in_copy_mode = matches!(app.mode, Mode::CopyMode);
+    let in_copy_mode = matches!(app.mode, Mode::CopyMode | Mode::CopySearch { .. });
     let scroll_offset = app.copy_scroll_offset;
     
     fn build(node: &mut Node, cur_path: &mut Vec<usize>, active_path: &[usize], include_full_content: bool) -> LayoutJson {
@@ -374,7 +374,7 @@ pub fn dump_layout_json(app: &mut AppState) -> io::Result<String> {
 /// allocations **and** the `serde_json::to_string` traversal.  Produces the
 /// identical JSON format that the client deserialises into `LayoutJson`.
 pub fn dump_layout_json_fast(app: &mut AppState) -> io::Result<String> {
-    let in_copy = matches!(app.mode, Mode::CopyMode);
+    let in_copy = matches!(app.mode, Mode::CopyMode | Mode::CopySearch { .. });
     let scroll_off = app.copy_scroll_offset;
     let anchor = app.copy_anchor;
     let anchor_scroll = app.copy_anchor_scroll_offset;

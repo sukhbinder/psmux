@@ -98,7 +98,7 @@ pub fn render_window(f: &mut Frame, app: &mut AppState, area: Rect) {
     let dim_preds = app.prediction_dimming;
     let border_style = parse_tmux_style(&app.pane_border_style);
     let active_border_style = parse_tmux_style(&app.pane_active_border_style);
-    let copy_cursor = if matches!(app.mode, Mode::CopyMode) { app.copy_pos } else { None };
+    let copy_cursor = if matches!(app.mode, Mode::CopyMode | Mode::CopySearch { .. }) { app.copy_pos } else { None };
     let win = &mut app.windows[app.active_idx];
     let active_rect = compute_active_rect(&win.root, &win.active_path, area);
     render_node(f, &mut win.root, &win.active_path, &mut Vec::new(), area, dim_preds, border_style, active_border_style, copy_cursor, active_rect);

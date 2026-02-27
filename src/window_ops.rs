@@ -5,10 +5,10 @@ use portable_pty::{PtySize, native_pty_system};
 use ratatui::prelude::*;
 
 use crate::types::{AppState, Mode, Pane, Node, LayoutKind, DragState, Window, FocusDir};
-use crate::tree::{active_pane_mut, compute_rects, compute_split_borders,
+use crate::tree::{active_pane, active_pane_mut, compute_rects, compute_split_borders,
     split_sizes_at, adjust_split_sizes, get_split_mut, resize_all_panes};
 use crate::pane::{detect_shell, build_default_shell, set_tmux_env};
-use crate::copy_mode::{scroll_copy_up, scroll_copy_down, yank_selection};
+use crate::copy_mode::{enter_copy_mode, exit_copy_mode, scroll_copy_up, scroll_copy_down, yank_selection};
 use crate::platform::mouse_inject;
 
 /// Mouse debug logger — writes to ~/.psmux/mouse_debug.log when enabled.
@@ -137,6 +137,40 @@ pub(crate) fn is_fullscreen_tui(pane: &Pane) -> bool {
             if has_content { filled += 1; }
         }
         return filled >= 3;
+    }
+    false
+}
+
+/// Check if the child process in this pane has enabled mouse tracking
+/// (DECSET 1000/1002/1003) and therefore wants to receive scroll wheel events.
+///
+/// This is the same logic tmux uses: if mouse_protocol_mode != None, the
+/// child app (vim, htop, less -R, etc.) handles mouse itself, so psmux
+/// forwards scroll events to it.  If None (shell prompt), psmux enters
+/// copy mode on scroll-up, matching tmux behavior with `set -g mouse on`.
+///
+/// Note: ConPTY strips DECSET mouse mode escape sequences from the output
+/// stream, so for native Windows console apps `mouse_protocol_mode()` is
+/// always `None`.  This is correct: native Windows TUI apps receive mouse
+/// via Win32 MOUSE_EVENT injection (separate path), and shell prompts
+/// (PowerShell, cmd) don't want scroll events at all — scrollback is the
+/// right behavior.
+///
+/// For apps running through a VT bridge (WSL, SSH), the VT escape sequences
+/// DO pass through, so `mouse_protocol_mode()` correctly reflects the
+/// child's actual mouse tracking state.
+pub(crate) fn pane_wants_mouse(pane: &Pane) -> bool {
+    if let Ok(parser) = pane.term.lock() {
+        let screen = parser.screen();
+        // Primary check (tmux parity): did the child enable mouse protocol?
+        if screen.mouse_protocol_mode() != vt100::MouseProtocolMode::None {
+            return true;
+        }
+        // Secondary check: alternate screen active (ConPTY may strip DECSET
+        // 1000 but some builds pass DECSET 1049h through).
+        if screen.alternate_screen() {
+            return true;
+        }
     }
     false
 }
@@ -326,10 +360,12 @@ pub fn remote_mouse_down(app: &mut AppState, x: u16, y: u16) {
         }
     }
 
-    if matches!(app.mode, Mode::CopyMode) {
+    if matches!(app.mode, Mode::CopyMode | Mode::CopySearch { .. }) {
         if let Some(area) = active_area {
             let (row, col) = copy_cell_for_area(area, x, y);
-            app.copy_anchor = Some((row, col));
+            // Single click positions cursor, clears selection (tmux parity).
+            // Selection only starts on drag.
+            app.copy_anchor = None;
             app.copy_pos = Some((row, col));
         }
         return;
@@ -368,12 +404,14 @@ pub fn remote_mouse_drag(app: &mut AppState, x: u16, y: u16) {
     let mut rects: Vec<(Vec<usize>, Rect)> = Vec::new();
     compute_rects(&win.root, app.last_window_area, &mut rects);
 
-    if matches!(app.mode, Mode::CopyMode) {
+    if matches!(app.mode, Mode::CopyMode | Mode::CopySearch { .. }) {
         if let Some((path, area)) = rects.iter().find(|(_, area)| area.contains(ratatui::layout::Position { x, y })) {
             win.active_path = path.clone();
             let (row, col) = copy_cell_for_area(*area, x, y);
             if app.copy_anchor.is_none() {
                 app.copy_anchor = Some((row, col));
+                app.copy_anchor_scroll_offset = app.copy_scroll_offset;
+                app.copy_selection_mode = crate::types::SelectionMode::Char;
             }
             app.copy_pos = Some((row, col));
         }
@@ -400,16 +438,22 @@ pub fn remote_mouse_up(app: &mut AppState, x: u16, y: u16) {
     let mut rects: Vec<(Vec<usize>, Rect)> = Vec::new();
     compute_rects(&win.root, app.last_window_area, &mut rects);
 
-    if matches!(app.mode, Mode::CopyMode) {
+    if matches!(app.mode, Mode::CopyMode | Mode::CopySearch { .. }) {
         if let Some((path, area)) = rects.iter().find(|(_, area)| area.contains(ratatui::layout::Position { x, y })) {
             win.active_path = path.clone();
             let (row, col) = copy_cell_for_area(*area, x, y);
             if app.copy_anchor.is_none() {
                 app.copy_anchor = Some((row, col));
+                app.copy_anchor_scroll_offset = app.copy_scroll_offset;
             }
             app.copy_pos = Some((row, col));
         }
-        let _ = yank_selection(app);
+        // Auto-yank if selection exists (anchor != pos)
+        if let (Some(a), Some(p)) = (app.copy_anchor, app.copy_pos) {
+            if a != p {
+                let _ = yank_selection(app);
+            }
+        }
         return;
     }
 
@@ -482,39 +526,93 @@ fn copy_cell_for_area(area: Rect, x: u16, y: u16) -> (u16, u16) {
 }
 
 fn remote_scroll_wheel(app: &mut AppState, x: u16, y: u16, up: bool) {
-    if matches!(app.mode, Mode::CopyMode) {
-        if up { scroll_copy_up(app, 3); } else { scroll_copy_down(app, 3); }
+    let mode_str = match &app.mode {
+        Mode::Passthrough => "Passthrough",
+        Mode::CopyMode => "CopyMode",
+        Mode::CopySearch { .. } => "CopySearch",
+        _ => "Other",
+    };
+    mouse_log(&format!("remote_scroll_wheel: x={} y={} up={} mode={}", x, y, up, mode_str));
+
+    // Handle scroll while already in copy mode
+    if matches!(app.mode, Mode::CopyMode | Mode::CopySearch { .. }) {
+        mouse_log("  -> already in copy mode, scrolling within");
+        if up {
+            scroll_copy_up(app, 3);
+        } else {
+            scroll_copy_down(app, 3);
+            // Auto-exit copy mode when scrolled back to live output
+            if app.copy_scroll_offset == 0 && app.copy_anchor.is_none() {
+                exit_copy_mode(app);
+            }
+        }
         return;
     }
 
-    let win = &mut app.windows[app.active_idx];
-    let mut rects: Vec<(Vec<usize>, Rect)> = Vec::new();
-    compute_rects(&win.root, app.last_window_area, &mut rects);
+    // Determine target pane, switch focus, and check if child is in alternate screen.
+    //
+    // IMPORTANT (tmux parity): For scroll events, we ONLY check alternate_screen()
+    // to decide whether to forward to the child or enter copy mode.
+    // We do NOT use pane_wants_mouse() / mouse_protocol_mode() because:
+    //   - PSReadLine on ConPTY spuriously enables AnyMotion mouse tracking
+    //     when it receives Win32 MOUSE_EVENT injections (e.g. from client-side
+    //     text selection clicks).
+    //   - tmux itself only checks alternate screen for scroll, not mouse tracking mode.
+    //   - Normal shells (PowerShell, cmd, bash) should scroll into copy mode.
+    //   - TUI apps (htop, vim, etc.) are always in alternate screen.
+    let (child_in_alt_screen, target_area_opt, sgr_btn, button_state) = {
+        let win = &mut app.windows[app.active_idx];
+        let mut rects: Vec<(Vec<usize>, Rect)> = Vec::new();
+        compute_rects(&win.root, app.last_window_area, &mut rects);
 
-    let mut target_area: Option<Rect> = None;
-    for (path, area) in &rects {
-        if area.contains(ratatui::layout::Position { x, y }) {
-            win.active_path = path.clone();
-            target_area = Some(*area);
-            break;
+        let mut target_area: Option<Rect> = None;
+        for (path, area) in &rects {
+            if area.contains(ratatui::layout::Position { x, y }) {
+                win.active_path = path.clone();
+                target_area = Some(*area);
+                break;
+            }
         }
-    }
-    if target_area.is_none() {
-        target_area = rects
-            .iter()
-            .find(|(path, _)| *path == win.active_path)
-            .map(|(_, area)| *area);
-    }
+        if target_area.is_none() {
+            target_area = rects
+                .iter()
+                .find(|(path, _)| *path == win.active_path)
+                .map(|(_, area)| *area);
+        }
 
-    let (col, row) = target_area.map_or((0, 0), |area| pane_inner_cell_0based(area, x, y));
-    let win_name = win.name.clone();
-    let sgr_btn: u8 = if up { 64 } else { 65 };
-    let wheel_delta: i16 = if up { 120 } else { -120 };
-    let button_state = ((wheel_delta as i32) << 16) as u32;
-    if let Some(p) = active_pane_mut(&mut win.root, &win.active_path) {
-        inject_mouse_combined(p, col, row, sgr_btn, true,
-            button_state, mouse_inject::MOUSE_WHEELED, &win_name);
+        let alt = active_pane(&win.root, &win.active_path)
+            .map_or(false, |p| {
+                if let Ok(parser) = p.term.lock() {
+                    parser.screen().alternate_screen()
+                } else { false }
+            });
+        let sgr_btn: u8 = if up { 64 } else { 65 };
+        let wheel_delta: i16 = if up { 120 } else { -120 };
+        let bs = ((wheel_delta as i32) << 16) as u32;
+        (alt, target_area, sgr_btn, bs)
+    };
+
+    mouse_log(&format!("  -> alt_screen={}", child_in_alt_screen));
+
+    if child_in_alt_screen {
+        // Forward scroll to child TUI app (alternate screen = real TUI)
+        mouse_log("  -> forwarding scroll to child TUI (alt screen)");
+        let win = &mut app.windows[app.active_idx];
+        let (col, row) = target_area_opt.map_or((0, 0), |area| pane_inner_cell_0based(area, x, y));
+        let win_name = win.name.clone();
+        if let Some(p) = active_pane_mut(&mut win.root, &win.active_path) {
+            inject_mouse_combined(p, col, row, sgr_btn, true,
+                button_state, mouse_inject::MOUSE_WHEELED, &win_name);
+        }
+    } else if up {
+        // Shell prompt — auto-enter copy mode and scroll up (tmux parity)
+        mouse_log("  -> entering copy mode (shell scroll-up)");
+        enter_copy_mode(app);
+        scroll_copy_up(app, 3);
+    } else {
+        mouse_log("  -> scroll-down at shell (no-op)");
     }
+    // Scroll down at shell prompt without copy mode is a no-op
 }
 
 pub fn remote_scroll_up(app: &mut AppState, x: u16, y: u16) { remote_scroll_wheel(app, x, y, true); }

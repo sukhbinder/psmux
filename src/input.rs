@@ -1257,16 +1257,31 @@ pub fn handle_mouse(app: &mut AppState, me: MouseEvent, window_area: Rect) -> io
         .find(|(path, _)| *path == win.active_path)
         .map(|(_, area)| *area);
 
-    /// Convert absolute screen coordinates to pane-local 1-based cell coordinates,
-    /// accounting for the 1px border on each side (Block with Borders::ALL).
-    fn pane_cell(area: Rect, abs_x: u16, abs_y: u16) -> (u16, u16) {
-        let col = abs_x.saturating_sub(area.x + 1) + 1;
-        let row = abs_y.saturating_sub(area.y + 1) + 1;
-        (col, row)
+    // Helper: convert absolute screen coordinates to 0-based pane-local
+    // (row, col) for copy-mode cursor positioning.  Mirrors
+    // `copy_cell_for_area` in window_ops.rs.
+    fn copy_cell(area: Rect, abs_x: u16, abs_y: u16) -> (u16, u16) {
+        let col = abs_x.saturating_sub(area.x).min(area.width.saturating_sub(1));
+        let row = abs_y.saturating_sub(area.y).min(area.height.saturating_sub(1));
+        (row, col)
     }
+
+    let in_copy = matches!(app.mode, Mode::CopyMode | Mode::CopySearch { .. });
 
     match me.kind {
         MouseEventKind::Down(MouseButton::Left) => {
+            // ── Copy-mode: left click positions cursor, clears selection ──
+            // tmux parity: single click moves cursor without starting a selection.
+            // Selection only starts when dragging (see Drag handler below).
+            if in_copy {
+                if let Some(area) = active_area {
+                    let (row, col) = copy_cell(area, me.column, me.row);
+                    app.copy_anchor = None;
+                    app.copy_pos = Some((row, col));
+                }
+                return Ok(());
+            }
+
             // Check if click is on a split border (for dragging)
             let mut on_border = false;
             let tol = 1u16;
@@ -1314,6 +1329,8 @@ pub fn handle_mouse(app: &mut AppState, me: MouseEvent, window_area: Rect) -> io
 
         }
         MouseEventKind::Down(MouseButton::Right) => {
+            // In copy mode, suppress — don't forward to child
+            if in_copy { return Ok(()); }
             if let Some(area) = active_area {
                 if let Some(active) = active_pane_mut(&mut win.root, &win.active_path) {
                     forward_mouse_to_pane_ex(active, area, me.column, me.row,
@@ -1323,6 +1340,8 @@ pub fn handle_mouse(app: &mut AppState, me: MouseEvent, window_area: Rect) -> io
             }
         }
         MouseEventKind::Down(MouseButton::Middle) => {
+            // In copy mode, suppress — don't forward to child
+            if in_copy { return Ok(()); }
             if let Some(area) = active_area {
                 if let Some(active) = active_pane_mut(&mut win.root, &win.active_path) {
                     forward_mouse_to_pane_ex(active, area, me.column, me.row,
@@ -1332,6 +1351,21 @@ pub fn handle_mouse(app: &mut AppState, me: MouseEvent, window_area: Rect) -> io
             }
         }
         MouseEventKind::Up(MouseButton::Left) => {
+            // ── Copy-mode: left release finalises position, auto-yank if selection ──
+            if in_copy {
+                if let Some(area) = active_area {
+                    let (row, col) = copy_cell(area, me.column, me.row);
+                    app.copy_pos = Some((row, col));
+                }
+                // Auto-yank if there is a selection (anchor != pos) — tmux parity
+                if let (Some(a), Some(p)) = (app.copy_anchor, app.copy_pos) {
+                    if a != p {
+                        let _ = yank_selection(app);
+                    }
+                }
+                return Ok(());
+            }
+
             let was_dragging = app.drag.is_some();
             app.drag = None;
             if was_dragging {
@@ -1344,6 +1378,7 @@ pub fn handle_mouse(app: &mut AppState, me: MouseEvent, window_area: Rect) -> io
             }
         }
         MouseEventKind::Up(MouseButton::Right) => {
+            if in_copy { return Ok(()); }
             if let Some(area) = active_area {
                 if let Some(active) = active_pane_mut(&mut win.root, &win.active_path) {
                     forward_mouse_to_pane_ex(active, area, me.column, me.row, 0, 0,
@@ -1352,6 +1387,7 @@ pub fn handle_mouse(app: &mut AppState, me: MouseEvent, window_area: Rect) -> io
             }
         }
         MouseEventKind::Up(MouseButton::Middle) => {
+            if in_copy { return Ok(()); }
             if let Some(area) = active_area {
                 if let Some(active) = active_pane_mut(&mut win.root, &win.active_path) {
                     forward_mouse_to_pane_ex(active, area, me.column, me.row, 0, 0,
@@ -1360,6 +1396,20 @@ pub fn handle_mouse(app: &mut AppState, me: MouseEvent, window_area: Rect) -> io
             }
         }
         MouseEventKind::Drag(MouseButton::Left) => {
+            // ── Copy-mode: drag extends the selection ──
+            if in_copy {
+                if let Some(area) = active_area {
+                    let (row, col) = copy_cell(area, me.column, me.row);
+                    if app.copy_anchor.is_none() {
+                        app.copy_anchor = Some((row, col));
+                        app.copy_anchor_scroll_offset = app.copy_scroll_offset;
+                        app.copy_selection_mode = crate::types::SelectionMode::Char;
+                    }
+                    app.copy_pos = Some((row, col));
+                }
+                return Ok(());
+            }
+
             if let Some(d) = &app.drag {
                 adjust_split_sizes(&mut win.root, d, me.column, me.row);
             } else {
@@ -1378,7 +1428,7 @@ pub fn handle_mouse(app: &mut AppState, me: MouseEvent, window_area: Rect) -> io
             // Most TUI apps don't want constant mouse position updates
         }
         MouseEventKind::ScrollUp => {
-            if matches!(app.mode, Mode::CopyMode) {
+            if matches!(app.mode, Mode::CopyMode | Mode::CopySearch { .. }) {
                 scroll_copy_up(app, 3);
                 return Ok(());
             }
@@ -1386,32 +1436,57 @@ pub fn handle_mouse(app: &mut AppState, me: MouseEvent, window_area: Rect) -> io
                 win.active_path = path.clone();
                 active_area = Some(*area);
             }
-            if let Some(area) = active_area {
-                if let Some(active) = active_pane_mut(&mut win.root, &win.active_path) {
-                    let wheel_delta: i16 = 120;
-                    let button_state = ((wheel_delta as i32) << 16) as u32;
-                    forward_mouse_to_pane_ex(active, area, me.column, me.row,
-                        button_state, crate::platform::mouse_inject::MOUSE_WHEELED,
-                        64, true); // SGR button 64 = scroll-up
+            // tmux parity: check if the child has mouse tracking enabled
+            // (DECSET 1000/1002/1003).  If yes, forward scroll to the child.
+            // If no (shell prompt), auto-enter copy mode and scroll psmux's
+            // own scrollback buffer.
+            let child_wants_mouse = active_pane(&win.root, &win.active_path)
+                .map_or(false, |p| crate::window_ops::pane_wants_mouse(p));
+            if child_wants_mouse {
+                if let Some(area) = active_area {
+                    if let Some(active) = active_pane_mut(&mut win.root, &win.active_path) {
+                        let wheel_delta: i16 = 120;
+                        let button_state = ((wheel_delta as i32) << 16) as u32;
+                        forward_mouse_to_pane_ex(active, area, me.column, me.row,
+                            button_state, crate::platform::mouse_inject::MOUSE_WHEELED,
+                            64, true); // SGR button 64 = scroll-up
+                    }
                 }
+            } else {
+                // Shell prompt — auto-enter copy mode and scroll (tmux parity)
+                enter_copy_mode(app);
+                scroll_copy_up(app, 3);
+                return Ok(());
             }
         }
         MouseEventKind::ScrollDown => {
-            if matches!(app.mode, Mode::CopyMode) {
+            if matches!(app.mode, Mode::CopyMode | Mode::CopySearch { .. }) {
                 scroll_copy_down(app, 3);
+                // Auto-exit copy mode when scrolled back to live output
+                // (only when no active selection, to avoid losing a selection in progress)
+                if app.copy_scroll_offset == 0 && app.copy_anchor.is_none() {
+                    exit_copy_mode(app);
+                }
                 return Ok(());
             }
             if let Some((path, area)) = rects.iter().find(|(_, area)| area.contains(ratatui::layout::Position { x: me.column, y: me.row })) {
                 win.active_path = path.clone();
                 active_area = Some(*area);
             }
-            if let Some(area) = active_area {
-                if let Some(active) = active_pane_mut(&mut win.root, &win.active_path) {
-                    let wheel_delta: i16 = -120;
-                    let button_state = ((wheel_delta as i32) << 16) as u32;
-                    forward_mouse_to_pane_ex(active, area, me.column, me.row,
-                        button_state, crate::platform::mouse_inject::MOUSE_WHEELED,
-                        65, true); // SGR button 65 = scroll-down
+            // Forward scroll-down to child only if it has mouse tracking.
+            // At a shell prompt, scroll-down without copy mode is a no-op
+            // (can't scroll past live output).
+            let child_wants_mouse = active_pane(&win.root, &win.active_path)
+                .map_or(false, |p| crate::window_ops::pane_wants_mouse(p));
+            if child_wants_mouse {
+                if let Some(area) = active_area {
+                    if let Some(active) = active_pane_mut(&mut win.root, &win.active_path) {
+                        let wheel_delta: i16 = -120;
+                        let button_state = ((wheel_delta as i32) << 16) as u32;
+                        forward_mouse_to_pane_ex(active, area, me.column, me.row,
+                            button_state, crate::platform::mouse_inject::MOUSE_WHEELED,
+                            65, true); // SGR button 65 = scroll-down
+                    }
                 }
             }
         }

@@ -129,6 +129,16 @@ fn active_pane_in_alt_screen(layout: &LayoutJson) -> bool {
     }
 }
 
+/// Check if the active pane is in server-side copy mode.
+/// When true, the client should NOT start its own text selection —
+/// the server handles cursor positioning and selection in copy mode.
+fn active_pane_in_copy_mode(layout: &LayoutJson) -> bool {
+    match layout {
+        LayoutJson::Leaf { active, copy_mode, .. } => *active && *copy_mode,
+        LayoutJson::Split { children, .. } => children.iter().any(|c| active_pane_in_copy_mode(c)),
+    }
+}
+
 /// Check if screen coordinates (x, y) fall on a separator line in the layout.
 /// Used to distinguish border-drag (resize) from text selection on left-click.
 fn is_on_separator(layout: &LayoutJson, area: Rect, x: u16, y: u16) -> bool {
@@ -1002,6 +1012,13 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, input: 
                         use crossterm::event::{MouseEventKind, MouseButton};
                         match me.kind {
                             MouseEventKind::Down(MouseButton::Left) => {
+                                // Check if server-side copy mode is active
+                                let server_copy = if !prev_dump_buf.is_empty() {
+                                    serde_json::from_str::<DumpState>(&prev_dump_buf)
+                                        .map(|s| active_pane_in_copy_mode(&s.layout))
+                                        .unwrap_or(false)
+                                } else { false };
+
                                 // Detect if click is on a separator line (for border resize)
                                 let on_sep = if !prev_dump_buf.is_empty() {
                                     if let Ok(state) = serde_json::from_str::<DumpState>(&prev_dump_buf) {
@@ -1010,10 +1027,15 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, input: 
                                     } else { false }
                                 } else { false };
 
-                                // Always forward to server for pane focus, tab clicks, border resize
+                                // Always forward to server for pane focus, tab clicks, border resize, copy-mode cursor positioning
                                 cmd_batch.push(format!("mouse-down {} {}\n", me.column, me.row));
 
-                                if on_sep {
+                                if server_copy {
+                                    // Server handles copy-mode selection — suppress client-side selection
+                                    rsel_start = None;
+                                    rsel_end = None;
+                                    selection_changed = true;
+                                } else if on_sep {
                                     // Border resize mode — server handles drag
                                     border_drag = true;
                                     rsel_start = None;
@@ -1082,6 +1104,10 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, input: 
                                 if border_drag {
                                     // Forward drag to server for border resize
                                     cmd_batch.push(format!("mouse-drag {} {}\n", me.column, me.row));
+                                } else if rsel_start.is_none() {
+                                    // No client selection in progress (copy mode or suppressed)
+                                    // — forward to server for copy-mode drag selection
+                                    cmd_batch.push(format!("mouse-drag {} {}\n", me.column, me.row));
                                 } else {
                                     // Left-drag: extend text selection (pwsh behavior)
                                     if rsel_start.is_some() {
@@ -1119,6 +1145,7 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, input: 
                                     rsel_start = None;
                                     rsel_end = None;
                                     selection_changed = true;
+                                    // Always forward to server (finalises copy-mode click)
                                     cmd_batch.push(format!("mouse-up {} {}\n", me.column, me.row));
                                 }
                             }
@@ -1127,8 +1154,29 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, input: 
                             MouseEventKind::Moved => {
                                 // Don't send bare mouse-move to server - wasteful and server ignores it
                             }
-                            MouseEventKind::ScrollUp => { cmd_batch.push(format!("scroll-up {} {}\n", me.column, me.row)); }
-                            MouseEventKind::ScrollDown => { cmd_batch.push(format!("scroll-down {} {}\n", me.column, me.row)); }
+                            MouseEventKind::ScrollUp => {
+                                // Clear client-side selection when scrolling — server may
+                                // enter copy mode, and the blue overlay would hide it.
+                                crate::debug_log::client_log("scroll", &format!(
+                                    "ScrollUp col={} row={} rsel_start={:?} rsel_end={:?} rsel_dragged={}",
+                                    me.column, me.row, rsel_start, rsel_end, rsel_dragged));
+                                if rsel_start.is_some() {
+                                    rsel_start = None;
+                                    rsel_end = None;
+                                    rsel_dragged = false;
+                                    selection_changed = true;
+                                }
+                                cmd_batch.push(format!("scroll-up {} {}\n", me.column, me.row));
+                            }
+                            MouseEventKind::ScrollDown => {
+                                if rsel_start.is_some() {
+                                    rsel_start = None;
+                                    rsel_end = None;
+                                    rsel_dragged = false;
+                                    selection_changed = true;
+                                }
+                                cmd_batch.push(format!("scroll-down {} {}\n", me.column, me.row));
+                            }
                             _ => {}
                         }
                     }
@@ -1701,7 +1749,11 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, input: 
             fix_border_intersections(f.buffer_mut());
 
             // ── Left-click drag text selection overlay ────────────────
+            // Suppress the client-side blue selection overlay when the
+            // server is in copy mode – the server draws its own themed
+            // selection and the blue overlay would hide everything.
             if let (Some(s), Some(e)) = (sel_s, sel_e) {
+            if !active_pane_in_copy_mode(&root) {
                 // Normalise so (r0,c0) <= (r1,c1) in reading order
                 let (r0, c0, r1, c1) = if (s.1, s.0) <= (e.1, e.0) {
                     (s.1, s.0, e.1, e.0)
@@ -1723,7 +1775,8 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, input: 
                         }
                     }
                 }
-            }
+            } // !active_pane_in_copy_mode
+            } // if let sel_s, sel_e
 
             if session_chooser {
                 let overlay = Block::default().borders(Borders::ALL).title("choose-session (enter=switch, x=kill, esc=close)");
