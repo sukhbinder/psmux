@@ -963,7 +963,7 @@ checksum = "c33a9471896f1c69cecef8d20cbe2f7accd12527ce60845ff44c153bb2a21b49"
 [[package]]
 name = "portable-pty"
 version = "0.9.0"
-source = "git+https://github.com/marlocarlo/portable-pty-patched.git?branch=main#8efdc9bc4e33110bad9bbd94f18a03c1139e83d9"
+source = "git+https://github.com/marlocarlo/portable-pty-patched.git?branch=main#4097f9a1ad0a72852046eb07876c0cd0f5fb87b9"
 dependencies = [
  "anyhow",
  "bitflags 1.3.2",
@@ -1618,7 +1618,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 [[package]]
 name = "vt100"
 version = "0.16.2"
-source = "git+https://github.com/marlocarlo/vt100-rust-patched.git?branch=main#772355f52fbddbeb2810e2e1ec08f32766829629"
+source = "git+https://github.com/marlocarlo/vt100-rust-patched.git?branch=psmux-patches#dbac45788f645c4eaee5d0a121acec9e18094d28"
 dependencies = [
  "itoa",
  "unicode-width",
