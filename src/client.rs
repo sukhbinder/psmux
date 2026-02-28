@@ -320,7 +320,7 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, input: 
     let mut win_status_current_style: Option<(Option<Color>, Option<Color>, bool)> = None;
     let mut mode_style_str: String = "bg=yellow,fg=black".to_string();
     let mut status_position_str: String = "bottom".to_string();
-    let mut _status_justify_str: String = "left".to_string();
+    let mut status_justify_str: String = "left".to_string();
     // Synced bindings from server (updated each frame from DumpState)
     let mut synced_bindings: Vec<BindingEntry> = Vec::new();
 
@@ -471,6 +471,12 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, input: 
     let mut rsel_dragged = false;
     let mut selection_changed = false; // forces redraw for selection overlay
     let mut border_drag = false; // true when dragging a pane separator (resize)
+    // Buffered OSC 52 clipboard text — written AFTER terminal.draw() to
+    // avoid corrupting ratatui's output buffer.
+    let mut pending_osc52: Option<String> = None;
+    // SSH mode: periodically re-send mouse-enable escape sequences.
+    let is_ssh_mode = crate::ssh_input::is_ssh_session();
+    let mut last_mouse_enable = Instant::now();
     loop {
         // Expire stale key_send_instant after 30ms — ConPTY echo should
         // have arrived by then; stop force-dumping to save CPU.
@@ -1317,7 +1323,7 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, input: 
                                             );
                                             if !text.is_empty() {
                                                 copy_to_system_clipboard(&text);
-                                                crate::copy_mode::emit_osc52(&mut std::io::stdout(), &text);
+                                                pending_osc52 = Some(text);
                                             }
                                         }
                                     }
@@ -1330,11 +1336,17 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, input: 
                                     rsel_start = None;
                                     rsel_end = None;
                                     selection_changed = true;
-                                    if let Some(text) = read_from_system_clipboard() {
-                                        if !text.is_empty() {
-                                            let encoded = base64_encode(&text);
-                                            cmd_batch.push(format!("send-paste {}\n", encoded));
-                                        }
+                                    let clip = read_from_system_clipboard().unwrap_or_default();
+                                    if !clip.is_empty() {
+                                        let encoded = base64_encode(&clip);
+                                        cmd_batch.push(format!("send-paste {}\n", encoded));
+                                    } else if is_ssh_mode {
+                                        // Server clipboard empty — query client terminal's
+                                        // clipboard via OSC 52. The response (if the terminal
+                                        // supports it) will arrive as Event::Paste.
+                                        use std::io::Write as _;
+                                        let _ = std::io::stdout().write_all(b"\x1b]52;c;?\x07");
+                                        let _ = std::io::stdout().flush();
                                     }
                                 }
                             }
@@ -1375,7 +1387,7 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, input: 
                                             );
                                             if !text.is_empty() {
                                                 copy_to_system_clipboard(&text);
-                                                crate::copy_mode::emit_osc52(&mut std::io::stdout(), &text);
+                                                pending_osc52 = Some(text);
                                             }
                                         }
                                     }
@@ -1452,14 +1464,19 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, input: 
                 paste_confirmed = false;
             } else if paste_confirmed && paste_pend.is_empty() {
                 // Ctrl+V with no buffered chars — read clipboard as fallback
-                if let Some(text) = read_from_system_clipboard() {
-                    if !text.is_empty() {
-                        if input_log_enabled() {
-                            input_log("paste", &format!("paste CONFIRMED (no buffer), clipboard read len={}", text.len()));
-                        }
-                        let encoded = base64_encode(&text);
-                        cmd_batch.push(format!("send-paste {}\n", encoded));
+                let clip = read_from_system_clipboard().unwrap_or_default();
+                if !clip.is_empty() {
+                    if input_log_enabled() {
+                        input_log("paste", &format!("paste CONFIRMED (no buffer), clipboard read len={}", clip.len()));
                     }
+                    let encoded = base64_encode(&clip);
+                    cmd_batch.push(format!("send-paste {}\n", encoded));
+                } else if is_ssh_mode {
+                    // Server clipboard empty — query client terminal's
+                    // clipboard via OSC 52. Response arrives as Event::Paste.
+                    use std::io::Write as _;
+                    let _ = std::io::stdout().write_all(b"\x1b]52;c;?\x07");
+                    let _ = std::io::stdout().flush();
                 }
                 paste_confirmed = false;
             }
@@ -1476,6 +1493,12 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, input: 
                 size_changed = true;
                 if writer.write_all(format!("client-size {} {}\n", new_size.0, new_size.1).as_bytes()).is_err() {
                     break; // Connection lost
+                }
+                // SSH: re-send mouse-enable on resize — terminal may reset
+                // mouse reporting mode after a window size change.
+                if is_ssh_mode {
+                    crate::ssh_input::send_mouse_enable();
+                    last_mouse_enable = Instant::now();
                 }
             }
         }
@@ -1564,13 +1587,13 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, input: 
         // ── OSC 52: propagate server-side clipboard to local terminal ────
         // When the server copies text (yank_selection / copy mode),
         // it includes a one-shot clipboard_osc52 field in the dump.
-        // We emit an OSC 52 escape sequence so the *local* terminal
-        // emulator (e.g. Windows Terminal over SSH) sets its clipboard.
+        // Buffer for emission after terminal.draw() to avoid corrupting
+        // ratatui's output.
         if let Some(ref clip_b64) = state.clipboard_osc52 {
             if let Some(clip_text) = crate::util::base64_decode(clip_b64) {
-                crate::copy_mode::emit_osc52(&mut std::io::stdout(), &clip_text);
                 // Also set the local Win32 clipboard for non-SSH scenarios
                 copy_to_system_clipboard(&clip_text);
+                pending_osc52 = Some(clip_text);
             }
         }
 
@@ -1673,7 +1696,7 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, input: 
             if !sp.is_empty() { status_position_str = sp.clone(); }
         }
         if let Some(ref sj) = state.status_justify {
-            if !sj.is_empty() { _status_justify_str = sj.clone(); }
+            if !sj.is_empty() { status_justify_str = sj.clone(); }
         }
 
         // ── STEP 3: Render ───────────────────────────────────────────────
@@ -2206,8 +2229,9 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, input: 
             } else {
                 Style::default().fg(sb_fg).bg(sb_bg)
             };
+            // ── Build three separate span groups: left, tabs, right ──
+            use unicode_width::UnicodeWidthStr;
             // Left portion: custom status_left or default [session] prefix
-            // Parse inline #[...] style directives for theme support
             let left_prefix = match custom_status_left {
                 Some(ref sl) => sl.clone(),
                 None => format!("[{}] ", name),
@@ -2216,13 +2240,14 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, input: 
                 client_log("status", &format!("parsing left_prefix ({} chars): [{}]",
                     left_prefix.len(), left_prefix.chars().take(100).collect::<String>()));
             }
-            let mut status_spans: Vec<Span> = crate::rendering::parse_inline_styles(&left_prefix, sb_base);
+            let left_spans: Vec<Span> = crate::rendering::parse_inline_styles(&left_prefix, sb_base);
+
+            // Window tabs (the window list)
+            let mut tab_spans_all: Vec<Span> = Vec::new();
             for (i, w) in windows.iter().enumerate() {
-                // Use pre-expanded tab_text from server (full format expansion)
                 let tab_text = if !w.tab_text.is_empty() {
                     w.tab_text.clone()
                 } else {
-                    // Fallback for old server: naive expansion
                     let display_idx = i + base_index;
                     let fmt = if w.active { &win_status_current_fmt } else { &win_status_fmt };
                     fmt.replace("#I", &display_idx.to_string())
@@ -2230,9 +2255,8 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, input: 
                        .replace("#F", if w.active { "*" } else { "" })
                 };
                 if i > 0 {
-                    status_spans.push(Span::styled(win_status_sep.clone(), sb_base));
+                    tab_spans_all.push(Span::styled(win_status_sep.clone(), sb_base));
                 }
-                // Determine fallback style based on window state
                 let fallback_style = if w.active {
                     if let Some((fg, bg, bold)) = win_status_current_style {
                         let mut s = Style::default();
@@ -2259,26 +2283,69 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, input: 
                         sb_base
                     }
                 };
-                // Parse inline #[fg=...,bg=...] style directives from theme format strings
-                let tab_spans = crate::rendering::parse_inline_styles(&tab_text, fallback_style);
-                status_spans.extend(tab_spans);
+                let parsed = crate::rendering::parse_inline_styles(&tab_text, fallback_style);
+                tab_spans_all.extend(parsed);
             }
-            // Right portion: custom status_right (already expanded by server)
-            // Parse inline #[...] style directives for theme support
+
+            // Right portion
             let right_text = custom_status_right.as_deref().unwrap_or("").to_string();
             if client_log_enabled() {
                 client_log("status", &format!("parsing right_text ({} chars): [{}]",
                     right_text.len(), right_text.chars().take(100).collect::<String>()));
             }
             let right_spans = crate::rendering::parse_inline_styles(&right_text, sb_base);
-            // Compute how many columns are used by left + window tabs
-            let left_used: usize = status_spans.iter().map(|s| s.content.len()).sum();
-            let right_len: usize = right_spans.iter().map(|s| s.content.len()).sum();
+
+            // Measure widths using Unicode display width
+            let left_w: usize = left_spans.iter().map(|s| UnicodeWidthStr::width(s.content.as_ref())).sum();
+            let tabs_w: usize = tab_spans_all.iter().map(|s| UnicodeWidthStr::width(s.content.as_ref())).sum();
+            let right_w: usize = right_spans.iter().map(|s| UnicodeWidthStr::width(s.content.as_ref())).sum();
             let total_width = status_chunk.width as usize;
-            if left_used + right_len < total_width {
-                let pad = total_width - left_used - right_len;
-                status_spans.push(Span::styled(" ".repeat(pad), sb_base));
-                status_spans.extend(right_spans);
+
+            // Assemble final spans based on status-justify
+            let mut status_spans: Vec<Span> = Vec::new();
+            match status_justify_str.as_str() {
+                "centre" | "center" => {
+                    // Centre: [left] [pad1] [tabs] [pad2] [right]
+                    // Tabs are centred in the space between left and right.
+                    let avail = total_width.saturating_sub(left_w).saturating_sub(right_w);
+                    let pad_before = avail.saturating_sub(tabs_w) / 2;
+                    let pad_after = avail.saturating_sub(tabs_w).saturating_sub(pad_before);
+                    status_spans.extend(left_spans);
+                    if pad_before > 0 { status_spans.push(Span::styled(" ".repeat(pad_before), sb_base)); }
+                    status_spans.extend(tab_spans_all);
+                    if pad_after > 0 { status_spans.push(Span::styled(" ".repeat(pad_after), sb_base)); }
+                    status_spans.extend(right_spans);
+                }
+                "absolute-centre" | "absolute-center" => {
+                    // Absolute-centre: tabs centred on the total terminal width
+                    let tabs_start = total_width.saturating_sub(tabs_w) / 2;
+                    status_spans.extend(left_spans);
+                    let pad_before = tabs_start.saturating_sub(left_w);
+                    if pad_before > 0 { status_spans.push(Span::styled(" ".repeat(pad_before), sb_base)); }
+                    status_spans.extend(tab_spans_all);
+                    let used = left_w + pad_before + tabs_w;
+                    let pad_after = total_width.saturating_sub(used).saturating_sub(right_w);
+                    if pad_after > 0 { status_spans.push(Span::styled(" ".repeat(pad_after), sb_base)); }
+                    status_spans.extend(right_spans);
+                }
+                "right" => {
+                    // Right: [left] [pad] [tabs] [right]
+                    status_spans.extend(left_spans);
+                    let used = left_w + tabs_w + right_w;
+                    let pad = total_width.saturating_sub(used);
+                    if pad > 0 { status_spans.push(Span::styled(" ".repeat(pad), sb_base)); }
+                    status_spans.extend(tab_spans_all);
+                    status_spans.extend(right_spans);
+                }
+                _ => {
+                    // Left (default): [left] [tabs] [pad] [right]
+                    status_spans.extend(left_spans);
+                    status_spans.extend(tab_spans_all);
+                    let used = left_w + tabs_w + right_w;
+                    let pad = total_width.saturating_sub(used);
+                    if pad > 0 { status_spans.push(Span::styled(" ".repeat(pad), sb_base)); }
+                    status_spans.extend(right_spans);
+                }
             }
             let status_bar = Paragraph::new(Line::from(status_spans)).style(sb_base);
             f.render_widget(Clear, status_chunk);
@@ -2341,6 +2408,21 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, input: 
         if client_log_enabled() {
             client_log("draw", &format!("draw OK, render={}us",
                 _t_parse.elapsed().as_micros().saturating_sub(_parse_us as u128)));
+        }
+
+        // ── Post-draw: emit buffered OSC 52 clipboard ────────────────
+        // Written AFTER terminal.draw() so it doesn't interfere with
+        // ratatui's VT output buffer.
+        if let Some(clip_text) = pending_osc52.take() {
+            crate::copy_mode::emit_osc52(&mut std::io::stdout(), &clip_text);
+        }
+
+        // ── SSH: periodic mouse-enable refresh ───────────────────────
+        // ConPTY or terminal resize can silently disable mouse reporting.
+        // Re-send every 30 seconds to keep mouse working reliably.
+        if is_ssh_mode && last_mouse_enable.elapsed().as_secs() >= 30 {
+            crate::ssh_input::send_mouse_enable();
+            last_mouse_enable = Instant::now();
         }
 
         // Forward active pane's cursor shape (DECSCUSR) to the real terminal.
