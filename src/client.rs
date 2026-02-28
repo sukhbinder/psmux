@@ -442,6 +442,9 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, input: 
         /// Used as fallback when no child process has set a cursor shape.
         #[serde(default)]
         cursor_style_code: Option<u8>,
+        /// One-shot clipboard text (base64-encoded) for OSC 52 delivery.
+        #[serde(default)]
+        clipboard_osc52: Option<String>,
     }
 
     let mut cmd_batch: Vec<String> = Vec::new();
@@ -1314,6 +1317,7 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, input: 
                                             );
                                             if !text.is_empty() {
                                                 copy_to_system_clipboard(&text);
+                                                crate::copy_mode::emit_osc52(&mut std::io::stdout(), &text);
                                             }
                                         }
                                     }
@@ -1371,6 +1375,7 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, input: 
                                             );
                                             if !text.is_empty() {
                                                 copy_to_system_clipboard(&text);
+                                                crate::copy_mode::emit_osc52(&mut std::io::stdout(), &text);
                                             }
                                         }
                                     }
@@ -1555,6 +1560,19 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, input: 
         let dim_preds = state.prediction_dimming;
         let clock_active = state.clock_mode;
         let state_cursor_style_code = state.cursor_style_code;
+
+        // ── OSC 52: propagate server-side clipboard to local terminal ────
+        // When the server copies text (yank_selection / copy mode),
+        // it includes a one-shot clipboard_osc52 field in the dump.
+        // We emit an OSC 52 escape sequence so the *local* terminal
+        // emulator (e.g. Windows Terminal over SSH) sets its clipboard.
+        if let Some(ref clip_b64) = state.clipboard_osc52 {
+            if let Some(clip_text) = crate::util::base64_decode(clip_b64) {
+                crate::copy_mode::emit_osc52(&mut std::io::stdout(), &clip_text);
+                // Also set the local Win32 clipboard for non-SSH scenarios
+                copy_to_system_clipboard(&clip_text);
+            }
+        }
 
         // Update prefix key from server config (if provided)
         if let Some(ref prefix_str) = state.prefix {

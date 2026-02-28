@@ -375,6 +375,8 @@ pub struct AppState {
     pub command_aliases: std::collections::HashMap<String, String>,
     /// set-clipboard: "on", "off", "external" (default "on")
     pub set_clipboard: String,
+    /// One-shot clipboard text to be sent to the client via OSC 52 (set by yank, consumed by dump-state).
+    pub clipboard_osc52: Option<String>,
 }
 
 impl AppState {
@@ -492,6 +494,7 @@ impl AppState {
             copy_command: String::new(),
             command_aliases: std::collections::HashMap::new(),
             set_clipboard: "on".to_string(),
+            clipboard_osc52: None,
         }
     }
 

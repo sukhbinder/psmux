@@ -37,7 +37,7 @@ use crate::window_ops::{toggle_zoom, remote_mouse_down, remote_mouse_drag, remot
 use crate::config::{load_config, parse_key_string, format_key_binding, normalize_key_for_binding,
     parse_config_content, parse_config_line};
 use crate::commands::{parse_command_to_action, format_action, parse_menu_definition};
-use crate::util::{list_windows_json, list_tree_json, list_windows_tmux};
+use crate::util::{list_windows_json, list_tree_json, list_windows_tmux, base64_encode};
 use crate::format::{expand_format, format_list_windows, format_list_panes, set_buffer_idx_override};
 use crate::help;
 
@@ -511,6 +511,20 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     ));
                     cached_dump_state.clear();
                     cached_dump_state.push_str(&combined_buf);
+                    // Inject one-shot clipboard data for OSC 52 delivery to
+                    // the client.  Only the *response* includes this field;
+                    // the cached copy does not, so subsequent NC frames won't
+                    // re-trigger clipboard emission on the client.
+                    if let Some(clip_text) = app.clipboard_osc52.take() {
+                        let clip_b64 = base64_encode(&clip_text);
+                        // Replace trailing '}' with the extra field
+                        if combined_buf.ends_with('}') {
+                            combined_buf.pop();
+                            combined_buf.push_str(",\"clipboard_osc52\":\"");
+                            combined_buf.push_str(&clip_b64);
+                            combined_buf.push_str("\"}");
+                        }
+                    }
                     cached_data_version = combined_data_version(&app);
                     state_dirty = false;
                     // Timing log: dump-state build time
