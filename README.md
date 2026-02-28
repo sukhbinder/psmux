@@ -166,6 +166,8 @@ psmux has a full plugin ecosystem — ports of the most popular tmux plugins, re
 
 **Browse available plugins and themes:** [**psmux-plugins**](https://github.com/marlocarlo/psmux-plugins)
 
+**Install & manage plugins with a TUI:** [**Tmux Plugin Panel (tppanel)**](https://github.com/marlocarlo/tppanel) — a terminal UI for browsing, installing, updating, and removing plugins and themes.
+
 | Plugin | Description |
 |--------|-------------|
 | [psmux-sensible](https://github.com/marlocarlo/psmux-plugins/tree/main/psmux-sensible) | Sensible defaults for psmux |
