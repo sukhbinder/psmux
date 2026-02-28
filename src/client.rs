@@ -418,6 +418,10 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, input: 
         /// status-justify: "left", "centre", or "right"
         #[serde(default)]
         status_justify: Option<String>,
+        /// Configured cursor style as DECSCUSR code (0-6) from server.
+        /// Used as fallback when no child process has set a cursor shape.
+        #[serde(default)]
+        cursor_style_code: Option<u8>,
     }
 
     let mut cmd_batch: Vec<String> = Vec::new();
@@ -1332,6 +1336,7 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, input: 
         let base_index = state.base_index;
         let dim_preds = state.prediction_dimming;
         let clock_active = state.clock_mode;
+        let state_cursor_style_code = state.cursor_style_code;
 
         // Update prefix key from server config (if provided)
         if let Some(ref prefix_str) = state.prefix {
@@ -2117,7 +2122,7 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, input: 
                 }
             }
             let effective = find_active_cursor_shape(&root)
-                .unwrap_or_else(crate::rendering::configured_cursor_code);
+                .unwrap_or_else(|| state_cursor_style_code.unwrap_or_else(crate::rendering::configured_cursor_code));
             use crossterm::cursor::SetCursorStyle;
             let style = match effective {
                 0 => SetCursorStyle::DefaultUserShape,
