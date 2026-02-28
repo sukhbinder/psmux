@@ -1,8 +1,24 @@
 use std::env;
+use std::cell::RefCell;
 use crossterm::event::{KeyCode, KeyModifiers};
 
 use crate::types::{AppState, Action, Bind};
 use crate::commands::parse_command_to_action;
+
+// Track the current config file being parsed (for #{current_file}, #{d:current_file})
+thread_local! {
+    static CURRENT_CONFIG_FILE: RefCell<String> = RefCell::new(String::new());
+}
+
+/// Get the current config file path being parsed.
+pub fn current_config_file() -> String {
+    CURRENT_CONFIG_FILE.with(|f| f.borrow().clone())
+}
+
+/// Set the current config file path.
+fn set_current_config_file(path: &str) {
+    CURRENT_CONFIG_FILE.with(|f| *f.borrow_mut() = path.to_string());
+}
 
 pub fn load_config(app: &mut AppState) {
     // If -f flag was used, load that specific config file instead of default search
@@ -13,9 +29,11 @@ pub fn load_config(app: &mut AppState) {
         } else {
             config_file
         };
+        set_current_config_file(&expanded);
         if let Ok(content) = std::fs::read_to_string(&expanded) {
             parse_config_content(app, &content);
         }
+        set_current_config_file("");
         return;
     }
 
@@ -28,16 +46,203 @@ pub fn load_config(app: &mut AppState) {
     ];
     for path in paths {
         if let Ok(content) = std::fs::read_to_string(&path) {
+            set_current_config_file(&path);
             parse_config_content(app, &content);
+            set_current_config_file("");
             break;
         }
     }
 }
 
 pub fn parse_config_content(app: &mut AppState, content: &str) {
-    for line in content.lines() {
-        parse_config_line(app, line);
+    // Process %if / %elif / %else / %endif conditional blocks.
+    // These are tmux config-level directives that control which lines are parsed.
+    //
+    // %if "#{==:#{@option},value}"   — evaluate format condition
+    // %elif "#{condition}"           — else-if branch
+    // %else                          — else branch
+    // %endif                         — end conditional block
+    // %hidden NAME=value             — define a hidden variable (stored but not shown)
+    //
+    // Blocks can nest. We track a stack of (active, satisfied) states.
+    // - active: whether the current block should execute lines
+    // - satisfied: whether any branch of the current if/elif/else has matched
+    struct IfState {
+        active: bool,    // are we executing lines in this block?
+        satisfied: bool, // has any branch of this if/elif/else already matched?
+        parent_active: bool, // was the parent context active?
     }
+
+    let mut if_stack: Vec<IfState> = Vec::new();
+
+    // Join continuation lines (ending with \)
+    let mut lines: Vec<String> = Vec::new();
+    let mut continuation = String::new();
+    for line in content.lines() {
+        let trimmed = line.trim_end();
+        if trimmed.ends_with('\\') {
+            continuation.push_str(trimmed.trim_end_matches('\\'));
+            continuation.push(' ');
+        } else {
+            if !continuation.is_empty() {
+                continuation.push_str(trimmed);
+                lines.push(continuation.clone());
+                continuation.clear();
+            } else {
+                lines.push(trimmed.to_string());
+            }
+        }
+    }
+    if !continuation.is_empty() {
+        lines.push(continuation);
+    }
+
+    for line in &lines {
+        let l = line.trim();
+
+        // Skip empty lines and comments (but comments start with # not %)
+        if l.is_empty() { continue; }
+
+        // Handle %-directives before checking for # comments
+        if l.starts_with('%') {
+            if l.starts_with("%if ") || l.starts_with("%if\t") {
+                let condition = l[3..].trim().trim_matches('"').trim_matches('\'');
+
+                // Evaluate the condition using format expansion
+                let parent_active = if_stack.last().map(|s| s.active).unwrap_or(true);
+                let result = if parent_active {
+                    let expanded = crate::format::expand_format(condition, app);
+                    is_truthy_config(&expanded)
+                } else {
+                    false
+                };
+
+                if_stack.push(IfState {
+                    active: parent_active && result,
+                    satisfied: result,
+                    parent_active,
+                });
+                continue;
+            }
+
+            if l.starts_with("%elif ") || l.starts_with("%elif\t") {
+                if let Some(state) = if_stack.last_mut() {
+                    let condition = l[5..].trim().trim_matches('"').trim_matches('\'');
+                    if state.parent_active && !state.satisfied {
+                        let expanded = crate::format::expand_format(condition, app);
+                        let result = is_truthy_config(&expanded);
+                        state.active = result;
+                        if result { state.satisfied = true; }
+                    } else {
+                        state.active = false;
+                    }
+                }
+                continue;
+            }
+
+            if l == "%else" {
+                if let Some(state) = if_stack.last_mut() {
+                    state.active = state.parent_active && !state.satisfied;
+                    state.satisfied = true; // prevent further elif from matching
+                }
+                continue;
+            }
+
+            if l == "%endif" {
+                if_stack.pop();
+                continue;
+            }
+
+            if l.starts_with("%hidden ") {
+                // %hidden NAME=VALUE — define a hidden config variable
+                let rest = l[8..].trim();
+                if let Some(eq_pos) = rest.find('=') {
+                    let name = rest[..eq_pos].trim();
+                    let value = rest[eq_pos + 1..].trim().trim_matches('"').trim_matches('\'');
+                    // Only process if active
+                    let active = if_stack.last().map(|s| s.active).unwrap_or(true);
+                    if active {
+                        app.environment.insert(name.to_string(), value.to_string());
+                    }
+                }
+                continue;
+            }
+
+            // Unknown %-directive — skip
+            continue;
+        }
+
+        // Regular line — only process if all enclosing %if blocks are active
+        let active = if_stack.last().map(|s| s.active).unwrap_or(true);
+        if !active { continue; }
+
+        // Expand $NAME / ${NAME} references from %hidden variables.
+        // tmux's %hidden directive defines server-level variables that are
+        // expanded with $ syntax in subsequent config lines.
+        let l = if l.contains('$') {
+            expand_hidden_vars(l, &app.environment)
+        } else {
+            l.to_string()
+        };
+
+        parse_config_line(app, &l);
+    }
+}
+
+/// Expand `$NAME` and `${NAME}` references to %hidden variable values.
+/// Only expand if the variable exists in the environment map (which stores
+/// both %hidden variables and @user-options without the @ prefix).
+fn expand_hidden_vars(line: &str, env: &std::collections::HashMap<String, String>) -> String {
+    let mut result = String::with_capacity(line.len());
+    let bytes = line.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+
+    while i < len {
+        if bytes[i] == b'$' {
+            // Check for ${NAME} syntax
+            if i + 1 < len && bytes[i + 1] == b'{' {
+                if let Some(close) = line[i + 2..].find('}') {
+                    let name = &line[i + 2..i + 2 + close];
+                    if let Some(val) = env.get(name) {
+                        result.push_str(val);
+                    } else {
+                        // Not found — keep as literal
+                        result.push_str(&line[i..i + 2 + close + 1]);
+                    }
+                    i = i + 2 + close + 1;
+                    continue;
+                }
+            }
+            // Check for $NAME syntax (NAME = [A-Z_][A-Z0-9_]*)
+            let start = i + 1;
+            let mut end = start;
+            while end < len && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_') {
+                end += 1;
+            }
+            if end > start {
+                let name = &line[start..end];
+                if let Some(val) = env.get(name) {
+                    result.push_str(val);
+                    i = end;
+                    continue;
+                }
+            }
+            // Not a recognized variable — keep literal $
+            result.push('$');
+            i += 1;
+        } else {
+            result.push(bytes[i] as char);
+            i += 1;
+        }
+    }
+    result
+}
+
+/// Check if a config-level condition result is truthy
+fn is_truthy_config(s: &str) -> bool {
+    let s = s.trim();
+    !s.is_empty() && s != "0"
 }
 
 pub fn parse_config_line(app: &mut AppState, line: &str) {
@@ -52,10 +257,6 @@ pub fn parse_config_line(app: &mut AppState, line: &str) {
     
     if l.starts_with("set-option ") || l.starts_with("set ") {
         parse_set_option(app, l);
-    }
-    else if l.starts_with("set -g ") {
-        let rest = &l[7..];
-        parse_option_value(app, rest, true);
     }
     else if l.starts_with("setw ") || l.starts_with("set-window-option ") {
         // setw maps to the same option parser (tmux window options overlap)
@@ -122,11 +323,21 @@ fn parse_set_option(app: &mut AppState, line: &str) {
     
     let mut i = 1;
     let mut is_global = false;
+    let mut format_expand = false;  // -F: expand format strings in value
+    let mut only_if_unset = false;  // -o: only set if not already set
+    let mut append_mode = false;    // -a: append to current value
+    let mut unset_mode = false;     // -u: unset (reset to default)
     
     while i < parts.len() {
         let p = parts[i];
         if p.starts_with('-') {
             if p.contains('g') { is_global = true; }
+            if p.contains('F') { format_expand = true; }
+            if p.contains('o') { only_if_unset = true; }
+            if p.contains('a') { append_mode = true; }
+            if p.contains('u') { unset_mode = true; }
+            // -q (quiet): no-op — we don't produce errors for unknown options
+            // -w: window option — treat same as global for our single-server model
             i += 1;
             if p.contains('t') && i < parts.len() { i += 1; }
         } else {
@@ -134,10 +345,49 @@ fn parse_set_option(app: &mut AppState, line: &str) {
         }
     }
     
-    if i < parts.len() {
-        let rest = parts[i..].join(" ");
-        parse_option_value(app, &rest, is_global);
+    if i >= parts.len() { return; }
+
+    // Extract key and value
+    let key = parts[i];
+    let raw_value = if i + 1 < parts.len() {
+        parts[i + 1..].join(" ")
+    } else {
+        String::new()
+    };
+
+    // Handle -u (unset): reset option to empty
+    if unset_mode {
+        parse_option_value(app, &format!("{} ", key), is_global);
+        return;
     }
+
+    // Handle -o (only set if not currently set)
+    if only_if_unset {
+        let current = crate::format::lookup_option_pub(key, app);
+        if let Some(ref v) = current {
+            if !v.is_empty() { return; }
+        }
+    }
+
+    // Expand format strings in the value if -F flag is set
+    let value = if format_expand && !raw_value.is_empty() {
+        let stripped = raw_value.trim_matches('"').trim_matches('\'');
+        let expanded = crate::format::expand_format(stripped, app);
+        expanded
+    } else {
+        raw_value
+    };
+
+    // Handle -a (append to current value)
+    let final_value = if append_mode {
+        let current = crate::format::lookup_option_pub(key, app).unwrap_or_default();
+        format!("{}{}", current, value.trim_matches('"').trim_matches('\''))
+    } else {
+        value
+    };
+
+    let rest = format!("{} {}", key, final_value);
+    parse_option_value(app, &rest, is_global);
 }
 
 pub fn parse_option_value(app: &mut AppState, rest: &str, _is_global: bool) {
@@ -559,16 +809,39 @@ pub fn parse_key_name(name: &str) -> Option<(KeyCode, KeyModifiers)> {
 
 pub fn source_file(app: &mut AppState, path: &str) {
     let path = path.trim().trim_matches('"').trim_matches('\'');
-    let expanded = if path.starts_with('~') {
-        let home = env::var("USERPROFILE").or_else(|_| env::var("HOME")).unwrap_or_default();
-        path.replacen('~', &home, 1)
+
+    // Handle -F flag: expand format strings in the path
+    let (path, format_expand) = if path.starts_with("-F ") || path.starts_with("-F\t") {
+        (path[3..].trim().trim_matches('"').trim_matches('\''), true)
+    } else {
+        (path, false)
+    };
+
+    let expanded_path = if format_expand {
+        crate::format::expand_format(path, app)
     } else {
         path.to_string()
     };
-    
-    if let Ok(content) = std::fs::read_to_string(&expanded) {
+
+    let expanded_path = if expanded_path.starts_with('~') {
+        let home = env::var("USERPROFILE").or_else(|_| env::var("HOME")).unwrap_or_default();
+        expanded_path.replacen('~', &home, 1)
+    } else {
+        expanded_path
+    };
+
+    // Normalize path separators for Windows
+    let expanded_path = expanded_path.replace('/', &std::path::MAIN_SEPARATOR.to_string());
+
+    // Save and restore current_config_file around the nested parse
+    let prev_file = current_config_file();
+    set_current_config_file(&expanded_path);
+
+    if let Ok(content) = std::fs::read_to_string(&expanded_path) {
         parse_config_content(app, &content);
     }
+
+    set_current_config_file(&prev_file);
 }
 
 /// Parse a key string like "C-a", "M-x", "F1", "Space" into (KeyCode, KeyModifiers)
@@ -743,6 +1016,22 @@ fn parse_run_shell(app: &mut AppState, line: &str) {
         shell_cmd
     };
 
+    // ── Handle .tmux files natively ──────────────────────────────────
+    // .tmux files are bash scripts used by tmux plugins. On Windows they
+    // can't be executed by pwsh. Parse them for `tmux source`, `tmux set`,
+    // etc. and apply the extracted commands as config lines.
+    let trimmed_cmd = shell_cmd.trim().trim_matches('\'').trim_matches('"');
+    if trimmed_cmd.ends_with(".tmux") {
+        let tmux_path = std::path::Path::new(trimmed_cmd);
+        if tmux_path.is_file() {
+            parse_tmux_entry_script(app, tmux_path);
+            return;
+        }
+    }
+    // Also handle .ps1 files natively when possible: if the command is a
+    // bare .ps1 path (no arguments), we can run it directly with pwsh -File
+    // which is more reliable than -Command for script paths with spaces.
+
     // Always spawn non-blocking: run-shell commands from hooks may call back
     // to the psmux server (e.g., `psmux set -g @option value`), which would
     // deadlock if we blocked the server thread with .output().
@@ -766,6 +1055,125 @@ fn parse_run_shell(app: &mut AppState, line: &str) {
             cmd.env("PSMUX_TARGET_SESSION", &target_session);
         }
         let _ = cmd.spawn();
+    }
+}
+
+/// Parse a `.tmux` entry script (bash) and extract tmux commands from it.
+///
+/// .tmux files are the standard entry point for tmux plugins. They are bash
+/// scripts that typically call `tmux source <file>`, `tmux set -g ...`, etc.
+/// On Windows we can't run bash, so we parse the script and translate the
+/// tmux CLI calls into psmux config lines.
+///
+/// Supported patterns:
+///   tmux source[-file] "path"       → source-file "path"
+///   tmux set[-option] [-g] key val  → set [-g] key val
+///   tmux setw key val               → setw key val
+///   PLUGIN_DIR=...                  → track for variable expansion
+fn parse_tmux_entry_script(app: &mut AppState, path: &std::path::Path) {
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+
+    // Determine the directory of the .tmux file for $PLUGIN_DIR / ${PLUGIN_DIR}
+    let plugin_dir = path.parent()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_default();
+
+    // Also look for PLUGIN_DIR assignment in the script (may differ)
+    let mut script_plugin_dir = plugin_dir.clone();
+    // Common pattern:  PLUGIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    // We can't evaluate bash, so we just use the file's parent directory.
+
+    for line in content.lines() {
+        let l = line.trim();
+        // Skip empty lines, comments, shebang
+        if l.is_empty() || l.starts_with('#') { continue; }
+
+        // Track explicit PLUGIN_DIR assignment (best-effort)
+        if l.starts_with("PLUGIN_DIR=") || l.starts_with("export PLUGIN_DIR=") {
+            // If it's a simple literal path, use it
+            let val = l.splitn(2, '=').nth(1).unwrap_or("").trim_matches('"').trim_matches('\'');
+            if !val.contains('$') && !val.contains('`') && !val.is_empty() {
+                script_plugin_dir = val.to_string();
+            }
+            // Otherwise keep using the .tmux file's parent dir
+            continue;
+        }
+
+        // Skip other bash-isms (variable assignments, if/fi, for, etc.)
+        if l.contains("BASH_SOURCE") || l.starts_with("cd ") || l.starts_with("export ")
+            || l.starts_with("if ") || l == "fi" || l.starts_with("for ")
+            || l.starts_with("done") || l.starts_with("then") || l.starts_with("else")
+            || l.starts_with("local ") || l.starts_with("readonly ") {
+            continue;
+        }
+
+        // Extract tmux commands: look for lines starting with `tmux `
+        let tmux_cmd = if l.starts_with("tmux ") {
+            &l[5..]
+        } else if l.starts_with("\"$TMUX_PROGRAM\" ") || l.starts_with("$TMUX_PROGRAM ") {
+            // Some plugins use $TMUX_PROGRAM variable
+            let start = l.find(' ').unwrap_or(l.len());
+            l[start..].trim()
+        } else {
+            continue;
+        };
+
+        // Expand $PLUGIN_DIR, ${PLUGIN_DIR}, $CURRENT_DIR, ${CURRENT_DIR}
+        let expanded = tmux_cmd
+            .replace("${PLUGIN_DIR}", &script_plugin_dir)
+            .replace("$PLUGIN_DIR", &script_plugin_dir)
+            .replace("${CURRENT_DIR}", &script_plugin_dir)
+            .replace("$CURRENT_DIR", &script_plugin_dir);
+
+        // Now parse the tmux subcommand as a psmux config line
+        let expanded = expanded.trim();
+        if expanded.starts_with("source-file ") || expanded.starts_with("source ") {
+            parse_config_line(app, expanded);
+        } else if expanded.starts_with("set-option ") || expanded.starts_with("set ")
+            || expanded.starts_with("set -g ") {
+            parse_config_line(app, expanded);
+        } else if expanded.starts_with("setw ") || expanded.starts_with("set-window-option ") {
+            parse_config_line(app, expanded);
+        } else if expanded.starts_with("run-shell ") || expanded.starts_with("run ") {
+            parse_config_line(app, expanded);
+        } else if expanded.starts_with("bind-key ") || expanded.starts_with("bind ") {
+            parse_config_line(app, expanded);
+        } else if expanded.starts_with("if-shell ") || expanded.starts_with("if ") {
+            parse_config_line(app, expanded);
+        } else if expanded.starts_with("set-hook ") {
+            parse_config_line(app, expanded);
+        } else {
+            // Try to parse it anyway — it might be a valid config directive
+            parse_config_line(app, expanded);
+        }
+    }
+
+    // Fallback: if we didn't find any tmux commands in the script, try to
+    // source .conf files from the same directory (many themes ship both
+    // .tmux entry script and .conf files).
+    // Check if we actually parsed anything by looking at common indicators
+    // (status-left, status-right being changed from defaults).
+    // For now, also auto-source any *_tmux.conf or *.conf files in the dir.
+    let dir = path.parent().unwrap_or(std::path::Path::new("."));
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.is_file() {
+                if let Some(ext) = p.extension().and_then(|e| e.to_str()) {
+                    if ext == "conf" {
+                        let fname = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                        // Source companion .conf files (but not the .tmux script itself)
+                        // Prioritize files like plugin_name_options.conf, plugin_name.conf
+                        if fname.ends_with("_tmux.conf") || fname.ends_with("_options_tmux.conf") {
+                            source_file(app, &p.to_string_lossy());
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 

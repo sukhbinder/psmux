@@ -750,6 +750,11 @@ fn expand_var_or_format(target: &str, app: &AppState, win_idx: usize) -> String 
 }
 
 /// Look up a tmux option by name.
+/// Public wrapper for lookup_option so config.rs can use it for -o flag check.
+pub fn lookup_option_pub(name: &str, app: &AppState) -> Option<String> {
+    lookup_option(name, app)
+}
+
 fn lookup_option(name: &str, app: &AppState) -> Option<String> {
     if name.starts_with('@') {
         return app.environment.get(name).cloned();
@@ -1385,6 +1390,7 @@ pub fn expand_var(var: &str, app: &AppState, win_idx: usize) -> String {
         "origin_flag" | "insert_flag" | "keypad_cursor_flag" | "keypad_flag" => "0".into(),
         "wrap_flag" => "1".into(),
         "line" | "command" | "command_list_name" | "command_list_alias" | "command_list_usage" | "config_files" => String::new(),
+        "current_file" => crate::config::current_config_file(),
 
         // Anything else: try as option, then env
         _ => {
