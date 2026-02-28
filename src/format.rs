@@ -768,7 +768,18 @@ fn lookup_option(name: &str, app: &AppState) -> Option<String> {
         "monitor-silence" => Some(app.monitor_silence.to_string()),
         "bell-action" => Some(app.bell_action.clone()),
         "visual-bell" => Some(if app.visual_bell { "on".into() } else { "off".into() }),
-        _ => app.environment.get(name).cloned(),
+        _ => {
+            // Try exact name first, then @name for plugin user-option compat
+            // (plugins store @cpu_percentage but format strings use #{cpu_percentage})
+            app.environment.get(name).cloned()
+                .or_else(|| {
+                    if !name.starts_with('@') {
+                        app.environment.get(&format!("@{}", name)).cloned()
+                    } else {
+                        None
+                    }
+                })
+        }
     }
 }
 

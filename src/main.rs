@@ -68,6 +68,7 @@ fn run_main() -> io::Result<()> {
     // IMPORTANT: Only recognize -L as a global flag when it appears BEFORE the subcommand.
     // This avoids conflict with subcommand flags (e.g. select-pane -L, resize-pane -L).
     let mut l_socket_name: Option<String> = None;
+    let mut f_config_file: Option<String> = None;
     {
         let mut i = 1; // skip binary name
         while i < args.len() {
@@ -75,7 +76,10 @@ fn run_main() -> io::Result<()> {
             if arg == "-L" && i + 1 < args.len() {
                 l_socket_name = Some(args[i + 1].clone());
                 i += 2;
-            } else if (arg == "-S" || arg == "-f" || arg == "-t") && i + 1 < args.len() {
+            } else if arg == "-f" && i + 1 < args.len() {
+                f_config_file = Some(args[i + 1].clone());
+                i += 2;
+            } else if (arg == "-S" || arg == "-t") && i + 1 < args.len() {
                 i += 2; // skip other global flag-value pairs
             } else if arg.starts_with('-') {
                 i += 1; // skip single global flags (e.g. -v, -V)
@@ -83,6 +87,12 @@ fn run_main() -> io::Result<()> {
                 break; // hit the subcommand name — stop scanning for global flags
             }
         }
+    }
+
+    // If -f was specified, export it so the server/app loads that config file
+    // instead of the default search path.
+    if let Some(ref config_file) = f_config_file {
+        env::set_var("PSMUX_CONFIG_FILE", config_file);
     }
 
     // Parse -t flag early to set target session for all commands
@@ -137,10 +147,12 @@ fn run_main() -> io::Result<()> {
         }
     }
     
-    // Find the actual command by skipping global -t/-L and their arguments.
+    // Find the actual command by skipping global -t/-L/-f/-S and their arguments.
     // -t is stripped everywhere (the global handler already set PSMUX_TARGET_SESSION).
     // -L is only stripped BEFORE the subcommand (global socket namespace flag);
     // after the subcommand, -L is kept (e.g. select-pane -L, resize-pane -L).
+    // -f is stripped BEFORE the subcommand (global config file flag).
+    // -S is stripped BEFORE the subcommand (global socket path flag).
     let cmd_args: Vec<&String> = {
         let mut result = Vec::new();
         let mut i = 1; // skip binary name
@@ -148,7 +160,7 @@ fn run_main() -> io::Result<()> {
         while i < args.len() {
             if !found_subcommand {
                 // Before subcommand: skip global flags with values
-                if (args[i] == "-t" || args[i] == "-L") && i + 1 < args.len() {
+                if (args[i] == "-t" || args[i] == "-L" || args[i] == "-f" || args[i] == "-S") && i + 1 < args.len() {
                     i += 2; // skip flag and its value
                     continue;
                 } else if args[i] == "-h" || args[i] == "--help"

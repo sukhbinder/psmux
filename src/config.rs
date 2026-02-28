@@ -5,6 +5,20 @@ use crate::types::{AppState, Action, Bind};
 use crate::commands::parse_command_to_action;
 
 pub fn load_config(app: &mut AppState) {
+    // If -f flag was used, load that specific config file instead of default search
+    if let Ok(config_file) = env::var("PSMUX_CONFIG_FILE") {
+        let expanded = if config_file.starts_with('~') {
+            let home = env::var("USERPROFILE").or_else(|_| env::var("HOME")).unwrap_or_default();
+            config_file.replacen('~', &home, 1)
+        } else {
+            config_file
+        };
+        if let Ok(content) = std::fs::read_to_string(&expanded) {
+            parse_config_content(app, &content);
+        }
+        return;
+    }
+
     let home = env::var("USERPROFILE").or_else(|_| env::var("HOME")).unwrap_or_default();
     let paths = vec![
         format!("{}\\.psmux.conf", home),
@@ -73,6 +87,22 @@ pub fn parse_config_line(app: &mut AppState, line: &str) {
         if i + 1 < parts.len() {
             let hook = parts[i].to_string();
             let cmd = parts[i+1..].join(" ");
+            // Strip matching outer quotes (single or double) that wrap the command
+            let cmd = {
+                let trimmed = cmd.trim();
+                let bytes = trimmed.as_bytes();
+                if bytes.len() >= 2 {
+                    let first = bytes[0];
+                    let last = bytes[bytes.len() - 1];
+                    if (first == b'\'' && last == b'\'') || (first == b'"' && last == b'"') {
+                        trimmed[1..trimmed.len()-1].to_string()
+                    } else {
+                        cmd
+                    }
+                } else {
+                    cmd
+                }
+            };
             app.hooks.entry(hook).or_insert_with(Vec::new).push(cmd);
         }
     }
@@ -689,34 +719,53 @@ pub fn format_key_binding(key: &(KeyCode, KeyModifiers)) -> String {
     result
 }
 
-/// Execute a run-shell / run command from config.
+/// Execute a run-shell / run command from config or hooks.
 /// Syntax: run-shell [-b] <command>
-/// Without -b, output is silently discarded (we're in config parsing).
-/// With -b, the command runs in the background.
-fn parse_run_shell(_app: &mut AppState, line: &str) {
-    let parts: Vec<&str> = line.split_whitespace().collect();
-    if parts.len() < 2 { return; }
-    let mut background = false;
+/// Always spawns non-blocking to avoid deadlocks when hooks fire on the
+/// server thread (scripts may call back to psmux via CLI).
+fn parse_run_shell(app: &mut AppState, line: &str) {
+    // Use quote-aware parser to properly handle nested quotes and escapes
+    let args = crate::commands::parse_command_line(line);
+    if args.len() < 2 { return; }
     let mut cmd_parts: Vec<&str> = Vec::new();
-    for p in &parts[1..] {
-        if *p == "-b" { background = true; }
-        else { cmd_parts.push(p); }
+    for arg in &args[1..] {
+        if arg == "-b" { /* background flag — always spawn anyway */ }
+        else { cmd_parts.push(arg); }
     }
     let shell_cmd = cmd_parts.join(" ");
-    // Strip surrounding quotes if present
-    let shell_cmd = shell_cmd.trim_matches(|c| c == '\'' || c == '"');
     if shell_cmd.is_empty() { return; }
 
-    if background {
-        #[cfg(windows)]
-        { let _ = std::process::Command::new("pwsh").args(["-NoProfile", "-Command", shell_cmd]).spawn(); }
-        #[cfg(not(windows))]
-        { let _ = std::process::Command::new("sh").args(["-c", shell_cmd]).spawn(); }
+    // Expand ~ to home directory in the command
+    let shell_cmd = if shell_cmd.contains('~') {
+        let home = std::env::var("USERPROFILE").or_else(|_| std::env::var("HOME")).unwrap_or_default();
+        shell_cmd.replace("~/", &format!("{}/", home)).replace("~\\", &format!("{}\\", home))
     } else {
-        #[cfg(windows)]
-        { let _ = std::process::Command::new("pwsh").args(["-NoProfile", "-Command", shell_cmd]).output(); }
-        #[cfg(not(windows))]
-        { let _ = std::process::Command::new("sh").args(["-c", shell_cmd]).output(); }
+        shell_cmd
+    };
+
+    // Always spawn non-blocking: run-shell commands from hooks may call back
+    // to the psmux server (e.g., `psmux set -g @option value`), which would
+    // deadlock if we blocked the server thread with .output().
+    // Set PSMUX_TARGET_SESSION so child scripts connect to the correct server
+    // (especially important when using -L socket namespaces like in tppanel preview).
+    let target_session = app.port_file_base();
+    #[cfg(windows)]
+    {
+        let mut cmd = std::process::Command::new("pwsh");
+        cmd.args(["-NoProfile", "-Command", &shell_cmd]);
+        if !target_session.is_empty() {
+            cmd.env("PSMUX_TARGET_SESSION", &target_session);
+        }
+        let _ = cmd.spawn();
+    }
+    #[cfg(not(windows))]
+    {
+        let mut cmd = std::process::Command::new("sh");
+        cmd.args(["-c", &shell_cmd]);
+        if !target_session.is_empty() {
+            cmd.env("PSMUX_TARGET_SESSION", &target_session);
+        }
+        let _ = cmd.spawn();
     }
 }
 

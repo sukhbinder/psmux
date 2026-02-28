@@ -146,18 +146,28 @@ pub fn format_action(action: &Action) -> String {
 pub fn parse_command_line(line: &str) -> Vec<String> {
     let mut args = Vec::new();
     let mut current = String::new();
-    let mut in_quotes = false;
+    let mut in_double_quotes = false;
+    let mut in_single_quotes = false;
     let mut escape_next = false;
     
     for c in line.chars() {
         if escape_next {
             current.push(c);
             escape_next = false;
-        } else if c == '\\' && in_quotes {
+        } else if in_single_quotes {
+            // Inside single quotes: everything is literal (no escape processing)
+            if c == '\'' {
+                in_single_quotes = false;
+            } else {
+                current.push(c);
+            }
+        } else if c == '\\' && in_double_quotes {
             escape_next = true;
         } else if c == '"' {
-            in_quotes = !in_quotes;
-        } else if c.is_whitespace() && !in_quotes {
+            in_double_quotes = !in_double_quotes;
+        } else if c == '\'' && !in_double_quotes {
+            in_single_quotes = true;
+        } else if c.is_whitespace() && !in_double_quotes {
             if !current.is_empty() {
                 args.push(current.clone());
                 current.clear();
@@ -684,6 +694,45 @@ pub fn execute_command_string(app: &mut AppState, cmd: &str) -> io::Result<()> {
         "kill-session" => {
             if let Some(port) = app.control_port {
                 let _ = send_control_to_port(port, "kill-session\n");
+            }
+        }
+        "run-shell" | "run" => {
+            // Parse with quote-aware parser to handle nested quotes properly
+            let args = parse_command_line(cmd);
+            let mut cmd_parts: Vec<&str> = Vec::new();
+            for arg in &args[1..] {
+                if arg == "-b" { /* always spawn non-blocking */ }
+                else { cmd_parts.push(arg); }
+            }
+            let shell_cmd = cmd_parts.join(" ");
+            if !shell_cmd.is_empty() {
+                // Expand ~ to home directory
+                let shell_cmd = if shell_cmd.contains('~') {
+                    let home = std::env::var("USERPROFILE").or_else(|_| std::env::var("HOME")).unwrap_or_default();
+                    shell_cmd.replace("~/", &format!("{}/", home)).replace("~\\", &format!("{}\\", home))
+                } else {
+                    shell_cmd
+                };
+                // Set PSMUX_TARGET_SESSION so child scripts connect to the correct server
+                let target_session = app.port_file_base();
+                #[cfg(windows)]
+                {
+                    let mut c = std::process::Command::new("pwsh");
+                    c.args(["-NoProfile", "-Command", &shell_cmd]);
+                    if !target_session.is_empty() {
+                        c.env("PSMUX_TARGET_SESSION", &target_session);
+                    }
+                    let _ = c.spawn();
+                }
+                #[cfg(not(windows))]
+                {
+                    let mut c = std::process::Command::new("sh");
+                    c.args(["-c", &shell_cmd]);
+                    if !target_session.is_empty() {
+                        c.env("PSMUX_TARGET_SESSION", &target_session);
+                    }
+                    let _ = c.spawn();
+                }
             }
         }
         _ => {

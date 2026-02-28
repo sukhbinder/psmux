@@ -349,6 +349,8 @@ pub struct AppState {
     pub command_history_idx: usize,
     /// status-interval: seconds between status-line refreshes (default 15)
     pub status_interval: u64,
+    /// Last time the status-interval hook was fired
+    pub last_status_interval_fire: std::time::Instant,
     /// status-justify: left, centre, right, absolute-centre
     pub status_justify: String,
     /// main-pane-width: percentage for main pane in main-vertical layout (0 = use 60% heuristic)
@@ -477,6 +479,7 @@ impl AppState {
             command_history: Vec::new(),
             command_history_idx: 0,
             status_interval: 15,
+            last_status_interval_fire: std::time::Instant::now(),
             status_justify: "left".to_string(),
             main_pane_width: 0,
             main_pane_height: 0,

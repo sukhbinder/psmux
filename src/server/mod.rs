@@ -91,6 +91,11 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
     let keypath = format!("{}\\{}.key", dir, app.port_file_base());
     let _ = std::fs::write(&keypath, &session_key);
 
+    // Expose the server identity via env var so that child processes spawned
+    // by run-shell (from hooks, keybindings, etc.) can find this server when
+    // they call `psmux set -g ...` or other CLI commands.
+    env::set_var("PSMUX_TARGET_SESSION", app.port_file_base());
+
     // Try to set file permissions to user-only (Windows)
     #[cfg(windows)]
     {
@@ -139,6 +144,14 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
             }
         }
     });
+    // Fire client-attached hooks once at startup so plugins populate initial
+    // data (e.g. CPU/battery) even for detached sessions (tppanel previews).
+    {
+        let cmds: Vec<String> = app.hooks.get("client-attached").cloned().unwrap_or_default();
+        for cmd in cmds {
+            parse_config_line(&mut app, &cmd);
+        }
+    }
     let mut state_dirty = true;
     let mut cached_dump_state = String::new();
     let mut cached_data_version: u64 = 0;
@@ -1846,6 +1859,17 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 state_dirty = true;
             }
         }
+            }
+        }
+        // ── Status-interval timer: fire hooks periodically ──
+        if app.status_interval > 0 {
+            let elapsed = app.last_status_interval_fire.elapsed().as_secs();
+            if elapsed >= app.status_interval {
+                app.last_status_interval_fire = std::time::Instant::now();
+                let cmds: Vec<String> = app.hooks.get("status-interval").cloned().unwrap_or_default();
+                for cmd in cmds {
+                    parse_config_line(&mut app, &cmd);
+                }
             }
         }
         // Check if all windows/panes have exited
