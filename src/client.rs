@@ -2082,7 +2082,8 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, input: 
             } // if let sel_s, sel_e
 
             if session_chooser {
-                let overlay = Block::default().borders(Borders::ALL).title("choose-session (enter=switch, x=kill, esc=close)");
+                let sel_style = crate::rendering::parse_tmux_style(&mode_style_str);
+                let overlay = Block::default().borders(Borders::ALL).title("choose-session (enter=switch, x=kill, esc=close)").border_style(sel_style);
                 let oa = centered_rect(70, 20, content_chunk);
                 f.render_widget(Clear, oa);
                 f.render_widget(&overlay, oa);
@@ -2090,7 +2091,7 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, input: 
                 for (i, (sname, info)) in session_entries.iter().enumerate() {
                     let marker = if sname == &current_session { "*" } else { " " };
                     let line = if i == session_selected {
-                        Line::from(Span::styled(format!("{} {}", marker, info), Style::default().bg(Color::Yellow).fg(Color::Black)))
+                        Line::from(Span::styled(format!("{} {}", marker, info), sel_style))
                     } else {
                         Line::from(format!("{} {}", marker, info))
                     };
@@ -2100,14 +2101,15 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, input: 
                 f.render_widget(para, overlay.inner(oa));
             }
             if tree_chooser {
-                let overlay = Block::default().borders(Borders::ALL).title("choose-tree");
+                let sel_style = crate::rendering::parse_tmux_style(&mode_style_str);
+                let overlay = Block::default().borders(Borders::ALL).title("choose-tree").border_style(sel_style);
                 let oa = centered_rect(60, 30, content_chunk);
                 f.render_widget(Clear, oa);
                 f.render_widget(&overlay, oa);
                 let mut lines: Vec<Line> = Vec::new();
                 for (i, (is_win, wid, _pid, label, _sess)) in tree_entries.iter().enumerate() {
                     let line = if i == tree_selected {
-                        Line::from(Span::styled(label.clone(), Style::default().bg(Color::Yellow).fg(Color::Black)))
+                        Line::from(Span::styled(label.clone(), sel_style))
                     } else if *is_win && *wid == usize::MAX {
                         // Session header — bold
                         Line::from(Span::styled(label.clone(), Style::default().add_modifier(Modifier::BOLD)))
@@ -2198,12 +2200,13 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, input: 
                         let bx = r.x + r.width.saturating_sub(bw) / 2;
                         let by = r.y + r.height.saturating_sub(bh) / 2;
                         let b = Rect { x: bx, y: by, width: bw, height: bh };
-                        let block = Block::default().borders(Borders::ALL).style(Style::default().bg(Color::Yellow).fg(Color::Black));
+                        let pane_sel_style = crate::rendering::parse_tmux_style(&mode_style_str);
+                        let block = Block::default().borders(Borders::ALL).style(pane_sel_style);
                         let inner = block.inner(b);
                         let disp = if i + 1 == 10 { 0 } else { i + 1 };
                         let para = Paragraph::new(Line::from(Span::styled(
                             format!(" {} ", disp),
-                            Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD),
+                            pane_sel_style.add_modifier(Modifier::BOLD),
                         ))).alignment(Alignment::Center);
                         f.render_widget(Clear, b);
                         f.render_widget(block, b);
