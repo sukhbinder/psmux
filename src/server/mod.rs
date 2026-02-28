@@ -1039,6 +1039,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     let keypath = format!("{}\\.psmux\\{}.key", home, app.port_file_base());
                     let _ = std::fs::remove_file(&regpath);
                     let _ = std::fs::remove_file(&keypath);
+                    crate::types::shutdown_persistent_streams();
                     std::process::exit(0);
                 }
                 CtrlReq::HasSession(resp) => {
@@ -1659,6 +1660,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     let keypath = format!("{}\\.psmux\\{}.key", home, app.port_file_base());
                     let _ = std::fs::remove_file(&regpath);
                     let _ = std::fs::remove_file(&keypath);
+                    crate::types::shutdown_persistent_streams();
                     std::process::exit(0);
                 }
                 CtrlReq::WaitFor(channel, op) => {
@@ -1899,9 +1901,11 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
             let keypath = format!("{}\\.psmux\\{}.key", home, app.port_file_base());
             let _ = std::fs::remove_file(&regpath);
             let _ = std::fs::remove_file(&keypath);
-            // Exit immediately — connection handler threads may have
-            // multi-second read timeouts that would delay a clean drop.
-            // This mirrors the KillSession path which also calls exit(0).
+            // Explicitly shut down all persistent client sockets before
+            // exiting.  On Windows, process::exit(0) does not reliably
+            // deliver TCP RST on loopback sockets, leaving clients stuck
+            // in a blocking read_line() forever.
+            crate::types::shutdown_persistent_streams();
             std::process::exit(0);
         }
         // recv_timeout already handles the wait; no additional sleep needed.

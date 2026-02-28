@@ -74,6 +74,11 @@ if line.trim() == "PERSISTENT" {
     let _ = write_stream.set_nodelay(true);
     // Use longer read timeout for persistent mode - client controls pacing
     let _ = r.get_ref().set_read_timeout(Some(Duration::from_millis(5000)));
+
+    // Track this stream so the server can explicitly shut it down before
+    // process::exit(0).  Without this, the client never gets EOF on
+    // Windows loopback sockets.
+    crate::types::register_persistent_stream(&write_stream);
     
     // Spawn a dedicated writer thread so the read loop never blocks
     // waiting for dump-state responses.  The read loop sends oneshot

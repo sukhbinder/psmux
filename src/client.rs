@@ -242,21 +242,36 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, input: 
 
     // Spawn a dedicated reader thread so the event loop never blocks on I/O.
     // The reader thread reads lines from the server and sends them via channel.
-    let _ = reader.get_ref().set_read_timeout(None); // blocking reads in reader thread
+    // Use a 2-second read timeout so the thread unblocks periodically.
+    // Without this, process::exit(0) on the server side may not deliver a
+    // TCP RST promptly on Windows, leaving read_line() blocked forever and
+    // the client stuck after the last pane exits.
+    let _ = reader.get_ref().set_read_timeout(Some(std::time::Duration::from_secs(2)));
     let (frame_tx, frame_rx) = std::sync::mpsc::channel::<String>();
     std::thread::spawn(move || {
         let mut reader = reader;
         let mut buf = String::with_capacity(64 * 1024);
         loop {
             buf.clear();
-            match reader.read_line(&mut buf) {
-                Ok(0) | Err(_) => break,
-                Ok(_) => {
-                    let line = std::mem::take(&mut buf);
-                    buf = String::with_capacity(64 * 1024);
-                    if frame_tx.send(line).is_err() { break; }
+            loop {
+                match reader.read_line(&mut buf) {
+                    Ok(0) => return, // EOF — server closed connection
+                    Ok(_) => break,  // Got a complete line, send it
+                    Err(ref e) if e.kind() == std::io::ErrorKind::TimedOut
+                        || e.kind() == std::io::ErrorKind::WouldBlock =>
+                    {
+                        // Timeout: buf may contain a partial line from a
+                        // previous fill_buf.  Do NOT clear it — read_line
+                        // will resume appending on the next call.  This
+                        // keeps the protocol stream intact.
+                        continue;
+                    }
+                    Err(_) => return, // Real error — connection died
                 }
             }
+            let line = std::mem::take(&mut buf);
+            buf = String::with_capacity(64 * 1024);
+            if frame_tx.send(line).is_err() { return; }
         }
     });
 
