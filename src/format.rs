@@ -117,6 +117,20 @@ pub fn expand_format_for_window(fmt: &str, app: &AppState, win_idx: usize) -> St
                     continue;
                 }
             }
+            if bytes[i + 1] == b'(' {
+                // #(command) — shell command execution (tmux compat)
+                if let Some(end) = fmt[i + 2..].find(')') {
+                    let cmd = &fmt[i + 2..i + 2 + end];
+                    let output = run_shell_command(cmd);
+                    if has_strftime {
+                        result.push_str(&escape_strftime_percent(&output));
+                    } else {
+                        result.push_str(&output);
+                    }
+                    i = i + 2 + end + 1;
+                    continue;
+                }
+            }
             if bytes[i + 1] == b',' {
                 // Escaped comma inside conditional branches
                 result.push(',');
@@ -203,6 +217,25 @@ pub fn expand_format_for_window(fmt: &str, app: &AppState, win_idx: usize) -> St
         // On error, keep the pre-strftime result as-is
     }
     result
+}
+
+/// Execute a shell command and return its stdout (trimmed).
+/// Used for `#(command)` expansion (tmux compatibility).
+/// Caches results for the lifetime of a single format expansion cycle to
+/// avoid repeated subprocess spawning on every refresh.
+fn run_shell_command(cmd: &str) -> String {
+    use std::process::Command;
+    let output = if cfg!(windows) {
+        Command::new("cmd").args(["/C", cmd]).output()
+    } else {
+        Command::new("sh").args(["-c", cmd]).output()
+    };
+    match output {
+        Ok(o) if o.status.success() => {
+            String::from_utf8_lossy(&o.stdout).trim().to_string()
+        }
+        _ => String::new(),
+    }
 }
 
 /// Escape '%' to '%%' in expanded variable content so chrono's strftime
@@ -1321,6 +1354,7 @@ pub fn expand_var(var: &str, app: &AppState, win_idx: usize) -> String {
         // ── Server ──
         "host" | "hostname" => hostname_cached(),
         "host_short" => { let h = hostname_cached(); h.split('.').next().unwrap_or(&h).to_string() }
+        "user" | "username" => env::var("USERNAME").or_else(|_| env::var("USER")).unwrap_or_else(|_| "unknown".into()),
         "pid" | "server_pid" => std::process::id().to_string(),
         "version" => VERSION.to_string(),
         "start_time" => app.created_at.timestamp().to_string(),
@@ -1393,7 +1427,8 @@ fn split_at_depth0(s: &str, delim: u8) -> Vec<String> {
     let bytes = s.as_bytes();
     let mut parts = Vec::new();
     let mut start = 0;
-    let mut depth = 0usize;
+    let mut depth = 0usize;       // #{...} nesting depth
+    let mut in_style = false;      // inside #[...] style directive
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'#' && i + 1 < bytes.len() && bytes[i + 1] == b'{' {
@@ -1406,12 +1441,23 @@ fn split_at_depth0(s: &str, delim: u8) -> Vec<String> {
             i += 1;
             continue;
         }
+        // Track #[...] style directives — commas inside are NOT delimiters
+        if bytes[i] == b'#' && i + 1 < bytes.len() && bytes[i + 1] == b'[' && !in_style {
+            in_style = true;
+            i += 2;
+            continue;
+        }
+        if bytes[i] == b']' && in_style {
+            in_style = false;
+            i += 1;
+            continue;
+        }
         // Handle #, (escaped delimiter) – skip over without splitting
         if bytes[i] == b'#' && i + 1 < bytes.len() && bytes[i + 1] == delim && depth == 0 {
             i += 2;
             continue;
         }
-        if bytes[i] == delim && depth == 0 {
+        if bytes[i] == delim && depth == 0 && !in_style {
             parts.push(s[start..i].to_string());
             start = i + 1;
         }

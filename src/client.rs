@@ -1336,17 +1336,11 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, input: 
                                     rsel_start = None;
                                     rsel_end = None;
                                     selection_changed = true;
-                                    let clip = read_from_system_clipboard().unwrap_or_default();
-                                    if !clip.is_empty() {
-                                        let encoded = base64_encode(&clip);
-                                        cmd_batch.push(format!("send-paste {}\n", encoded));
-                                    } else if is_ssh_mode {
-                                        // Server clipboard empty — query client terminal's
-                                        // clipboard via OSC 52. The response (if the terminal
-                                        // supports it) will arrive as Event::Paste.
-                                        use std::io::Write as _;
-                                        let _ = std::io::stdout().write_all(b"\x1b]52;c;?\x07");
-                                        let _ = std::io::stdout().flush();
+                                    if let Some(text) = read_from_system_clipboard() {
+                                        if !text.is_empty() {
+                                            let encoded = base64_encode(&text);
+                                            cmd_batch.push(format!("send-paste {}\n", encoded));
+                                        }
                                     }
                                 }
                             }
@@ -1464,19 +1458,14 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, input: 
                 paste_confirmed = false;
             } else if paste_confirmed && paste_pend.is_empty() {
                 // Ctrl+V with no buffered chars — read clipboard as fallback
-                let clip = read_from_system_clipboard().unwrap_or_default();
-                if !clip.is_empty() {
-                    if input_log_enabled() {
-                        input_log("paste", &format!("paste CONFIRMED (no buffer), clipboard read len={}", clip.len()));
+                if let Some(text) = read_from_system_clipboard() {
+                    if !text.is_empty() {
+                        if input_log_enabled() {
+                            input_log("paste", &format!("paste CONFIRMED (no buffer), clipboard read len={}", text.len()));
+                        }
+                        let encoded = base64_encode(&text);
+                        cmd_batch.push(format!("send-paste {}\n", encoded));
                     }
-                    let encoded = base64_encode(&clip);
-                    cmd_batch.push(format!("send-paste {}\n", encoded));
-                } else if is_ssh_mode {
-                    // Server clipboard empty — query client terminal's
-                    // clipboard via OSC 52. Response arrives as Event::Paste.
-                    use std::io::Write as _;
-                    let _ = std::io::stdout().write_all(b"\x1b]52;c;?\x07");
-                    let _ = std::io::stdout().flush();
                 }
                 paste_confirmed = false;
             }
