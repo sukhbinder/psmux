@@ -410,6 +410,7 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, input: 
     let mut prev_dump_buf = String::new();
     let mut last_key_send_time: Option<Instant> = None;
     let mut dump_in_flight = false;
+    let mut dump_flight_start: Instant = Instant::now();
 
     // Diagnostic latency log: set PSMUX_LATENCY_LOG=1 to enable
     let latency_log_enabled = env::var("PSMUX_LATENCY_LOG").unwrap_or_default() == "1";
@@ -433,6 +434,11 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, input: 
         // have arrived by then; stop force-dumping to save CPU.
         if let Some(ks) = key_send_instant {
             if ks.elapsed().as_millis() > 30 { key_send_instant = None; }
+        }
+        // Safety valve: if dump_in_flight is stuck for >500ms (e.g. server
+        // did not respond), release it so the client doesn't spin at 1ms.
+        if dump_in_flight && dump_flight_start.elapsed().as_millis() > 500 {
+            dump_in_flight = false;
         }
         // ── STEP 0: Receive latest frame from reader thread (non-blocking) ──
         // Drain channel, keeping only the most recent frame.
@@ -477,7 +483,7 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, input: 
         // dump-state requests (each one is ~50-100KB of JSON over TCP).
         // When idle: 50ms refresh (20fps) saves CPU.
         let poll_ms = if got_frame { 0 }
-            else if dump_in_flight { 1 }
+            else if dump_in_flight { 5 }
             else if force_dump { 0 }
             else if typing_active {
                 // Rate-limit to ~100fps (10ms) when typing.  The snapshot-
@@ -1271,6 +1277,7 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, input: 
             if writer.write_all(b"dump-state\n").is_err() { break; }
             if writer.flush().is_err() { break; }
             dump_in_flight = true;
+            dump_flight_start = Instant::now();
         }
 
         // ── STEP 3: Render if we have a frame ────────────────────────────

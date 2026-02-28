@@ -179,18 +179,31 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
     // to 5ms, adding cumulative latency visible as heavy input lag.
     let mut echo_pending_until: Option<Instant> = None;
 
+    // Track when any client last requested a dump or sent input.
+    // Used to ramp down the server loop frequency when truly idle.
+    let mut last_client_activity = Instant::now();
+
     loop {
-        // Adaptive timeout: 1ms when echo-pending or fresh PTY data just
-        // arrived (so we can serve the waiting dump-state request quickly),
-        // 5ms otherwise to stay idle-friendly.
+        // Adaptive timeout: ramps from 1ms (active typing/echo) through
+        // 5ms (client recently active) up to 50ms (fully idle).  This
+        // dramatically reduces CPU usage when the session is idle while
+        // keeping responsiveness high during interaction.
         let data_ready = crate::types::PTY_DATA_READY.swap(false, std::sync::atomic::Ordering::AcqRel);
         if data_ready {
             state_dirty = true;
         }
         let echo_active = echo_pending_until.map_or(false, |t| t.elapsed().as_millis() < 50);
-        let timeout_ms: u64 = if echo_active || data_ready { 1 } else { 5 };
+        let idle_secs = last_client_activity.elapsed().as_secs();
+        let timeout_ms: u64 = if echo_active || data_ready {
+            1      // Active echo/data: 1ms for maximum responsiveness
+        } else if idle_secs < 2 {
+            5      // Recently active: 5ms (200 Hz)
+        } else {
+            50     // Fully idle: 50ms (20 Hz) — saves ~90% CPU vs 5ms
+        };
         if let Some(rx) = app.control_rx.as_ref() {
             if let Ok(req) = rx.recv_timeout(Duration::from_millis(timeout_ms)) {
+                last_client_activity = Instant::now();
                 let mut pending = vec![req];
                 // Drain any additional queued messages without blocking
                 while let Ok(r) = rx.try_recv() {
@@ -1886,9 +1899,13 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
             let keypath = format!("{}\\.psmux\\{}.key", home, app.port_file_base());
             let _ = std::fs::remove_file(&regpath);
             let _ = std::fs::remove_file(&keypath);
-            break;
+            // Exit immediately — connection handler threads may have
+            // multi-second read timeouts that would delay a clean drop.
+            // This mirrors the KillSession path which also calls exit(0).
+            std::process::exit(0);
         }
         // recv_timeout already handles the wait; no additional sleep needed.
     }
+    #[allow(unreachable_code)]
     Ok(())
 }

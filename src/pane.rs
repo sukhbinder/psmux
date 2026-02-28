@@ -523,8 +523,8 @@ pub fn spawn_reader_thread(
                 }
                 Ok(_) => {
                     zero_reads += 1;
-                    if zero_reads > 200 { break; }
-                    thread::sleep(Duration::from_millis(5));
+                    if zero_reads > 10 { break; }
+                    thread::sleep(Duration::from_millis(1));
                 }
                 Err(_) => break,
             }
