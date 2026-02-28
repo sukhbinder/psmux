@@ -244,7 +244,7 @@ pub fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<
             let status_x = chunks[1].x;
             let mut cursor_x: u16 = status_x;
             for s in combined.iter() {
-                cursor_x += s.content.len() as u16;
+                cursor_x += unicode_width::UnicodeWidthStr::width(s.content.as_ref()) as u16;
             }
 
             // Parse window-status styles
@@ -281,7 +281,7 @@ pub fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<
             for (i, _w) in app.windows.iter().enumerate() {
                 if i > 0 {
                     combined.push(Span::styled(sep.clone(), base_status_style));
-                    cursor_x += sep.len() as u16;
+                    cursor_x += unicode_width::UnicodeWidthStr::width(sep.as_str()) as u16;
                 }
                 let fmt = if i == app.active_idx {
                     &app.window_status_current_format
