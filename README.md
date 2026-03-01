@@ -182,7 +182,7 @@ psmux has a full plugin ecosystem — ports of the most popular tmux plugins, re
 Quick start:
 ```powershell
 # Install the plugin manager
-git clone https://github.com/marlocarlo/psmux-plugins "$env:USERPROFILE\.psmux\plugins\psmux-plugins"
+git clone https://github.com/psmux-plugins/ppm "$env:USERPROFILE\.psmux\plugins\ppm"
 ```
 Then add to your `~/.psmux.conf`:
 ```
@@ -190,6 +190,7 @@ set -g @plugin 'psmux-plugins/ppm'
 set -g @plugin 'psmux-plugins/psmux-sensible'
 run '~/.psmux/plugins/ppm/ppm.ps1'
 ```
+Press `Prefix + I` inside psmux to install the declared plugins.
 
 ## Usage
 
