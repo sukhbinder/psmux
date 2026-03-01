@@ -208,7 +208,7 @@ fn compute_active_rect_json(node: &LayoutJson, area: Rect) -> Option<Rect> {
     }
 }
 
-pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, input: &crate::ssh_input::InputSource) -> io::Result<()> {
+pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::PsmuxWriter>>, input: &crate::ssh_input::InputSource) -> io::Result<()> {
     let name = env::var("PSMUX_SESSION_NAME").unwrap_or_else(|_| "default".to_string());
     let home = env::var("USERPROFILE").or_else(|_| env::var("HOME")).unwrap_or_default();
     let path = format!("{}\\.psmux\\{}.port", home, name);

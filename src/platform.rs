@@ -1324,3 +1324,154 @@ pub mod process_info {
     pub fn get_foreground_cwd(_pid: u32) -> Option<String> { None }
     pub fn has_vt_bridge_descendant(_root_pid: u32) -> bool { false }
 }
+
+// ─── UTF-16 Console Writer (Windows) ────────────────────────────────────
+//
+// On Windows, Rust's `Stdout::write()` uses `WriteFile` which sends raw
+// bytes to the console.  The console interprets those bytes according to
+// the *output code page* (typically 437 or 1252, **not** UTF-8).  Even
+// after calling `SetConsoleOutputCP(65001)`, ConPTY has incomplete support
+// for multi-byte UTF-8 sequences delivered through `WriteFile`, causing
+// characters like ▶ (U+25B6, 3 bytes: E2 96 B6) to render as mojibake
+// (e.g. `â¶`).
+//
+// The fix is to bypass `WriteFile` entirely and use `WriteConsoleW`, which
+// accepts UTF-16 wide strings and renders them correctly regardless of
+// the console codepage.  This wrapper converts incoming UTF-8 bytes to
+// UTF-16 on the fly and writes them with `WriteConsoleW`.
+
+/// A [`std::io::Write`] implementation that renders Unicode correctly on
+/// Windows by converting UTF-8 → UTF-16 and calling `WriteConsoleW`.
+#[cfg(windows)]
+pub struct Utf16ConsoleWriter {
+    handle: *mut std::ffi::c_void,
+}
+
+#[cfg(windows)]
+unsafe impl Send for Utf16ConsoleWriter {}
+
+#[cfg(windows)]
+impl Utf16ConsoleWriter {
+    pub fn new() -> Self {
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn GetStdHandle(nStdHandle: u32) -> *mut std::ffi::c_void;
+        }
+        const STD_OUTPUT_HANDLE: u32 = -11i32 as u32;
+        let handle = unsafe { GetStdHandle(STD_OUTPUT_HANDLE) };
+        Self { handle }
+    }
+}
+
+#[cfg(windows)]
+impl std::io::Write for Utf16ConsoleWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn WriteConsoleW(
+                hConsoleOutput: *mut std::ffi::c_void,
+                lpBuffer: *const u16,
+                nNumberOfCharsToWrite: u32,
+                lpNumberOfCharsWritten: *mut u32,
+                lpReserved: *mut std::ffi::c_void,
+            ) -> i32;
+        }
+
+        // Decode as much valid UTF-8 as possible from the front of `buf`.
+        let s = match std::str::from_utf8(buf) {
+            Ok(s) => s,
+            Err(e) => {
+                let valid_end = e.valid_up_to();
+                if valid_end == 0 {
+                    // Leading bytes form an incomplete sequence (e.g. a
+                    // partial multi-byte char split across writes).
+                    // Fall back to writing the raw byte so the caller can
+                    // make forward progress.
+                    let mut written: u32 = 0;
+                    let single_wide: [u16; 1] = [buf[0] as u16];
+                    unsafe {
+                        WriteConsoleW(
+                            self.handle,
+                            single_wide.as_ptr(),
+                            1,
+                            &mut written,
+                            std::ptr::null_mut(),
+                        );
+                    }
+                    return Ok(1);
+                }
+                // Process only the valid prefix; the caller will retry the rest.
+                unsafe { std::str::from_utf8_unchecked(&buf[..valid_end]) }
+            }
+        };
+
+        if s.is_empty() {
+            return Ok(0);
+        }
+
+        let wide: Vec<u16> = s.encode_utf16().collect();
+        let mut total_written: u32 = 0;
+        let len = wide.len() as u32;
+
+        while total_written < len {
+            let mut written: u32 = 0;
+            let ok = unsafe {
+                WriteConsoleW(
+                    self.handle,
+                    wide.as_ptr().add(total_written as usize),
+                    len - total_written,
+                    &mut written,
+                    std::ptr::null_mut(),
+                )
+            };
+            if ok == 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if written == 0 {
+                break; // avoid infinite loop on unexpected zero-write
+            }
+            total_written += written;
+        }
+
+        // Return the number of *input bytes* consumed.
+        if total_written >= len {
+            Ok(s.len())
+        } else {
+            // Partial write — map UTF-16 code units back to UTF-8 bytes.
+            let mut byte_count = 0;
+            let mut utf16_count: u32 = 0;
+            for ch in s.chars() {
+                let ch_u16_len = ch.len_utf16() as u32;
+                if utf16_count + ch_u16_len > total_written {
+                    break;
+                }
+                utf16_count += ch_u16_len;
+                byte_count += ch.len_utf8();
+            }
+            Ok(byte_count)
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        // WriteConsoleW is unbuffered — nothing to flush.
+        Ok(())
+    }
+}
+
+/// Platform-independent writer type for the TUI backend.
+///
+/// On Windows this uses [`Utf16ConsoleWriter`] (WriteConsoleW) so that
+/// multi-byte UTF-8 characters render correctly.  On other platforms it
+/// is simply [`std::io::Stdout`].
+#[cfg(windows)]
+pub type PsmuxWriter = Utf16ConsoleWriter;
+#[cfg(not(windows))]
+pub type PsmuxWriter = std::io::Stdout;
+
+/// Create a new [`PsmuxWriter`].
+pub fn create_writer() -> PsmuxWriter {
+    #[cfg(windows)]
+    { Utf16ConsoleWriter::new() }
+    #[cfg(not(windows))]
+    { std::io::stdout() }
+}

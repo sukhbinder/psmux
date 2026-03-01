@@ -2327,7 +2327,10 @@ fn run_main() -> io::Result<()> {
     }
     env::set_var("PSMUX_ACTIVE", "1");
 
-    let mut stdout = io::stdout();
+    // Use Utf16ConsoleWriter on Windows (WriteConsoleW) so multi-byte
+    // UTF-8 characters (▶, ◀, etc.) render correctly regardless of the
+    // console codepage.  On other platforms this is just io::stdout().
+    let mut writer = crate::platform::create_writer();
     enable_virtual_terminal_processing();
     enable_raw_mode()?;
 
@@ -2342,9 +2345,9 @@ fn run_main() -> io::Result<()> {
         crate::platform::disable_vti_on_stdin();
     }
 
-    execute!(stdout, EnterAlternateScreen, EnableBlinking, EnableMouseCapture, EnableBracketedPaste)?;
-    apply_cursor_style(&mut stdout)?;
-    let backend = CrosstermBackend::new(stdout);
+    execute!(writer, EnterAlternateScreen, EnableBlinking, EnableMouseCapture, EnableBracketedPaste)?;
+    apply_cursor_style(&mut writer)?;
+    let backend = CrosstermBackend::new(writer);
     let mut terminal = Terminal::new(backend)?;
 
     let input = InputSource::new(use_vt_input)?;
