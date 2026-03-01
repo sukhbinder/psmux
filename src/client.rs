@@ -2247,7 +2247,9 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                        .replace("#F", if w.active { "*" } else { "" })
                 };
                 if i > 0 {
-                    tab_spans_all.push(Span::styled(win_status_sep.clone(), sb_base));
+                    // Parse inline styles in separator (e.g. "#[fg=#44475a]|")
+                    let sep_spans = crate::rendering::parse_inline_styles(&win_status_sep, sb_base);
+                    tab_spans_all.extend(sep_spans);
                 }
                 let fallback_style = if w.active {
                     if let Some((fg, bg, bold)) = win_status_current_style {

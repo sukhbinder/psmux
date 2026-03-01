@@ -280,8 +280,11 @@ pub fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<
             let sep = &app.window_status_separator;
             for (i, _w) in app.windows.iter().enumerate() {
                 if i > 0 {
-                    combined.push(Span::styled(sep.clone(), base_status_style));
-                    cursor_x += unicode_width::UnicodeWidthStr::width(sep.as_str()) as u16;
+                    // Parse inline styles in separator (e.g. "#[fg=#44475a]|")
+                    let sep_spans = parse_inline_styles(sep, base_status_style);
+                    let sep_w = spans_visual_width(&sep_spans) as u16;
+                    combined.extend(sep_spans);
+                    cursor_x += sep_w;
                 }
                 let fmt = if i == app.active_idx {
                     &app.window_status_current_format
