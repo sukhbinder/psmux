@@ -289,6 +289,7 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
     let mut tree_chooser = false;
     let mut tree_entries: Vec<(bool, usize, usize, String, String)> = Vec::new();  // (is_win, id, sub_id, label, session_name)
     let mut tree_selected: usize = 0;
+    let mut tree_scroll: usize = 0;
     let mut session_chooser = false;
     let mut session_entries: Vec<(String, String)> = Vec::new();
     let mut session_selected: usize = 0;
@@ -357,6 +358,7 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
     fn default_status_left_length() -> usize { 10 }
     fn default_status_right_length() -> usize { 40 }
     fn default_status_lines() -> usize { 1 }
+    fn default_status_visible() -> bool { true }
 
     /// A single key binding synced from the server.
     #[derive(serde::Deserialize, Clone, Debug)]
@@ -438,6 +440,10 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
         /// status-justify: "left", "centre", or "right"
         #[serde(default)]
         status_justify: Option<String>,
+        /// Whether the status bar is visible (true) or hidden (false).
+        /// Corresponds to `set-option status on/off`.
+        #[serde(default = "default_status_visible")]
+        status_visible: bool,
         /// Configured cursor style as DECSCUSR code (0-6) from server.
         /// Used as fallback when no child process has set a cursor shape.
         #[serde(default)]
@@ -691,8 +697,17 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                             if !paste_pend.is_empty() {
                                 let is_bufferable = match key.code {
                                     KeyCode::Char(' ') => true,
-                                    KeyCode::Char(_) => !key.modifiers.contains(KeyModifiers::CONTROL)
-                                                     && !key.modifiers.contains(KeyModifiers::ALT),
+                                    KeyCode::Char(c) => {
+                                        // AltGr on Windows is reported as Ctrl+Alt.
+                                        // Non-letter chars with Ctrl+Alt are AltGr-produced
+                                        // (e.g. \ @ { } on German/Czech keyboards) and
+                                        // should be bufferable like normal text.
+                                        let is_altgr = key.modifiers.contains(KeyModifiers::CONTROL)
+                                            && key.modifiers.contains(KeyModifiers::ALT)
+                                            && !c.is_ascii_lowercase();
+                                        is_altgr || (!key.modifiers.contains(KeyModifiers::CONTROL)
+                                                  && !key.modifiers.contains(KeyModifiers::ALT))
+                                    }
                                     KeyCode::Enter | KeyCode::Tab => true, // buffered when pend non-empty
                                     _ => false,
                                 };
@@ -829,6 +844,7 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                                     tree_chooser = true;
                                     tree_entries.clear();
                                     tree_selected = 0;
+                                    tree_scroll = 0;
                                     // Query ALL sessions (like tmux choose-tree)
                                     let dir = format!("{}\\.psmux", home);
                                     if let Ok(entries) = std::fs::read_dir(&dir) {
@@ -1173,6 +1189,30 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                                     #[cfg(not(windows))]
                                     {
                                         cmd_batch.push("send-key space\n".into());
+                                    }
+                                }
+                                // AltGr detection: On Windows, AltGr is reported as
+                                // Ctrl+Alt.  Non-lowercase-letter chars with Ctrl+Alt
+                                // are AltGr-produced (e.g. \ @ { } [ ] | ~ on
+                                // German/Czech keyboards) — treat as plain text.
+                                KeyCode::Char(c) if key.modifiers.contains(KeyModifiers::CONTROL)
+                                    && key.modifiers.contains(KeyModifiers::ALT)
+                                    && !c.is_ascii_lowercase() => {
+                                    #[cfg(windows)]
+                                    {
+                                        paste_pend.push(c);
+                                        if paste_pend_start.is_none() {
+                                            paste_pend_start = Some(Instant::now());
+                                        }
+                                    }
+                                    #[cfg(not(windows))]
+                                    {
+                                        let escaped = match c {
+                                            '"' => "\\\"".to_string(),
+                                            '\\' => "\\\\".to_string(),
+                                            _ => c.to_string(),
+                                        };
+                                        cmd_batch.push(format!("send-text \"{}\"\n", escaped));
                                     }
                                 }
                                 KeyCode::Char(c) if key.modifiers.contains(KeyModifiers::CONTROL) && key.modifiers.contains(KeyModifiers::ALT) => {
@@ -1647,7 +1687,7 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                 custom_status_right = Some(sr);
             }
         }
-        let status_lines = state.status_lines;
+        let status_lines = if state.status_visible { state.status_lines } else { 0 };
         let status_format = state.status_format;
         // Update pane border styles
         if let Some(ref pbs) = state.pane_border_style {
@@ -2103,11 +2143,25 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
             if tree_chooser {
                 let sel_style = crate::rendering::parse_tmux_style(&mode_style_str);
                 let overlay = Block::default().borders(Borders::ALL).title("choose-tree").border_style(sel_style);
-                let oa = centered_rect(60, 30, content_chunk);
+                // Use dynamic height: content lines + 2 (borders), capped to
+                // available space so the overlay never exceeds the terminal.
+                let tree_h = ((tree_entries.len() as u16).saturating_add(2))
+                    .max(5)
+                    .min(content_chunk.height.saturating_sub(2));
+                let oa = centered_rect(60, tree_h, content_chunk);
                 f.render_widget(Clear, oa);
                 f.render_widget(&overlay, oa);
+                let inner = overlay.inner(oa);
+                let visible_h = inner.height as usize;
+                // Keep tree_selected in view
+                if tree_selected >= tree_scroll + visible_h {
+                    tree_scroll = tree_selected.saturating_sub(visible_h - 1);
+                }
+                if tree_selected < tree_scroll {
+                    tree_scroll = tree_selected;
+                }
                 let mut lines: Vec<Line> = Vec::new();
-                for (i, (is_win, wid, _pid, label, _sess)) in tree_entries.iter().enumerate() {
+                for (i, (is_win, wid, _pid, label, _sess)) in tree_entries.iter().enumerate().skip(tree_scroll).take(visible_h) {
                     let line = if i == tree_selected {
                         Line::from(Span::styled(label.clone(), sel_style))
                     } else if *is_win && *wid == usize::MAX {
@@ -2119,7 +2173,7 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                     lines.push(line);
                 }
                 let para = Paragraph::new(Text::from(lines));
-                f.render_widget(para, overlay.inner(oa));
+                f.render_widget(para, inner);
             }
             if keys_viewer {
                 // Proportional overlay: 90% width, up to 80% height

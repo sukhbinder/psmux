@@ -178,10 +178,11 @@ pub fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<
         terminal.draw(|f| {
             let area = f.area();
             let status_at_top = app.status_position == "top";
+            let status_h: u16 = if app.status_visible { 1 } else { 0 };
             let constraints = if status_at_top {
-                vec![Constraint::Length(1), Constraint::Min(1)]
+                vec![Constraint::Length(status_h), Constraint::Min(1)]
             } else {
-                vec![Constraint::Min(1), Constraint::Length(1)]
+                vec![Constraint::Min(1), Constraint::Length(status_h)]
             };
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
@@ -368,7 +369,10 @@ pub fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<
                         )));
                     }
                 }
-                let height = (lines.len() as u16 + 2).min(20);
+                // Cap overlay height to available terminal space
+                let height = (lines.len() as u16 + 2)
+                    .min(20)
+                    .min(area.height.saturating_sub(2));
                 let overlay = Paragraph::new(Text::from(lines)).block(Block::default().borders(Borders::ALL).title("choose-tree"));
                 let oa = centered_rect(70, height, area);
                 f.render_widget(Clear, oa);
