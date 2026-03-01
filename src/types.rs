@@ -37,6 +37,12 @@ pub struct Pane {
     /// When true, the child's console input has VTI set, meaning VT mouse
     /// sequences can be delivered.  Refreshed every 2 seconds.
     pub vti_mode_cache: Option<(Instant, bool)>,
+    /// Cached ENABLE_MOUSE_INPUT query result (for mouse injection heuristic).
+    /// When true, the child's console has ENABLE_MOUSE_INPUT set, meaning it
+    /// reads MOUSE_EVENT records via ReadConsoleInputW (crossterm/ratatui apps).
+    /// When false, the child expects VT SGR mouse sequences (nvim, vim).
+    /// Refreshed every 2 seconds.
+    pub mouse_input_cache: Option<(Instant, bool)>,
     /// Last cursor shape requested by the child process via DECSCUSR (`\x1b[N q`).
     /// 0 = no override (use PSMUX_CURSOR_STYLE default), 1-6 = DECSCUSR values.
     pub cursor_shape: std::sync::Arc<std::sync::atomic::AtomicU8>,

@@ -489,9 +489,10 @@ pub mod mouse_inject {
                 return false;
             }
 
-            // Ensure ENABLE_MOUSE_INPUT is set on the console so mouse events
-            // are delivered to the foreground process (critical for WSL apps
-            // like htop that rely on wsl.exe relaying MOUSE_EVENT records).
+            // Temporarily ensure ENABLE_MOUSE_INPUT is set on the console so
+            // mouse events are delivered to the foreground process.  Save and
+            // restore original mode to prevent polluting the child's console
+            // state (which would confuse query_mouse_input_enabled).
             {
                 // Re-use the top-level GetConsoleMode/SetConsoleMode declarations
                 // (they use *mut c_void for the handle parameter).
@@ -503,9 +504,8 @@ pub mod mouse_inject {
                 let mut mode: u32 = 0;
                 let h = handle as *mut c_void;
                 if GetConsoleMode(h, &mut mode) != 0 {
-                    let desired = mode | ENABLE_MOUSE_INPUT | ENABLE_EXTENDED_FLAGS;
-                    // Also disable Quick Edit mode which intercepts mouse events
-                    let desired = desired & !ENABLE_QUICK_EDIT_MODE;
+                    let desired = (mode | ENABLE_MOUSE_INPUT | ENABLE_EXTENDED_FLAGS)
+                                  & !ENABLE_QUICK_EDIT_MODE;
                     if desired != mode {
                         SetConsoleMode(h, desired);
                     }
@@ -540,6 +540,67 @@ pub mod mouse_inject {
             }
 
             result != 0
+        }
+    }
+
+    /// Query whether the child process's console input has
+    /// ENABLE_MOUSE_INPUT (0x0010) set.
+    ///
+    /// When this flag is ON, the child uses ReadConsoleInputW to read
+    /// MOUSE_EVENT INPUT_RECORDs (crossterm/ratatui apps).  When OFF, the
+    /// child reads input as text (ReadConsole/ReadFile) and expects VT
+    /// mouse sequences delivered as KEY_EVENT records (nvim, vim).
+    pub fn query_mouse_input_enabled(child_pid: u32) -> Option<bool> {
+        unsafe {
+            let had_console = GetConsoleWindow() != 0;
+            FreeConsole();
+
+            if AttachConsole(child_pid) == 0 {
+                debug_log(&format!("query_mouse_input_enabled: AttachConsole({}) FAILED", child_pid));
+                if had_console { AttachConsole(ATTACH_PARENT_PROCESS); }
+                return None;
+            }
+
+            let conin: [u16; 7] = [
+                'C' as u16, 'O' as u16, 'N' as u16,
+                'I' as u16, 'N' as u16, '$' as u16, 0,
+            ];
+            let handle = CreateFileW(
+                conin.as_ptr(),
+                GENERIC_READ,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                std::ptr::null(),
+                OPEN_EXISTING,
+                0,
+                std::ptr::null(),
+            );
+
+            if handle == INVALID_HANDLE || handle == 0 {
+                debug_log("query_mouse_input_enabled: CreateFileW(CONIN$) FAILED");
+                FreeConsole();
+                if had_console { AttachConsole(ATTACH_PARENT_PROCESS); }
+                return None;
+            }
+
+            #[link(name = "kernel32")]
+            extern "system" {
+                fn GetConsoleMode(hConsoleHandle: *mut c_void, lpMode: *mut u32) -> i32;
+            }
+            let mut mode: u32 = 0;
+            let ok = GetConsoleMode(handle as *mut c_void, &mut mode);
+
+            CloseHandle(handle);
+            FreeConsole();
+            if had_console { AttachConsole(ATTACH_PARENT_PROCESS); }
+
+            if ok == 0 {
+                debug_log("query_mouse_input_enabled: GetConsoleMode FAILED");
+                return None;
+            }
+
+            let mouse_input = (mode & ENABLE_MOUSE_INPUT) != 0;
+            debug_log(&format!("query_mouse_input_enabled: pid={} mode=0x{:04X} ENABLE_MOUSE_INPUT={}", child_pid, mode, mouse_input));
+            Some(mouse_input)
         }
     }
 
@@ -585,22 +646,23 @@ pub mod mouse_inject {
                 return false;
             }
 
-            // Ensure ENABLE_VIRTUAL_TERMINAL_INPUT is set so wsl.exe receives
-            // VT sequences as-is through KEY_EVENT records.
-            {
-                #[link(name = "kernel32")]
-                extern "system" {
-                    fn GetConsoleMode(hConsoleHandle: *mut c_void, lpMode: *mut u32) -> i32;
-                    fn SetConsoleMode(hConsoleHandle: *mut c_void, dwMode: u32) -> i32;
-                }
-                let mut mode: u32 = 0;
-                let h = handle as *mut c_void;
-                if GetConsoleMode(h, &mut mode) != 0 {
-                    let desired = (mode | ENABLE_MOUSE_INPUT | ENABLE_EXTENDED_FLAGS | 0x0200 /*ENABLE_VIRTUAL_TERMINAL_INPUT*/)
-                                  & !ENABLE_QUICK_EDIT_MODE;
-                    if desired != mode {
-                        SetConsoleMode(h, desired);
-                    }
+            // Save original console mode, temporarily set VTI for injection,
+            // then restore after writing.  This prevents mode pollution which
+            // would confuse the query_mouse_input_enabled() heuristic used to
+            // distinguish console-API apps (crossterm) from VT apps (nvim).
+            #[link(name = "kernel32")]
+            extern "system" {
+                fn GetConsoleMode(hConsoleHandle: *mut c_void, lpMode: *mut u32) -> i32;
+                fn SetConsoleMode(hConsoleHandle: *mut c_void, dwMode: u32) -> i32;
+            }
+            let h = handle as *mut c_void;
+            let mut original_mode: u32 = 0;
+            let got_mode = GetConsoleMode(h, &mut original_mode) != 0;
+            if got_mode {
+                let desired = (original_mode | ENABLE_EXTENDED_FLAGS | 0x0200 /*ENABLE_VIRTUAL_TERMINAL_INPUT*/)
+                              & !ENABLE_QUICK_EDIT_MODE;
+                if desired != original_mode {
+                    SetConsoleMode(h, desired);
                 }
             }
 
@@ -650,6 +712,11 @@ pub mod mouse_inject {
                 records.len() as u32,
                 &mut written,
             );
+
+            // Restore original console mode to prevent pollution
+            if got_mode {
+                SetConsoleMode(h, original_mode);
+            }
 
             CloseHandle(handle);
             FreeConsole();
@@ -795,6 +862,7 @@ pub mod mouse_inject {
     pub fn send_mouse_event(_pid: u32, _col: i16, _row: i16, _btn: u32, _flags: u32, _reattach: bool) -> bool { false }
     pub fn send_vt_sequence(_pid: u32, _sequence: &[u8]) -> bool { false }
     pub fn query_vti_enabled(_pid: u32) -> Option<bool> { None }
+    pub fn query_mouse_input_enabled(_pid: u32) -> Option<bool> { None }
     pub fn send_bracketed_paste(_pid: u32, _text: &str, _bracket: bool) -> bool { false }
 }
 
