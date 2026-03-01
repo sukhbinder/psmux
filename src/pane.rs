@@ -507,7 +507,10 @@ pub fn spawn_reader_thread(
     cursor_shape: Arc<std::sync::atomic::AtomicU8>,
 ) {
     thread::spawn(move || {
-        let mut local = [0u8; 8192];
+        // 64KB buffer: captures most full-screen TUI paints in a single
+        // read(), preventing partial-frame rendering ("curtain effect")
+        // that occurs when ConPTY output is split across multiple small reads.
+        let mut local = vec![0u8; 65536];
         let mut zero_reads: u32 = 0;
         loop {
             match reader.read(&mut local) {

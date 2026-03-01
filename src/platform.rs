@@ -1352,12 +1352,12 @@ pub mod process_info {
 #[cfg(windows)]
 pub struct Utf16ConsoleWriter {
     handle: *mut std::ffi::c_void,
-    /// Accumulates trailing bytes of an incomplete UTF-8 sequence between
-    /// `write()` calls.  A valid UTF-8 character is at most 4 bytes, so a
-    /// fixed-size buffer suffices.
-    pending: [u8; 4],
-    /// Number of valid bytes currently stored in `pending`.
-    pending_len: usize,
+    /// Frame buffer: accumulates all `write()` output so that `flush()`
+    /// can emit the complete frame as a single `WriteConsoleW` call.
+    /// This eliminates the visible top-to-bottom "curtain" repaint that
+    /// occurs when ratatui's many small per-cell writes are each sent to
+    /// the console individually.
+    frame_buf: Vec<u8>,
 }
 
 #[cfg(windows)]
@@ -1372,7 +1372,9 @@ impl Utf16ConsoleWriter {
         }
         const STD_OUTPUT_HANDLE: u32 = -11i32 as u32;
         let handle = unsafe { GetStdHandle(STD_OUTPUT_HANDLE) };
-        Self { handle, pending: [0u8; 4], pending_len: 0 }
+        // Pre-allocate ~128KB for the frame buffer — large enough for a
+        // typical full-screen frame's escape sequences without reallocation.
+        Self { handle, frame_buf: Vec::with_capacity(131072) }
     }
 
     /// Write a valid UTF-8 string via `WriteConsoleW`.
@@ -1418,106 +1420,55 @@ impl Utf16ConsoleWriter {
     }
 }
 
-/// How many bytes a UTF-8 leading byte expects for the full character.
-/// Returns 0 for continuation bytes (10xxxxxx) and 1 for ASCII.
-#[cfg(windows)]
-fn utf8_char_width(b: u8) -> usize {
-    match b {
-        0x00..=0x7F => 1,
-        0xC0..=0xDF => 2,
-        0xE0..=0xEF => 3,
-        0xF0..=0xF7 => 4,
-        _ => 0, // continuation or invalid
-    }
-}
-
 #[cfg(windows)]
 impl std::io::Write for Utf16ConsoleWriter {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        if buf.is_empty() {
-            return Ok(0);
-        }
-
-        // ── 1. Complete any pending partial character ────────────────
-        let mut consumed: usize = 0; // bytes consumed from `buf`
-
-        if self.pending_len > 0 {
-            // We have the start of a multi-byte char from a previous call.
-            let expected = utf8_char_width(self.pending[0]);
-            if expected == 0 {
-                // Invalid leading byte — discard it.
-                self.pending_len = 0;
-            } else {
-                let need = expected - self.pending_len;
-                let avail = need.min(buf.len());
-                self.pending[self.pending_len..self.pending_len + avail]
-                    .copy_from_slice(&buf[..avail]);
-                self.pending_len += avail;
-                consumed = avail;
-
-                if self.pending_len >= expected {
-                    // We have the complete character — write it.
-                    if let Ok(s) = std::str::from_utf8(&self.pending[..expected]) {
-                        self.write_wide(s)?;
-                    }
-                    self.pending_len = 0;
-                } else {
-                    // Still not enough bytes — store what we have and wait.
-                    return Ok(consumed);
-                }
-            }
-        }
-
-        // ── 2. Process the remainder of `buf` ───────────────────────
-        let rest = &buf[consumed..];
-        if rest.is_empty() {
-            return Ok(consumed);
-        }
-
-        // Find the longest valid UTF-8 prefix.
-        match std::str::from_utf8(rest) {
-            Ok(s) => {
-                self.write_wide(s)?;
-                consumed += s.len();
-            }
-            Err(e) => {
-                let valid_end = e.valid_up_to();
-                if valid_end > 0 {
-                    // Write the valid prefix.
-                    let s = unsafe { std::str::from_utf8_unchecked(&rest[..valid_end]) };
-                    self.write_wide(s)?;
-                    consumed += valid_end;
-                }
-
-                // The bytes after the valid prefix are the start of an
-                // incomplete multi-byte sequence (the buffer was split
-                // mid-character).  Stash them in `pending`.
-                let trailing = &rest[valid_end..];
-
-                // Determine how many trailing bytes to keep.  If
-                // `error_len()` is Some, those bytes are genuinely
-                // invalid (not just incomplete) — skip them.
-                if let Some(bad_len) = e.error_len() {
-                    // Invalid sequence — skip the bad bytes.
-                    consumed += bad_len;
-                } else {
-                    // Incomplete sequence at end of buffer.
-                    let n = trailing.len().min(4);
-                    self.pending[..n].copy_from_slice(&trailing[..n]);
-                    self.pending_len = n;
-                    consumed += n;
-                }
-            }
-        }
-
-        Ok(consumed)
+        // Append to the frame buffer — actual console output is deferred
+        // until flush(), so all of ratatui's per-cell writes within a
+        // single draw() call are batched into one atomic WriteConsoleW.
+        self.frame_buf.extend_from_slice(buf);
+        Ok(buf.len())
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
-        // If there are pending bytes they are an incomplete character
-        // that will never be completed (flush = end of frame).
-        // Discard them — writing partial chars would produce garbling.
-        self.pending_len = 0;
+        if self.frame_buf.is_empty() {
+            return Ok(());
+        }
+
+        // Convert the buffered UTF-8 to a valid string, handling any
+        // incomplete trailing multi-byte sequence.
+        let (valid, remainder) = match std::str::from_utf8(&self.frame_buf) {
+            Ok(s) => (s.len(), 0),
+            Err(e) => {
+                let valid_end = e.valid_up_to();
+                // If error_len is None, trailing bytes are an incomplete
+                // sequence — they'll be completed by the next write.
+                // If it's Some, those bytes are genuinely invalid — skip.
+                let skip = e.error_len().unwrap_or(0);
+                (valid_end, self.frame_buf.len() - valid_end - skip)
+            }
+        };
+
+        if valid > 0 {
+            // Safety: we just validated this range is valid UTF-8.
+            let s = unsafe { std::str::from_utf8_unchecked(&self.frame_buf[..valid]) };
+            self.write_wide(s)?;
+        }
+
+        // Keep any incomplete trailing bytes for the next flush.
+        if remainder > 0 {
+            let start = self.frame_buf.len() - remainder;
+            // Rotate trailing bytes to front.
+            let mut i = 0;
+            while i < remainder {
+                self.frame_buf[i] = self.frame_buf[start + i];
+                i += 1;
+            }
+            self.frame_buf.truncate(remainder);
+        } else {
+            self.frame_buf.clear();
+        }
+
         Ok(())
     }
 }
