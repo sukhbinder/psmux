@@ -200,8 +200,14 @@ pub fn expand_format_for_window(fmt: &str, app: &AppState, win_idx: usize) -> St
                 _ => {}
             }
         }
-        result.push(bytes[i] as char);
-        i += 1;
+        // Advance by full UTF-8 character (not single byte) to preserve
+        // multi-byte chars like ▶ (U+25B6, 3 bytes) and ◀ (U+25C0).
+        if let Some(ch) = fmt[i..].chars().next() {
+            result.push(ch);
+            i += ch.len_utf8();
+        } else {
+            i += 1;
+        }
     }
     // Expand strftime %-sequences only if the ORIGINAL format contained '%'
     if has_strftime && result.contains('%') {
