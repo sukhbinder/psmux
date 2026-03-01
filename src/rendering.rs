@@ -399,16 +399,22 @@ pub fn parse_status(fmt: &str, app: &AppState, time_str: &str) -> Vec<Span<'stat
 // ─── UI layout helpers ──────────────────────────────────────────────────────
 
 pub fn centered_rect(percent_x: u16, height: u16, r: Rect) -> Rect {
+    // Clamp requested height to the available area so we never
+    // produce a Rect that extends beyond the buffer.
+    let clamped_h = height.min(r.height);
     let popup_layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Percentage(50),
-            Constraint::Length(height),
+            Constraint::Length(clamped_h),
             Constraint::Percentage(50),
         ])
         .split(r);
     let middle = popup_layout[1];
     let width = (middle.width * percent_x) / 100;
     let x = middle.x + (middle.width - width) / 2;
-    Rect { x, y: middle.y, width, height }
+    // Use the Layout-allocated height, not the raw parameter,
+    // to guarantee the rect stays within the parent area.
+    let final_h = middle.height.min(clamped_h);
+    Rect { x, y: middle.y, width, height: final_h }
 }
