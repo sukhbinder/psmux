@@ -1342,9 +1342,22 @@ pub mod process_info {
 
 /// A [`std::io::Write`] implementation that renders Unicode correctly on
 /// Windows by converting UTF-8 → UTF-16 and calling `WriteConsoleW`.
+///
+/// Crucially, this buffers incomplete trailing UTF-8 sequences between
+/// `write()` calls.  `write_all()` may split a buffer at any byte
+/// boundary — including in the middle of a multi-byte character like
+/// `▶` (U+25B6, bytes E2 96 B6).  Without buffering, each orphaned byte
+/// would be emitted as a Latin-1 code point (`â`, `¶`), producing the
+/// exact garbling the user sees.
 #[cfg(windows)]
 pub struct Utf16ConsoleWriter {
     handle: *mut std::ffi::c_void,
+    /// Accumulates trailing bytes of an incomplete UTF-8 sequence between
+    /// `write()` calls.  A valid UTF-8 character is at most 4 bytes, so a
+    /// fixed-size buffer suffices.
+    pending: [u8; 4],
+    /// Number of valid bytes currently stored in `pending`.
+    pending_len: usize,
 }
 
 #[cfg(windows)]
@@ -1359,13 +1372,15 @@ impl Utf16ConsoleWriter {
         }
         const STD_OUTPUT_HANDLE: u32 = -11i32 as u32;
         let handle = unsafe { GetStdHandle(STD_OUTPUT_HANDLE) };
-        Self { handle }
+        Self { handle, pending: [0u8; 4], pending_len: 0 }
     }
-}
 
-#[cfg(windows)]
-impl std::io::Write for Utf16ConsoleWriter {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+    /// Write a valid UTF-8 string via `WriteConsoleW`.
+    fn write_wide(&self, s: &str) -> std::io::Result<()> {
+        if s.is_empty() {
+            return Ok(());
+        }
+
         #[link(name = "kernel32")]
         extern "system" {
             fn WriteConsoleW(
@@ -1377,49 +1392,16 @@ impl std::io::Write for Utf16ConsoleWriter {
             ) -> i32;
         }
 
-        // Decode as much valid UTF-8 as possible from the front of `buf`.
-        let s = match std::str::from_utf8(buf) {
-            Ok(s) => s,
-            Err(e) => {
-                let valid_end = e.valid_up_to();
-                if valid_end == 0 {
-                    // Leading bytes form an incomplete sequence (e.g. a
-                    // partial multi-byte char split across writes).
-                    // Fall back to writing the raw byte so the caller can
-                    // make forward progress.
-                    let mut written: u32 = 0;
-                    let single_wide: [u16; 1] = [buf[0] as u16];
-                    unsafe {
-                        WriteConsoleW(
-                            self.handle,
-                            single_wide.as_ptr(),
-                            1,
-                            &mut written,
-                            std::ptr::null_mut(),
-                        );
-                    }
-                    return Ok(1);
-                }
-                // Process only the valid prefix; the caller will retry the rest.
-                unsafe { std::str::from_utf8_unchecked(&buf[..valid_end]) }
-            }
-        };
-
-        if s.is_empty() {
-            return Ok(0);
-        }
-
         let wide: Vec<u16> = s.encode_utf16().collect();
-        let mut total_written: u32 = 0;
+        let mut total: u32 = 0;
         let len = wide.len() as u32;
-
-        while total_written < len {
+        while total < len {
             let mut written: u32 = 0;
             let ok = unsafe {
                 WriteConsoleW(
                     self.handle,
-                    wide.as_ptr().add(total_written as usize),
-                    len - total_written,
+                    wide.as_ptr().add(total as usize),
+                    len - total,
                     &mut written,
                     std::ptr::null_mut(),
                 )
@@ -1428,32 +1410,114 @@ impl std::io::Write for Utf16ConsoleWriter {
                 return Err(std::io::Error::last_os_error());
             }
             if written == 0 {
-                break; // avoid infinite loop on unexpected zero-write
+                break;
             }
-            total_written += written;
+            total += written;
+        }
+        Ok(())
+    }
+}
+
+/// How many bytes a UTF-8 leading byte expects for the full character.
+/// Returns 0 for continuation bytes (10xxxxxx) and 1 for ASCII.
+#[cfg(windows)]
+fn utf8_char_width(b: u8) -> usize {
+    match b {
+        0x00..=0x7F => 1,
+        0xC0..=0xDF => 2,
+        0xE0..=0xEF => 3,
+        0xF0..=0xF7 => 4,
+        _ => 0, // continuation or invalid
+    }
+}
+
+#[cfg(windows)]
+impl std::io::Write for Utf16ConsoleWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
         }
 
-        // Return the number of *input bytes* consumed.
-        if total_written >= len {
-            Ok(s.len())
-        } else {
-            // Partial write — map UTF-16 code units back to UTF-8 bytes.
-            let mut byte_count = 0;
-            let mut utf16_count: u32 = 0;
-            for ch in s.chars() {
-                let ch_u16_len = ch.len_utf16() as u32;
-                if utf16_count + ch_u16_len > total_written {
-                    break;
+        // ── 1. Complete any pending partial character ────────────────
+        let mut consumed: usize = 0; // bytes consumed from `buf`
+
+        if self.pending_len > 0 {
+            // We have the start of a multi-byte char from a previous call.
+            let expected = utf8_char_width(self.pending[0]);
+            if expected == 0 {
+                // Invalid leading byte — discard it.
+                self.pending_len = 0;
+            } else {
+                let need = expected - self.pending_len;
+                let avail = need.min(buf.len());
+                self.pending[self.pending_len..self.pending_len + avail]
+                    .copy_from_slice(&buf[..avail]);
+                self.pending_len += avail;
+                consumed = avail;
+
+                if self.pending_len >= expected {
+                    // We have the complete character — write it.
+                    if let Ok(s) = std::str::from_utf8(&self.pending[..expected]) {
+                        self.write_wide(s)?;
+                    }
+                    self.pending_len = 0;
+                } else {
+                    // Still not enough bytes — store what we have and wait.
+                    return Ok(consumed);
                 }
-                utf16_count += ch_u16_len;
-                byte_count += ch.len_utf8();
             }
-            Ok(byte_count)
         }
+
+        // ── 2. Process the remainder of `buf` ───────────────────────
+        let rest = &buf[consumed..];
+        if rest.is_empty() {
+            return Ok(consumed);
+        }
+
+        // Find the longest valid UTF-8 prefix.
+        match std::str::from_utf8(rest) {
+            Ok(s) => {
+                self.write_wide(s)?;
+                consumed += s.len();
+            }
+            Err(e) => {
+                let valid_end = e.valid_up_to();
+                if valid_end > 0 {
+                    // Write the valid prefix.
+                    let s = unsafe { std::str::from_utf8_unchecked(&rest[..valid_end]) };
+                    self.write_wide(s)?;
+                    consumed += valid_end;
+                }
+
+                // The bytes after the valid prefix are the start of an
+                // incomplete multi-byte sequence (the buffer was split
+                // mid-character).  Stash them in `pending`.
+                let trailing = &rest[valid_end..];
+
+                // Determine how many trailing bytes to keep.  If
+                // `error_len()` is Some, those bytes are genuinely
+                // invalid (not just incomplete) — skip them.
+                if let Some(bad_len) = e.error_len() {
+                    // Invalid sequence — skip the bad bytes.
+                    consumed += bad_len;
+                } else {
+                    // Incomplete sequence at end of buffer.
+                    let n = trailing.len().min(4);
+                    self.pending[..n].copy_from_slice(&trailing[..n]);
+                    self.pending_len = n;
+                    consumed += n;
+                }
+            }
+        }
+
+        Ok(consumed)
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
-        // WriteConsoleW is unbuffered — nothing to flush.
+        // If there are pending bytes they are an incomplete character
+        // that will never be completed (flush = end of frame).
+        // Discard them — writing partial chars would produce garbling.
+        self.pending_len = 0;
         Ok(())
     }
 }
