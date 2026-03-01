@@ -1160,10 +1160,30 @@ pub fn find_wrap_target(
     best.map(|(idx, _, _, _)| idx)
 }
 
-pub fn forward_key_to_active(app: &mut AppState, key: KeyEvent) -> io::Result<()> {
-    // Encode the key into bytes
+/// Encode a crossterm `KeyEvent` into the byte sequence that should be
+/// written to the child PTY.  Extracted as a standalone function so it can
+/// be unit-tested without needing a full `AppState`.
+///
+/// Returns `None` for key codes we don't handle (F-keys, etc.).
+pub fn encode_key_event(key: &KeyEvent) -> Option<Vec<u8>> {
     let encoded: Vec<u8> = match key.code {
+        // AltGr detection: On Windows, AltGr is reported as Ctrl+Alt by the
+        // console subsystem / crossterm.  International keyboards (German,
+        // Czech, Polish, …) use AltGr to produce characters like \ @ { } [ ]
+        // | ~ €.  crossterm delivers these as KeyCode::Char(produced_char)
+        // with CONTROL|ALT modifiers.  The produced character is NOT an ASCII
+        // letter (a-z), so we can distinguish AltGr from genuine Ctrl+Alt
+        // combos and forward the character as-is.
+        KeyCode::Char(c) if key.modifiers.contains(KeyModifiers::CONTROL)
+            && key.modifiers.contains(KeyModifiers::ALT)
+            && !c.is_ascii_lowercase() => {
+            // AltGr-produced character — forward it verbatim (UTF-8).
+            let mut buf = [0u8; 4];
+            c.encode_utf8(&mut buf);
+            buf[..c.len_utf8()].to_vec()
+        }
         KeyCode::Char(c) if key.modifiers.contains(KeyModifiers::CONTROL) && key.modifiers.contains(KeyModifiers::ALT) => {
+            // Genuine Ctrl+Alt+letter — encode as ESC + ctrl-char.
             let ctrl_char = (c.to_ascii_lowercase() as u8).wrapping_sub(b'a' - 1);
             vec![0x1b, ctrl_char]
         }
@@ -1189,7 +1209,15 @@ pub fn forward_key_to_active(app: &mut AppState, key: KeyEvent) -> io::Result<()
         KeyCode::Right => b"\x1b[C".to_vec(),
         KeyCode::Up => b"\x1b[A".to_vec(),
         KeyCode::Down => b"\x1b[B".to_vec(),
-        _ => return Ok(()),
+        _ => return None,
+    };
+    Some(encoded)
+}
+
+pub fn forward_key_to_active(app: &mut AppState, key: KeyEvent) -> io::Result<()> {
+    let encoded = match encode_key_event(&key) {
+        Some(bytes) => bytes,
+        None => return Ok(()),
     };
 
     if app.sync_input {
@@ -2041,4 +2069,158 @@ pub fn send_key_to_active(app: &mut AppState, k: &str) -> io::Result<()> {
         let _ = p.writer.flush();
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Unit tests for key encoding — especially the AltGr fix (GitHub issue #15)
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
+
+    /// Helper: build a KeyEvent with the given code and modifiers.
+    fn key(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
+        KeyEvent {
+            code,
+            modifiers,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        }
+    }
+
+    // ── AltGr characters (Ctrl+Alt on Windows) should be forwarded verbatim ──
+
+    #[test]
+    fn altgr_backslash_german_layout() {
+        // German: AltGr+ß → '\'   reported as Ctrl+Alt+'\'
+        let ev = key(KeyCode::Char('\\'), KeyModifiers::CONTROL | KeyModifiers::ALT);
+        let bytes = encode_key_event(&ev).unwrap();
+        assert_eq!(bytes, b"\\", "AltGr+backslash must produce literal backslash");
+    }
+
+    #[test]
+    fn altgr_at_sign_german_layout() {
+        // German: AltGr+Q → '@'   reported as Ctrl+Alt+'@'
+        let ev = key(KeyCode::Char('@'), KeyModifiers::CONTROL | KeyModifiers::ALT);
+        let bytes = encode_key_event(&ev).unwrap();
+        assert_eq!(bytes, b"@", "AltGr+@ must produce literal @");
+    }
+
+    #[test]
+    fn altgr_open_curly_brace() {
+        // German: AltGr+7 → '{'   reported as Ctrl+Alt+'{'
+        let ev = key(KeyCode::Char('{'), KeyModifiers::CONTROL | KeyModifiers::ALT);
+        let bytes = encode_key_event(&ev).unwrap();
+        assert_eq!(bytes, b"{", "AltGr+{{ must produce literal {{");
+    }
+
+    #[test]
+    fn altgr_close_curly_brace() {
+        // German: AltGr+0 → '}'
+        let ev = key(KeyCode::Char('}'), KeyModifiers::CONTROL | KeyModifiers::ALT);
+        let bytes = encode_key_event(&ev).unwrap();
+        assert_eq!(bytes, b"}", "AltGr+}} must produce literal }}");
+    }
+
+    #[test]
+    fn altgr_open_bracket() {
+        // German: AltGr+8 → '['
+        let ev = key(KeyCode::Char('['), KeyModifiers::CONTROL | KeyModifiers::ALT);
+        let bytes = encode_key_event(&ev).unwrap();
+        assert_eq!(bytes, b"[", "AltGr+[ must produce literal [");
+    }
+
+    #[test]
+    fn altgr_close_bracket() {
+        // German: AltGr+9 → ']'
+        let ev = key(KeyCode::Char(']'), KeyModifiers::CONTROL | KeyModifiers::ALT);
+        let bytes = encode_key_event(&ev).unwrap();
+        assert_eq!(bytes, b"]", "AltGr+] must produce literal ]");
+    }
+
+    #[test]
+    fn altgr_pipe() {
+        // German: AltGr+< → '|'
+        let ev = key(KeyCode::Char('|'), KeyModifiers::CONTROL | KeyModifiers::ALT);
+        let bytes = encode_key_event(&ev).unwrap();
+        assert_eq!(bytes, b"|", "AltGr+| must produce literal |");
+    }
+
+    #[test]
+    fn altgr_tilde() {
+        // German: AltGr++ → '~'
+        let ev = key(KeyCode::Char('~'), KeyModifiers::CONTROL | KeyModifiers::ALT);
+        let bytes = encode_key_event(&ev).unwrap();
+        assert_eq!(bytes, b"~", "AltGr+~ must produce literal ~");
+    }
+
+    #[test]
+    fn altgr_euro_sign() {
+        // German: AltGr+E → '€'   (multi-byte UTF-8)
+        let ev = key(KeyCode::Char('€'), KeyModifiers::CONTROL | KeyModifiers::ALT);
+        let bytes = encode_key_event(&ev).unwrap();
+        assert_eq!(bytes, "€".as_bytes(), "AltGr+euro must produce UTF-8 euro sign");
+    }
+
+    #[test]
+    fn altgr_dollar_czech_layout() {
+        // Czech: AltGr produces '$'
+        let ev = key(KeyCode::Char('$'), KeyModifiers::CONTROL | KeyModifiers::ALT);
+        let bytes = encode_key_event(&ev).unwrap();
+        assert_eq!(bytes, b"$", "AltGr+$ must produce literal $");
+    }
+
+    // ── Genuine Ctrl+Alt+letter must still produce ESC + ctrl-char ──
+
+    #[test]
+    fn ctrl_alt_a_is_esc_ctrl_a() {
+        let ev = key(KeyCode::Char('a'), KeyModifiers::CONTROL | KeyModifiers::ALT);
+        let bytes = encode_key_event(&ev).unwrap();
+        assert_eq!(bytes, vec![0x1b, 0x01], "Ctrl+Alt+a → ESC + ^A");
+    }
+
+    #[test]
+    fn ctrl_alt_c_is_esc_ctrl_c() {
+        let ev = key(KeyCode::Char('c'), KeyModifiers::CONTROL | KeyModifiers::ALT);
+        let bytes = encode_key_event(&ev).unwrap();
+        assert_eq!(bytes, vec![0x1b, 0x03], "Ctrl+Alt+c → ESC + ^C");
+    }
+
+    #[test]
+    fn ctrl_alt_z_is_esc_ctrl_z() {
+        let ev = key(KeyCode::Char('z'), KeyModifiers::CONTROL | KeyModifiers::ALT);
+        let bytes = encode_key_event(&ev).unwrap();
+        assert_eq!(bytes, vec![0x1b, 0x1a], "Ctrl+Alt+z → ESC + ^Z");
+    }
+
+    // ── Plain characters / other modifier combos (regression checks) ──
+
+    #[test]
+    fn plain_char_no_modifiers() {
+        let ev = key(KeyCode::Char('a'), KeyModifiers::NONE);
+        let bytes = encode_key_event(&ev).unwrap();
+        assert_eq!(bytes, b"a");
+    }
+
+    #[test]
+    fn alt_a_produces_esc_a() {
+        let ev = key(KeyCode::Char('a'), KeyModifiers::ALT);
+        let bytes = encode_key_event(&ev).unwrap();
+        assert_eq!(bytes, b"\x1ba");
+    }
+
+    #[test]
+    fn ctrl_a_produces_soh() {
+        let ev = key(KeyCode::Char('a'), KeyModifiers::CONTROL);
+        let bytes = encode_key_event(&ev).unwrap();
+        assert_eq!(bytes, vec![0x01]); // ^A = SOH
+    }
+
+    #[test]
+    fn plain_backslash_no_modifiers() {
+        let ev = key(KeyCode::Char('\\'), KeyModifiers::NONE);
+        let bytes = encode_key_event(&ev).unwrap();
+        assert_eq!(bytes, b"\\");
+    }
 }
