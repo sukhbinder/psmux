@@ -1441,11 +1441,12 @@ pub fn handle_mouse(app: &mut AppState, me: MouseEvent, window_area: Rect) -> io
                 let _ = paste_clipboard_to_active(app);
                 return Ok(());
             }
-            let child_wants = active_pane(&win.root, &win.active_path)
-                .map_or(false, |p| crate::window_ops::pane_wants_mouse(p)
-                    || crate::window_ops::is_fullscreen_tui(p));
-            if child_wants {
-                // TUI app with mouse tracking — forward right-click
+            // Use is_fullscreen_tui() — not pane_wants_mouse() — to avoid
+            // PSReadLine's spurious mouse tracking on ConPTY.
+            let child_in_alt = active_pane(&win.root, &win.active_path)
+                .map_or(false, |p| crate::window_ops::is_fullscreen_tui(p));
+            if child_in_alt {
+                // TUI app (fullscreen) — forward right-click
                 if let Some(area) = active_area {
                     if let Some(active) = active_pane_mut(&mut win.root, &win.active_path) {
                         forward_mouse_to_pane_ex(active, area, me.column, me.row,
@@ -1501,11 +1502,12 @@ pub fn handle_mouse(app: &mut AppState, me: MouseEvent, window_area: Rect) -> io
         }
         MouseEventKind::Up(MouseButton::Right) => {
             if in_copy { return Ok(()); }
-            // Only forward release to child if it wants mouse events
-            let child_wants = active_pane(&win.root, &win.active_path)
-                .map_or(false, |p| crate::window_ops::pane_wants_mouse(p)
-                    || crate::window_ops::is_fullscreen_tui(p));
-            if child_wants {
+            // Only forward release to child if it is a fullscreen TUI.
+            // Use is_fullscreen_tui() — not pane_wants_mouse() — to avoid
+            // PSReadLine's spurious mouse tracking on ConPTY.
+            let child_in_alt = active_pane(&win.root, &win.active_path)
+                .map_or(false, |p| crate::window_ops::is_fullscreen_tui(p));
+            if child_in_alt {
                 if let Some(area) = active_area {
                     if let Some(active) = active_pane_mut(&mut win.root, &win.active_path) {
                         forward_mouse_to_pane_ex(active, area, me.column, me.row, 0, 0,
@@ -1549,12 +1551,14 @@ pub fn handle_mouse(app: &mut AppState, me: MouseEvent, window_area: Rect) -> io
             } else {
                 // tmux parity #62: drag from normal mode enters copy mode
                 // and starts selection (when child doesn't want mouse).
-                let child_wants = {
+                // Use is_fullscreen_tui() — not pane_wants_mouse() — to
+                // avoid PSReadLine's spurious mouse tracking on ConPTY.
+                let child_in_alt = {
                     let win2 = &app.windows[app.active_idx];
                     active_pane(&win2.root, &win2.active_path)
-                        .map_or(false, |p| crate::window_ops::pane_wants_mouse(p))
+                        .map_or(false, |p| crate::window_ops::is_fullscreen_tui(p))
                 };
-                if child_wants {
+                if child_in_alt {
                     if let Some(area) = active_area {
                         let win2 = &mut app.windows[app.active_idx];
                         if let Some(active) = active_pane_mut(&mut win2.root, &win2.active_path) {
@@ -1590,13 +1594,17 @@ pub fn handle_mouse(app: &mut AppState, me: MouseEvent, window_area: Rect) -> io
                 win.active_path = path.clone();
                 active_area = Some(*area);
             }
-            // tmux parity: check if the child has mouse tracking enabled
-            // (DECSET 1000/1002/1003).  If yes, forward scroll to the child.
-            // If no (shell prompt), auto-enter copy mode and scroll psmux's
-            // own scrollback buffer.
-            let child_wants_mouse = active_pane(&win.root, &win.active_path)
-                .map_or(false, |p| crate::window_ops::pane_wants_mouse(p));
-            if child_wants_mouse {
+            // tmux parity: check if the child is a fullscreen TUI app
+            // (alternate screen or content heuristic).  If yes, forward scroll
+            // to the child.  If no (shell prompt), auto-enter copy mode.
+            //
+            // We deliberately use is_fullscreen_tui() instead of pane_wants_mouse()
+            // because PSReadLine on ConPTY spuriously enables mouse tracking
+            // (AnyMotion) which would prevent scroll-to-copy-mode at shell prompts.
+            // This matches the server-side remote_scroll_wheel logic.
+            let child_in_alt = active_pane(&win.root, &win.active_path)
+                .map_or(false, |p| crate::window_ops::is_fullscreen_tui(p));
+            if child_in_alt {
                 if let Some(area) = active_area {
                     if let Some(active) = active_pane_mut(&mut win.root, &win.active_path) {
                         let wheel_delta: i16 = 120;
@@ -1627,12 +1635,14 @@ pub fn handle_mouse(app: &mut AppState, me: MouseEvent, window_area: Rect) -> io
                 win.active_path = path.clone();
                 active_area = Some(*area);
             }
-            // Forward scroll-down to child only if it has mouse tracking.
+            // Forward scroll-down to child only if it is a fullscreen TUI.
             // At a shell prompt, scroll-down without copy mode is a no-op
             // (can't scroll past live output).
-            let child_wants_mouse = active_pane(&win.root, &win.active_path)
-                .map_or(false, |p| crate::window_ops::pane_wants_mouse(p));
-            if child_wants_mouse {
+            // Use is_fullscreen_tui() — not pane_wants_mouse() — to avoid
+            // PSReadLine's spurious mouse tracking on ConPTY.
+            let child_in_alt = active_pane(&win.root, &win.active_path)
+                .map_or(false, |p| crate::window_ops::is_fullscreen_tui(p));
+            if child_in_alt {
                 if let Some(area) = active_area {
                     if let Some(active) = active_pane_mut(&mut win.root, &win.active_path) {
                         let wheel_delta: i16 = -120;
