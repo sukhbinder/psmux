@@ -257,12 +257,20 @@ fn inject_sgr_mouse(pane: &mut Pane, col: i16, row: i16, vt_button: u8, press: b
 /// This works universally for ALL native ConPTY children — no need to
 /// distinguish between crossterm vs nvim.  (fixes #60)
 fn write_mouse_to_pty(pane: &mut Pane, col: i16, row: i16, vt_button: u8, press: bool) {
+    use std::io::Write as _;
     let vt_col = (col + 1).max(1) as u16;
     let vt_row = (row + 1).max(1) as u16;
-    let ch = if press { 'M' } else { 'm' };
-    let sgr_seq = format!("\x1b[<{};{};{}{}", vt_button, vt_col, vt_row, ch);
-    mouse_log(&format!("  -> PTY pipe SGR mouse: seq={:?}", sgr_seq));
-    let _ = pane.writer.write_all(sgr_seq.as_bytes());
+    let ch = if press { b'M' } else { b'm' };
+    // Stack-allocated buffer — avoids heap allocation per mouse event.
+    // Max SGR sequence: ESC[<btn;col;rowM = ~20 bytes worst case.
+    let mut buf = [0u8; 32];
+    let len = {
+        let mut cursor = std::io::Cursor::new(&mut buf[..]);
+        let _ = write!(cursor, "\x1b[<{};{};{}{}", vt_button, vt_col, vt_row, ch as char);
+        cursor.position() as usize
+    };
+    mouse_log(&format!("  -> PTY pipe SGR mouse: seq={:?}", std::str::from_utf8(&buf[..len]).unwrap_or("?")));
+    let _ = pane.writer.write_all(&buf[..len]);
     let _ = pane.writer.flush();
 }
 

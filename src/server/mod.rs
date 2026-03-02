@@ -575,16 +575,16 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     meta_dirty = true;
                 }
                 CtrlReq::FocusWindowCmd(wid) => { switch_with_copy_save(&mut app, |app| { if let Some(idx) = find_window_index_by_id(app, wid) { app.active_idx = idx; } }); resize_all_panes(&mut app); meta_dirty = true; }
-                CtrlReq::MouseDown(x,y) => { if app.mouse_enabled { remote_mouse_down(&mut app, x, y); state_dirty = true; meta_dirty = true; } }
-                CtrlReq::MouseDownRight(x,y) => { if app.mouse_enabled { remote_mouse_button(&mut app, x, y, 2, true); state_dirty = true; } }
-                CtrlReq::MouseDownMiddle(x,y) => { if app.mouse_enabled { remote_mouse_button(&mut app, x, y, 1, true); state_dirty = true; } }
-                CtrlReq::MouseDrag(x,y) => { if app.mouse_enabled { remote_mouse_drag(&mut app, x, y); state_dirty = true; } }
-                CtrlReq::MouseUp(x,y) => { if app.mouse_enabled { remote_mouse_up(&mut app, x, y); state_dirty = true; } }
-                CtrlReq::MouseUpRight(x,y) => { if app.mouse_enabled { remote_mouse_button(&mut app, x, y, 2, false); state_dirty = true; } }
-                CtrlReq::MouseUpMiddle(x,y) => { if app.mouse_enabled { remote_mouse_button(&mut app, x, y, 1, false); state_dirty = true; } }
+                CtrlReq::MouseDown(x,y) => { if app.mouse_enabled { remote_mouse_down(&mut app, x, y); state_dirty = true; meta_dirty = true; echo_pending_until = Some(Instant::now()); } }
+                CtrlReq::MouseDownRight(x,y) => { if app.mouse_enabled { remote_mouse_button(&mut app, x, y, 2, true); state_dirty = true; echo_pending_until = Some(Instant::now()); } }
+                CtrlReq::MouseDownMiddle(x,y) => { if app.mouse_enabled { remote_mouse_button(&mut app, x, y, 1, true); state_dirty = true; echo_pending_until = Some(Instant::now()); } }
+                CtrlReq::MouseDrag(x,y) => { if app.mouse_enabled { remote_mouse_drag(&mut app, x, y); state_dirty = true; echo_pending_until = Some(Instant::now()); } }
+                CtrlReq::MouseUp(x,y) => { if app.mouse_enabled { remote_mouse_up(&mut app, x, y); state_dirty = true; echo_pending_until = Some(Instant::now()); } }
+                CtrlReq::MouseUpRight(x,y) => { if app.mouse_enabled { remote_mouse_button(&mut app, x, y, 2, false); state_dirty = true; echo_pending_until = Some(Instant::now()); } }
+                CtrlReq::MouseUpMiddle(x,y) => { if app.mouse_enabled { remote_mouse_button(&mut app, x, y, 1, false); state_dirty = true; echo_pending_until = Some(Instant::now()); } }
                 CtrlReq::MouseMove(x,y) => { if app.mouse_enabled { remote_mouse_motion(&mut app, x, y); } }
-                CtrlReq::ScrollUp(x, y) => { if app.mouse_enabled { remote_scroll_up(&mut app, x, y); state_dirty = true; } }
-                CtrlReq::ScrollDown(x, y) => { if app.mouse_enabled { remote_scroll_down(&mut app, x, y); state_dirty = true; } }
+                CtrlReq::ScrollUp(x, y) => { if app.mouse_enabled { remote_scroll_up(&mut app, x, y); state_dirty = true; echo_pending_until = Some(Instant::now()); } }
+                CtrlReq::ScrollDown(x, y) => { if app.mouse_enabled { remote_scroll_down(&mut app, x, y); state_dirty = true; echo_pending_until = Some(Instant::now()); } }
                 CtrlReq::NextWindow => { if !app.windows.is_empty() { switch_with_copy_save(&mut app, |app| { app.last_window_idx = app.active_idx; app.active_idx = (app.active_idx + 1) % app.windows.len(); }); resize_all_panes(&mut app); } meta_dirty = true; hook_event = Some("after-select-window"); }
                 CtrlReq::PrevWindow => { if !app.windows.is_empty() { switch_with_copy_save(&mut app, |app| { app.last_window_idx = app.active_idx; app.active_idx = (app.active_idx + app.windows.len() - 1) % app.windows.len(); }); resize_all_panes(&mut app); } meta_dirty = true; hook_event = Some("after-select-window"); }
                 CtrlReq::RenameWindow(name) => { let win = &mut app.windows[app.active_idx]; win.name = name; win.manual_rename = true; meta_dirty = true; hook_event = Some("after-rename-window"); }
