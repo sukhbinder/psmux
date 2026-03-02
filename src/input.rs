@@ -1277,26 +1277,17 @@ fn forward_mouse_to_pane(pane: &mut Pane, area: Rect, abs_x: u16, abs_y: u16, bu
 
 /// Extended version that also carries the VT button code and press flag for
 /// generating accurate VT mouse sequences.
+///
+/// Routes through `inject_mouse_combined` which detects whether the child
+/// uses ENABLE_MOUSE_INPUT (crossterm/ratatui → MOUSE_EVENT injection) or
+/// not (nvim/vim → SGR VT injection).  Fixes #60.
 fn forward_mouse_to_pane_ex(pane: &mut Pane, area: Rect, abs_x: u16, abs_y: u16,
                              button_state: u32, event_flags: u32,
-                             _vt_button: u8, _press: bool) {
+                             vt_button: u8, press: bool) {
     let col = abs_x as i16 - area.x as i16;
     let row = abs_y as i16 - area.y as i16;
-
-    // Native ConPTY child — always use Win32 MOUSE_EVENT injection.
-    // All native Windows console apps that want mouse use ReadConsoleInputW
-    // with ENABLE_MOUSE_INPUT — they read MOUSE_EVENT records directly.
-    // VT SGR mouse via pane.writer doesn't work reliably: ConPTY apps
-    // read INPUT_RECORDs, not raw VT from stdin.  VTI (ENABLE_VIRTUAL_
-    // TERMINAL_INPUT) is NOT a mouse indicator — it only means the app
-    // parses VT keyboard input.  Node.js enables VTI after user types,
-    // which would then cause SGR mouse garbage.
-    if pane.child_pid.is_none() {
-        pane.child_pid = crate::platform::mouse_inject::get_child_pid(&*pane.child);
-    }
-    if let Some(pid) = pane.child_pid {
-        crate::platform::mouse_inject::send_mouse_event(pid, col, row, button_state, event_flags, true);
-    }
+    crate::window_ops::inject_mouse_combined(
+        pane, col, row, vt_button, press, button_state, event_flags, "client");
 }
 
 pub fn handle_mouse(app: &mut AppState, me: MouseEvent, window_area: Rect) -> io::Result<()> {
@@ -1433,11 +1424,19 @@ pub fn handle_mouse(app: &mut AppState, me: MouseEvent, window_area: Rect) -> io
         MouseEventKind::Down(MouseButton::Right) => {
             // In copy mode, suppress — don't forward to child
             if in_copy { return Ok(()); }
+            // Only forward right-click to child if a TUI app is running.
+            // At the shell prompt, right-click is suppressed to prevent
+            // PSReadLine from interpreting MOUSE_EVENT as a paste trigger,
+            // which can cause the shell to exit (and psmux with it).
             if let Some(area) = active_area {
                 if let Some(active) = active_pane_mut(&mut win.root, &win.active_path) {
-                    forward_mouse_to_pane_ex(active, area, me.column, me.row,
-                        crate::platform::mouse_inject::RIGHTMOST_BUTTON_PRESSED, 0,
-                        2, true); // SGR button 2 = right, press
+                    let wants = crate::window_ops::pane_wants_mouse(active)
+                        || crate::window_ops::is_fullscreen_tui(active);
+                    if wants {
+                        forward_mouse_to_pane_ex(active, area, me.column, me.row,
+                            crate::platform::mouse_inject::RIGHTMOST_BUTTON_PRESSED, 0,
+                            2, true); // SGR button 2 = right, press
+                    }
                 }
             }
         }
@@ -1485,8 +1484,12 @@ pub fn handle_mouse(app: &mut AppState, me: MouseEvent, window_area: Rect) -> io
             if in_copy { return Ok(()); }
             if let Some(area) = active_area {
                 if let Some(active) = active_pane_mut(&mut win.root, &win.active_path) {
-                    forward_mouse_to_pane_ex(active, area, me.column, me.row, 0, 0,
-                        2, false); // SGR button 2 = right, release
+                    let wants = crate::window_ops::pane_wants_mouse(active)
+                        || crate::window_ops::is_fullscreen_tui(active);
+                    if wants {
+                        forward_mouse_to_pane_ex(active, area, me.column, me.row, 0, 0,
+                            2, false); // SGR button 2 = right, release
+                    }
                 }
             }
         }
