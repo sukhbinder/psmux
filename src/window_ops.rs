@@ -223,7 +223,10 @@ fn detect_mouse_input(pane: &mut Pane) -> bool {
     result
 }
 
-/// Helper: inject SGR mouse escape sequence as KEY_EVENT records.
+/// Helper: inject SGR mouse via WriteConsoleInputW KEY_EVENT records.
+///
+/// Used ONLY for WSL/SSH bridge children where the PTY pipe doesn't reach
+/// the remote TUI.  For native ConPTY children, use write_mouse_to_pty().
 fn inject_sgr_mouse(pane: &mut Pane, col: i16, row: i16, vt_button: u8, press: bool) -> bool {
     let vt_col = (col + 1).max(1) as u16;
     let vt_row = (row + 1).max(1) as u16;
@@ -242,78 +245,62 @@ fn inject_sgr_mouse(pane: &mut Pane, col: i16, row: i16, vt_button: u8, press: b
     }
 }
 
+/// Write a SGR mouse event to the pane's PTY master pipe.
+///
+/// This is the same mechanism Windows Terminal uses: write VT SGR mouse
+/// escape sequences directly to the ConPTY input pipe.  ConPTY/conhost
+/// then automatically:
+///  - Translates SGR → MOUSE_EVENT records for apps using ReadConsoleInputW
+///    (crossterm/ratatui: pstop, claude, opencode, etc.)
+///  - Passes VT through for apps reading text/VT input (nvim, vim)
+///
+/// This works universally for ALL native ConPTY children — no need to
+/// distinguish between crossterm vs nvim.  (fixes #60)
+fn write_mouse_to_pty(pane: &mut Pane, col: i16, row: i16, vt_button: u8, press: bool) {
+    let vt_col = (col + 1).max(1) as u16;
+    let vt_row = (row + 1).max(1) as u16;
+    let ch = if press { 'M' } else { 'm' };
+    let sgr_seq = format!("\x1b[<{};{};{}{}", vt_button, vt_col, vt_row, ch);
+    mouse_log(&format!("  -> PTY pipe SGR mouse: seq={:?}", sgr_seq));
+    let _ = pane.writer.write_all(sgr_seq.as_bytes());
+    let _ = pane.writer.flush();
+}
+
 /// Inject a mouse event into a pane using the best available method.
 ///
-/// Strategy:
+/// Architecture (mirrors Windows Terminal):
 ///
-///   1. If a VT bridge (wsl, ssh) is detected AND a fullscreen TUI is
-///      running, inject SGR mouse as KEY_EVENT records.  This bypasses
-///      ConPTY and delivers raw escape sequences to the Linux PTY.
+///   For native ConPTY children, write SGR mouse escape sequences directly
+///   to the PTY master pipe (pane.writer).  This is the same mechanism
+///   Windows Terminal uses.  ConPTY/conhost handles all translation:
+///   - Apps using ReadConsoleInputW (crossterm/ratatui) get MOUSE_EVENT records
+///   - Apps reading VT input (nvim/vim) get the SGR sequences directly
 ///
-///   2. For native ConPTY fullscreen TUI apps, check ENABLE_MOUSE_INPUT
-///      on the child's console to distinguish between two app categories:
+///   For WSL/SSH bridge children, bypass ConPTY using WriteConsoleInputW
+///   with KEY_EVENT records, delivering escape sequences to the bridge
+///   process (wsl.exe/ssh.exe) which relays them to the Linux PTY.
 ///
-///      a. Console-API apps (crossterm/ratatui — pstop, claude, etc.)
-///         set ENABLE_MOUSE_INPUT and read MOUSE_EVENT records via
-///         ReadConsoleInputW.  → inject Win32 MOUSE_EVENT records.
-///
-///      b. VT-based apps (nvim, vim, opencode, etc.) do NOT set
-///         ENABLE_MOUSE_INPUT.  They read input as text (ReadConsole
-///         / ReadFile) and expect VT SGR mouse sequences.  ConPTY
-///         does NOT translate Win32 MOUSE_EVENT records into VT mouse
-///         sequences, so these apps never receive wheel/click events
-///         through the MOUSE_EVENT path.  → inject SGR mouse as
-///         KEY_EVENT records.  (fixes #60)
-///
-///   3. For shell prompts (no fullscreen TUI), inject Win32 MOUSE_EVENT
-///      records.  Shells don't consume MOUSE_EVENT, so this is harmless.
+///   At shell prompts (no TUI), no mouse forwarding is needed — the shell
+///   doesn't handle mouse events.  Callers should handle shell-level
+///   behavior (right-click=paste, scroll=copy-mode) before calling this.
 pub(crate) fn inject_mouse_combined(pane: &mut Pane, col: i16, row: i16, vt_button: u8, press: bool,
-                          button_state: u32, event_flags: u32, win_name: &str) {
+                          _button_state: u32, _event_flags: u32, win_name: &str) {
     let vt_bridge = detect_vt_bridge(pane);
-    let fullscreen = is_fullscreen_tui(pane);
 
-    if fullscreen && vt_bridge {
-        // VT bridge (WSL/SSH) with fullscreen TUI — always use SGR injection.
-        // This bypasses ConPTY entirely, delivering the escape sequence to
-        // wsl.exe → Linux PTY → the TUI app.
-        mouse_log(&format!("inject_mouse_combined: col={} row={} vt_btn={} press={} win={} vt_bridge=true fullscreen=true -> SGR VT injection",
+    if vt_bridge {
+        // WSL/SSH bridge — bypass ConPTY, inject as KEY_EVENT records.
+        // The bridge (wsl.exe, ssh.exe) relays these to the Linux PTY.
+        mouse_log(&format!("inject_mouse_combined: col={} row={} vt_btn={} press={} win={} vt_bridge=true -> WriteConsoleInputW KEY_EVENT injection",
             col, row, vt_button, press, win_name));
         inject_sgr_mouse(pane, col, row, vt_button, press);
-    } else if fullscreen {
-        // Native ConPTY fullscreen TUI — check ENABLE_MOUSE_INPUT to
-        // determine injection method.  (fixes #60)
-        let has_mouse_input = detect_mouse_input(pane);
-        if has_mouse_input {
-            // Console-API app (crossterm/ratatui: pstop, claude, etc.)
-            // Uses ReadConsoleInputW with ENABLE_MOUSE_INPUT to read
-            // MOUSE_EVENT records.  SGR injection would appear as garbage.
-            mouse_log(&format!("inject_mouse_combined: col={} row={} vt_btn={} press={} win={} fullscreen=true MOUSE_INPUT=true -> Win32 MOUSE_EVENT (console-API TUI)",
-                col, row, vt_button, press, win_name));
-            let ok = inject_mouse(pane, col, row, button_state, event_flags);
-            mouse_log(&format!("  -> Win32 inject result: {}", ok));
-        } else {
-            // VT-based app (nvim, vim, opencode, etc.)
-            // Does NOT set ENABLE_MOUSE_INPUT; reads input as text/VT.
-            // Win32 MOUSE_EVENT injection doesn't reach these apps because
-            // ConPTY doesn't translate MOUSE_EVENT to VT mouse sequences.
-            mouse_log(&format!("inject_mouse_combined: col={} row={} vt_btn={} press={} win={} fullscreen=true MOUSE_INPUT=false -> SGR VT injection (VT-based TUI)",
-                col, row, vt_button, press, win_name));
-            inject_sgr_mouse(pane, col, row, vt_button, press);
-        }
-    } else if vt_bridge {
-        // VT bridge at shell prompt — use Win32 MOUSE_EVENT injection.
-        // wsl.exe ignores MOUSE_EVENT records, so this is harmless.
-        mouse_log(&format!("inject_mouse_combined: col={} row={} vt_btn={} press={} win={} vt_bridge=true fullscreen=false -> Win32 MOUSE_EVENT (vt_bridge shell)",
-            col, row, vt_button, press, win_name));
-        let ok = inject_mouse(pane, col, row, button_state, event_flags);
-        mouse_log(&format!("  -> Win32 inject result: {}", ok));
     } else {
-        // Native ConPTY child at shell prompt — use Win32 MOUSE_EVENT injection.
-        // Shells don't consume MOUSE_EVENT, so this is harmless.
-        mouse_log(&format!("inject_mouse_combined: col={} row={} vt_btn={} press={} win={} -> Win32 MOUSE_EVENT (native ConPTY shell)",
+        // Native ConPTY child — write SGR mouse to PTY pipe.
+        // This is the same mechanism Windows Terminal uses.
+        // ConPTY translates SGR → MOUSE_EVENT for crossterm apps,
+        // and passes VT through for nvim/vim.
+        mouse_log(&format!("inject_mouse_combined: col={} row={} vt_btn={} press={} win={} -> PTY pipe SGR mouse (Windows Terminal method)",
             col, row, vt_button, press, win_name));
-        let ok = inject_mouse(pane, col, row, button_state, event_flags);
-        mouse_log(&format!("  -> Win32 inject result: {}", ok));
+        write_mouse_to_pty(pane, col, row, vt_button, press);
     }
 }
 

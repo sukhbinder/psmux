@@ -1261,6 +1261,17 @@ fn wheel_cell_for_area(area: Rect, x: u16, y: u16) -> (u16, u16) {
     (col, row)
 }
 
+/// Paste the system clipboard content into the active pane.
+/// This is the Windows Terminal right-click-to-paste behavior.
+fn paste_clipboard_to_active(app: &mut AppState) -> io::Result<()> {
+    if let Some(text) = crate::copy_mode::read_from_system_clipboard() {
+        if !text.is_empty() {
+            send_paste_to_active(app, &text)?;
+        }
+    }
+    Ok(())
+}
+
 /// Forward a mouse event to the child pane.
 ///
 /// If the child has mouse protocol enabled (TUI app running), write VT mouse
@@ -1275,19 +1286,19 @@ fn forward_mouse_to_pane(pane: &mut Pane, area: Rect, abs_x: u16, abs_y: u16, bu
     forward_mouse_to_pane_ex(pane, area, abs_x, abs_y, button_state, event_flags, 0xff, false);
 }
 
-/// Extended version that also carries the VT button code and press flag for
-/// generating accurate VT mouse sequences.
+/// Forward a mouse event to a child pane by writing SGR mouse sequences
+/// to the ConPTY input pipe — the same mechanism Windows Terminal uses.
 ///
-/// Routes through `inject_mouse_combined` which detects whether the child
-/// uses ENABLE_MOUSE_INPUT (crossterm/ratatui → MOUSE_EVENT injection) or
-/// not (nvim/vim → SGR VT injection).  Fixes #60.
+/// ConPTY/conhost automatically translates SGR mouse sequences into
+/// MOUSE_EVENT records for crossterm/ratatui apps (ReadConsoleInputW),
+/// and passes VT through for nvim/vim apps.  (fixes #60)
 fn forward_mouse_to_pane_ex(pane: &mut Pane, area: Rect, abs_x: u16, abs_y: u16,
-                             button_state: u32, event_flags: u32,
+                             _button_state: u32, _event_flags: u32,
                              vt_button: u8, press: bool) {
     let col = abs_x as i16 - area.x as i16;
     let row = abs_y as i16 - area.y as i16;
     crate::window_ops::inject_mouse_combined(
-        pane, col, row, vt_button, press, button_state, event_flags, "client");
+        pane, col, row, vt_button, press, 0, 0, "client");
 }
 
 pub fn handle_mouse(app: &mut AppState, me: MouseEvent, window_area: Rect) -> io::Result<()> {
@@ -1422,22 +1433,30 @@ pub fn handle_mouse(app: &mut AppState, me: MouseEvent, window_area: Rect) -> io
 
         }
         MouseEventKind::Down(MouseButton::Right) => {
-            // In copy mode, suppress — don't forward to child
-            if in_copy { return Ok(()); }
-            // Only forward right-click to child if a TUI app is running.
-            // At the shell prompt, right-click is suppressed to prevent
-            // PSReadLine from interpreting MOUSE_EVENT as a paste trigger,
-            // which can cause the shell to exit (and psmux with it).
-            if let Some(area) = active_area {
-                if let Some(active) = active_pane_mut(&mut win.root, &win.active_path) {
-                    let wants = crate::window_ops::pane_wants_mouse(active)
-                        || crate::window_ops::is_fullscreen_tui(active);
-                    if wants {
+            // Windows Terminal behaviour: right-click = paste clipboard.
+            // When the child has mouse tracking enabled (TUI app), forward
+            // the right-click to the app instead.
+            if in_copy {
+                // In copy mode: paste clipboard (like Windows Terminal)
+                let _ = paste_clipboard_to_active(app);
+                return Ok(());
+            }
+            let child_wants = active_pane(&win.root, &win.active_path)
+                .map_or(false, |p| crate::window_ops::pane_wants_mouse(p)
+                    || crate::window_ops::is_fullscreen_tui(p));
+            if child_wants {
+                // TUI app with mouse tracking — forward right-click
+                if let Some(area) = active_area {
+                    if let Some(active) = active_pane_mut(&mut win.root, &win.active_path) {
                         forward_mouse_to_pane_ex(active, area, me.column, me.row,
                             crate::platform::mouse_inject::RIGHTMOST_BUTTON_PRESSED, 0,
                             2, true); // SGR button 2 = right, press
                     }
                 }
+            } else {
+                // Shell prompt — paste clipboard (Windows Terminal parity)
+                let _ = paste_clipboard_to_active(app);
+                return Ok(());
             }
         }
         MouseEventKind::Down(MouseButton::Middle) => {
@@ -1482,11 +1501,13 @@ pub fn handle_mouse(app: &mut AppState, me: MouseEvent, window_area: Rect) -> io
         }
         MouseEventKind::Up(MouseButton::Right) => {
             if in_copy { return Ok(()); }
-            if let Some(area) = active_area {
-                if let Some(active) = active_pane_mut(&mut win.root, &win.active_path) {
-                    let wants = crate::window_ops::pane_wants_mouse(active)
-                        || crate::window_ops::is_fullscreen_tui(active);
-                    if wants {
+            // Only forward release to child if it wants mouse events
+            let child_wants = active_pane(&win.root, &win.active_path)
+                .map_or(false, |p| crate::window_ops::pane_wants_mouse(p)
+                    || crate::window_ops::is_fullscreen_tui(p));
+            if child_wants {
+                if let Some(area) = active_area {
+                    if let Some(active) = active_pane_mut(&mut win.root, &win.active_path) {
                         forward_mouse_to_pane_ex(active, area, me.column, me.row, 0, 0,
                             2, false); // SGR button 2 = right, release
                     }
