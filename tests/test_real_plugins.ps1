@@ -356,30 +356,10 @@ if (-not (Start-FreshSession)) {
 
 
 # ============================================================
-# PLUGIN: psmux-yank
+# NOTE: psmux-yank removed — clipboard is built into psmux natively.
+# y to copy in copy-mode, right-click paste, Ctrl+V paste all work
+# without any plugin. See src/copy_mode.rs.
 # ============================================================
-Write-Host ""
-Write-Host ("=" * 60)
-Write-Host "PLUGIN: psmux-yank (real script)"
-Write-Host ("=" * 60)
-
-if (-not (Start-FreshSession)) {
-    Write-Fail "Cannot create session for yank test"
-} else {
-    Write-Test "Source yank plugin"
-    $output = pwsh -NoProfile -ExecutionPolicy Bypass -Command "& '$PLUGIN_DIR\psmux-yank\psmux-yank.ps1'" 2>&1 | Out-String
-    Write-Info "Script output: $($output.Trim())"
-    Start-Sleep -Milliseconds 500
-
-    Write-Test "yank: copy-mode-vi y binding"
-    $keys = (Psmux list-keys -t $S | Out-String)
-    if ($keys -match 'copy-mode-vi.*y.*copy-pipe') { Write-Pass "y copy-pipe binding" }
-    else { Write-Fail "y binding not found in: $keys" }
-
-    Write-Test "yank: Enter copy binding"
-    if ($keys -match 'copy-mode-vi.*Enter.*copy-pipe') { Write-Pass "Enter copy-pipe binding" }
-    else { Write-Fail "Enter binding not found" }
-}
 
 
 # ============================================================
