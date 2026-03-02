@@ -182,7 +182,7 @@ psmux has a full plugin ecosystem — ports of the most popular tmux plugins, re
 Quick start:
 ```powershell
 # Install the plugin manager
-git clone https://github.com/psmux-plugins/ppm "$env:USERPROFILE\.psmux\plugins\ppm"
+git clone https://github.com/marlocarlo/psmux-plugins.git "$env:TEMP\psmux-plugins" ; Copy-Item "$env:TEMP\psmux-plugins\ppm" "$env:USERPROFILE\.psmux\plugins\ppm" -Recurse ; Remove-Item "$env:TEMP\psmux-plugins" -Recurse -Force
 ```
 Then add to your `~/.psmux.conf`:
 ```
