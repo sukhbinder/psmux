@@ -1594,16 +1594,24 @@ pub fn handle_mouse(app: &mut AppState, me: MouseEvent, window_area: Rect) -> io
                 win.active_path = path.clone();
                 active_area = Some(*area);
             }
-            // tmux parity: check if the child is a fullscreen TUI app
-            // (alternate screen or content heuristic).  If yes, forward scroll
-            // to the child.  If no (shell prompt), auto-enter copy mode.
+            // tmux parity: Only forward scroll to child if alternate screen
+            // is active (real TUI app like nvim/htop).  If not (shell prompt),
+            // auto-enter copy mode.
             //
-            // We deliberately use is_fullscreen_tui() instead of pane_wants_mouse()
-            // because PSReadLine on ConPTY spuriously enables mouse tracking
-            // (AnyMotion) which would prevent scroll-to-copy-mode at shell prompts.
-            // This matches the server-side remote_scroll_wheel logic.
+            // We only check alternate_screen() — NOT is_fullscreen_tui() or
+            // pane_wants_mouse() — because:
+            //   - is_fullscreen_tui() false-positives when shell output (ls/dir)
+            //     fills the screen, preventing scroll-to-copy-mode.
+            //   - pane_wants_mouse() false-positives from PSReadLine's spurious
+            //     mouse tracking on ConPTY.
+            //   - alternate_screen() is reliable: all TUI apps report it correctly.
             let child_in_alt = active_pane(&win.root, &win.active_path)
-                .map_or(false, |p| crate::window_ops::is_fullscreen_tui(p));
+                .map_or(false, |p| {
+                    if let Ok(parser) = p.term.lock() {
+                        return parser.screen().alternate_screen();
+                    }
+                    false
+                });
             if child_in_alt {
                 if let Some(area) = active_area {
                     if let Some(active) = active_pane_mut(&mut win.root, &win.active_path) {
@@ -1635,13 +1643,18 @@ pub fn handle_mouse(app: &mut AppState, me: MouseEvent, window_area: Rect) -> io
                 win.active_path = path.clone();
                 active_area = Some(*area);
             }
-            // Forward scroll-down to child only if it is a fullscreen TUI.
-            // At a shell prompt, scroll-down without copy mode is a no-op
-            // (can't scroll past live output).
-            // Use is_fullscreen_tui() — not pane_wants_mouse() — to avoid
-            // PSReadLine's spurious mouse tracking on ConPTY.
+            // Forward scroll-down to child only if alternate screen is active
+            // (real TUI app).  At a shell prompt, scroll-down without copy
+            // mode is a no-op (can't scroll past live output).
+            // Only check alternate_screen() — NOT is_fullscreen_tui() — to
+            // avoid false-positives when shell output fills the screen.
             let child_in_alt = active_pane(&win.root, &win.active_path)
-                .map_or(false, |p| crate::window_ops::is_fullscreen_tui(p));
+                .map_or(false, |p| {
+                    if let Ok(parser) = p.term.lock() {
+                        return parser.screen().alternate_screen();
+                    }
+                    false
+                });
             if child_in_alt {
                 if let Some(area) = active_area {
                     if let Some(active) = active_pane_mut(&mut win.root, &win.active_path) {

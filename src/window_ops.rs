@@ -598,13 +598,17 @@ fn remote_scroll_wheel(app: &mut AppState, x: u16, y: u16, up: bool) {
     //
     // IMPORTANT (tmux parity): For scroll events, we ONLY check alternate_screen()
     // to decide whether to forward to the child or enter copy mode.
-    // We do NOT use pane_wants_mouse() / mouse_protocol_mode() because:
-    //   - PSReadLine on ConPTY spuriously enables AnyMotion mouse tracking
-    //     when it receives Win32 MOUSE_EVENT injections (e.g. from client-side
-    //     text selection clicks).
-    //   - tmux itself only checks alternate screen for scroll, not mouse tracking mode.
-    //   - Normal shells (PowerShell, cmd, bash) should scroll into copy mode.
-    //   - TUI apps (htop, vim, etc.) are always in alternate screen.
+    //
+    // We do NOT use:
+    //   - pane_wants_mouse() / mouse_protocol_mode(): PSReadLine on ConPTY
+    //     spuriously enables AnyMotion mouse tracking.
+    //   - is_fullscreen_tui() heuristic: A shell prompt after `ls` / `dir` can
+    //     fill the last rows + leave the cursor at the bottom, causing a false
+    //     positive that prevents scroll-to-copy-mode.
+    //
+    // alternate_screen() is reliable: all modern TUI apps (nvim, htop, vim,
+    // opencode) correctly report alternate screen through ConPTY.  Testing
+    // confirms nvim shows alternate_on=1.  Shell prompts always show 0.
     let (child_in_alt_screen, target_area_opt, sgr_btn, button_state) = {
         let win = &mut app.windows[app.active_idx];
         let mut rects: Vec<(Vec<usize>, Rect)> = Vec::new();
@@ -628,15 +632,9 @@ fn remote_scroll_wheel(app: &mut AppState, x: u16, y: u16, up: bool) {
         let alt = active_pane(&win.root, &win.active_path)
             .map_or(false, |p| {
                 if let Ok(parser) = p.term.lock() {
-                    if parser.screen().alternate_screen() {
-                        return true;
-                    }
+                    return parser.screen().alternate_screen();
                 }
-                // Fallback heuristic: ConPTY may strip DECSET 1049h for native
-                // children so alternate_screen() returns false even when a TUI
-                // app (nvim, opencode, etc.) is running.  Use the fullscreen
-                // content heuristic as a fallback.  (fixes #60)
-                is_fullscreen_tui(p)
+                false
             });
         let sgr_btn: u8 = if up { 64 } else { 65 };
         let wheel_delta: i16 = if up { 120 } else { -120 };
