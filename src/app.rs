@@ -416,8 +416,8 @@ pub fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<
                 let mut rects: Vec<(Vec<usize>, Rect)> = Vec::new();
                 compute_rects(&win.root, app.last_window_area, &mut rects);
                 for (i, (_, r)) in rects.iter().enumerate() {
-                    let n = i + 1;
-                    if n > 9 { break; }
+                    if i >= 10 { break; }
+                    let disp = (i + app.pane_base_index) % 10;
                     let bw = 7u16;
                     let bh = 3u16;
                     let bx = r.x + r.width.saturating_sub(bw) / 2;
@@ -425,7 +425,6 @@ pub fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<
                     let b = Rect { x: bx, y: by, width: bw, height: bh };
                     let block = Block::default().borders(Borders::ALL).style(Style::default().bg(Color::Yellow).fg(Color::Black));
                     let inner = block.inner(b);
-                    let disp = if n == 10 { 0 } else { n };
                     let line = Line::from(Span::styled(format!(" {} ", disp), Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD)));
                     let para = Paragraph::new(line).alignment(Alignment::Center);
                     f.render_widget(Clear, b);
@@ -628,7 +627,7 @@ pub fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<
         }
 
         if let Mode::PaneChooser { opened_at } = &app.mode {
-            if opened_at.elapsed() > Duration::from_millis(1500) { app.mode = Mode::Passthrough; }
+            if opened_at.elapsed() > Duration::from_millis(app.display_panes_time_ms) { app.mode = Mode::Passthrough; }
         }
 
         if event::poll(Duration::from_millis(20))? {

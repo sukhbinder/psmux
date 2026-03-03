@@ -188,8 +188,9 @@ pub fn handle_key(app: &mut AppState, key: KeyEvent) -> io::Result<bool> {
                     compute_rects(&win.root, app.last_window_area, &mut rects);
                     app.display_map.clear();
                     for (i, (path, _)) in rects.into_iter().enumerate() {
-                        let n = i + 1;
-                        if n <= 10 { app.display_map.push((n, path)); } else { break; }
+                        if i >= 10 { break; }
+                        let digit = (i + app.pane_base_index) % 10;
+                        app.display_map.push((digit, path));
                     }
                     app.mode = Mode::PaneChooser { opened_at: Instant::now() };
                     true
@@ -763,15 +764,14 @@ pub fn handle_key(app: &mut AppState, key: KeyEvent) -> io::Result<bool> {
             match key.code {
                 KeyCode::Esc | KeyCode::Char('q') => { app.mode = Mode::Passthrough; }
                 KeyCode::Char(d) if d.is_ascii_digit() => {
-                    let raw = d.to_digit(10).unwrap() as usize;
-                    let choice = if raw == 0 { 10 } else { raw };
+                    let choice = d.to_digit(10).unwrap() as usize;
                     if let Some((_, path)) = app.display_map.iter().find(|(n, _)| *n == choice) {
                         let win = &mut app.windows[app.active_idx];
                         win.active_path = path.clone();
-                        app.mode = Mode::Passthrough;
                     }
+                    app.mode = Mode::Passthrough;
                 }
-                _ => {}
+                _ => { app.mode = Mode::Passthrough; }
             }
             Ok(false)
         }

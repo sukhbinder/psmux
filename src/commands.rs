@@ -266,8 +266,9 @@ pub fn execute_action(app: &mut AppState, action: &Action) -> io::Result<bool> {
             compute_rects(&win.root, app.last_window_area, &mut rects);
             app.display_map.clear();
             for (i, (path, _)) in rects.into_iter().enumerate() {
-                let n = i + 1;
-                if n <= 10 { app.display_map.push((n, path)); } else { break; }
+                if i >= 10 { break; }
+                let digit = (i + app.pane_base_index) % 10;
+                app.display_map.push((digit, path));
             }
             app.mode = Mode::PaneChooser { opened_at: Instant::now() };
         }
