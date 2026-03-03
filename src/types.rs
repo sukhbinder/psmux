@@ -392,6 +392,9 @@ pub struct AppState {
     /// so that `env VAR=val command` syntax works (required by Claude Code, etc.).
     /// Default: on
     pub env_shim: bool,
+    /// Last mouse hover position (col, row) for same-coordinate deduplication.
+    /// Windows Terminal suppresses consecutive MOUSE_MOVED at the same position.
+    pub last_hover_pos: Option<(u16, u16)>,
 }
 
 impl AppState {
@@ -511,6 +514,7 @@ impl AppState {
             set_clipboard: "on".to_string(),
             clipboard_osc52: None,
             env_shim: true,
+            last_hover_pos: None,
         }
     }
 
