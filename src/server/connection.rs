@@ -63,8 +63,10 @@ let mut global_target_pane: Option<usize> = None;
 let mut global_pane_is_id = false;
 let mut line = String::new();
 if r.read_line(&mut line).is_err() {
+    { let p = format!("{}/.psmux/mouse_debug.log", std::env::var("USERPROFILE").unwrap_or_default()); let _ = std::fs::OpenOptions::new().create(true).append(true).open(&p).map(|mut f| { use std::io::Write; let _ = writeln!(f, "[CONN] post-auth read_line FAILED"); }); }
     return;
 }
+{ let p = format!("{}/.psmux/mouse_debug.log", std::env::var("USERPROFILE").unwrap_or_default()); let _ = std::fs::OpenOptions::new().create(true).append(true).open(&p).map(|mut f| { use std::io::Write; let _ = writeln!(f, "[CONN] post-auth line: {:?}", line.trim()); }); }
 
 // Check if client requests persistent connection mode
 if line.trim() == "PERSISTENT" {
@@ -390,6 +392,7 @@ match cmd {
         if args.len()>=2 { if let (Ok(x),Ok(y))=(args[0].parse::<u16>(),args[1].parse::<u16>()) { let _ = tx.send(CtrlReq::MouseUpMiddle(x,y)); } }
     }
     "mouse-move" => {
+        { let p = format!("{}/.psmux/mouse_debug.log", std::env::var("USERPROFILE").unwrap_or_default()); let _ = std::fs::OpenOptions::new().create(true).append(true).open(&p).map(|mut f| { use std::io::Write; let _ = writeln!(f, "[CONN] mouse-move cmd: args={:?}", args); }); }
         if args.len()>=2 { if let (Ok(x),Ok(y))=(args[0].parse::<u16>(),args[1].parse::<u16>()) { let _ = tx.send(CtrlReq::MouseMove(x,y)); } }
     }
     "scroll-up" => {

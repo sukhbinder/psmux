@@ -11,22 +11,13 @@ use crate::pane::{detect_shell, build_default_shell, set_tmux_env};
 use crate::copy_mode::{enter_copy_mode, exit_copy_mode, scroll_copy_up, scroll_copy_down, yank_selection};
 use crate::platform::mouse_inject;
 
-/// Mouse debug logger — writes to ~/.psmux/mouse_debug.log when enabled.
-/// Set PSMUX_MOUSE_DEBUG=1 environment variable to enable.
+/// Mouse debug logger — writes to ~/.psmux/mouse_debug.log unconditionally.
 fn mouse_log(msg: &str) {
-    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-    static CHECKED: AtomicBool = AtomicBool::new(false);
-    static ENABLED: AtomicBool = AtomicBool::new(false);
+    use std::sync::atomic::{AtomicU32, Ordering};
     static COUNT: AtomicU32 = AtomicU32::new(0);
 
-    if !CHECKED.swap(true, Ordering::Relaxed) {
-        let on = std::env::var("PSMUX_MOUSE_DEBUG").map_or(false, |v| v == "1" || v == "true");
-        ENABLED.store(on, Ordering::Relaxed);
-    }
-    if !ENABLED.load(Ordering::Relaxed) { return; }
-
     let n = COUNT.fetch_add(1, Ordering::Relaxed);
-    if n > 500 { return; } // cap log size
+    if n > 2000 { return; } // cap log size
 
     let home = std::env::var("USERPROFILE").or_else(|_| std::env::var("HOME")).unwrap_or_default();
     let path = format!("{}/.psmux/mouse_debug.log", home);
@@ -603,18 +594,12 @@ pub fn remote_mouse_motion(app: &mut AppState, x: u16, y: u16) {
     let mut rects: Vec<(Vec<usize>, Rect)> = Vec::new();
     compute_rects(&win.root, app.last_window_area, &mut rects);
 
-    // Use the permissive heuristic for hover: only check if the last row
-    // has content (matches layout.rs).  The strict is_fullscreen_tui()
-    // requires the cursor in the bottom 3 rows, which fails for apps like
-    // opencode where the cursor sits at a mid-screen text input field.
-    // False positives (hover sent to shell) are harmless — shells ignore
-    // bare motion events.
-    let in_tui = active_pane(&win.root, &win.active_path)
-        .map_or(false, |p| screen_has_tui_content(p));
-    mouse_log(&format!("remote_mouse_motion: x={} y={} screen_has_tui_content={}", x, y, in_tui));
-    if !in_tui {
-        return;
-    }
+    // Unconditionally forward hover to the active pane.
+    // SGR button 35 (bare motion) is harmless at shell prompts — PSReadLine
+    // ignores bare motion, and ReadFile-based apps never see the MOUSE_EVENT.
+    // Gating hover behind is_fullscreen_tui / screen_has_tui_content caused
+    // false negatives for apps like opencode whose cursor sits mid-screen.
+    mouse_log(&format!("remote_mouse_motion: x={} y={}", x, y));
 
     if let Some(area) = rects.iter().find(|(path, _)| *path == win.active_path).map(|(_, a)| *a) {
         let (col, row) = pane_inner_cell_0based(area, x, y);

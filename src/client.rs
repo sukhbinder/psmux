@@ -1438,18 +1438,25 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                             MouseEventKind::Up(MouseButton::Right) => {}
                             MouseEventKind::Up(MouseButton::Middle) => {}
                             MouseEventKind::Moved => {
-                                // Forward bare mouse motion (hover) to server only when the
-                                // active pane is in alternate screen mode (real TUI app like
-                                // nvim, opencode, htop).  At a shell prompt, hover is not sent
-                                // to avoid wasteful socket traffic.
-                                let tui_active = if !prev_dump_buf.is_empty() {
-                                    serde_json::from_str::<DumpState>(&prev_dump_buf)
-                                        .map(|s| active_pane_in_alt_screen(&s.layout))
-                                        .unwrap_or(false)
-                                } else { false };
-                                if tui_active {
-                                    cmd_batch.push(format!("mouse-move {} {}\n", me.column, me.row));
+                                // Forward bare mouse motion (hover) to server unconditionally.
+                                // SGR button 35 (bare motion) is harmless to shells —
+                                // PSReadLine ignores bare motion MOUSE_EVENT records, and
+                                // ReadFile-based apps (opencode) receive no data when
+                                // ENABLE_VIRTUAL_TERMINAL_INPUT is not set.
+                                // Same-coordinate dedup on the server prevents flooding.
+                                {
+                                    use std::sync::atomic::{AtomicU32, Ordering};
+                                    static N: AtomicU32 = AtomicU32::new(0);
+                                    let n = N.fetch_add(1, Ordering::Relaxed);
+                                    if n < 50 {
+                                        let p = format!("{}/.psmux/mouse_debug.log", std::env::var("USERPROFILE").unwrap_or_default());
+                                        let _ = std::fs::OpenOptions::new().create(true).append(true).open(&p).map(|mut f| {
+                                            use std::io::Write;
+                                            let _ = writeln!(f, "[CLIENT] Moved col={} row={} -> sending mouse-move", me.column, me.row);
+                                        });
+                                    }
                                 }
+                                cmd_batch.push(format!("mouse-move {} {}\n", me.column, me.row));
                             }
                             MouseEventKind::ScrollUp => {
                                 // Clear client-side selection when scrolling — server may
