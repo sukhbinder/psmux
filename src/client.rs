@@ -483,6 +483,15 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
     // SSH mode: periodically re-send mouse-enable escape sequences.
     let is_ssh_mode = crate::ssh_input::is_ssh_session();
     let mut last_mouse_enable = Instant::now();
+    // ── Cursor blink stabilisation ──────────────────────────────────
+    // Cache the last-sent DECSCUSR code so we only write it when it
+    // actually changes (avoids resetting WT's blink timer every frame).
+    let mut last_cursor_style: u8 = 255;
+    // Hysteresis counter: only hide cursor after N consecutive frames
+    // where the server reports hide_cursor=true.  Prevents rapid
+    // show/hide cycling caused by ConPTY timing jitter.
+    let mut hide_cursor_count: u8 = 0;
+    const HIDE_CURSOR_THRESHOLD: u8 = 3;
     loop {
         // Expire stale key_send_instant after 30ms — ConPTY echo should
         // have arrived by then; stop force-dumping to save CPU.
@@ -1444,18 +1453,6 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                                 // ReadFile-based apps (opencode) receive no data when
                                 // ENABLE_VIRTUAL_TERMINAL_INPUT is not set.
                                 // Same-coordinate dedup on the server prevents flooding.
-                                {
-                                    use std::sync::atomic::{AtomicU32, Ordering};
-                                    static N: AtomicU32 = AtomicU32::new(0);
-                                    let n = N.fetch_add(1, Ordering::Relaxed);
-                                    if n < 50 {
-                                        let p = format!("{}/.psmux/mouse_debug.log", std::env::var("USERPROFILE").unwrap_or_default());
-                                        let _ = std::fs::OpenOptions::new().create(true).append(true).open(&p).map(|mut f| {
-                                            use std::io::Write;
-                                            let _ = writeln!(f, "[CLIENT] Moved col={} row={} -> sending mouse-move", me.column, me.row);
-                                        });
-                                    }
-                                }
                                 cmd_batch.push(format!("mouse-move {} {}\n", me.column, me.row));
                             }
                             MouseEventKind::ScrollUp => {
@@ -1623,13 +1620,51 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
             client_log("parse", &format!("OK in {}us, {} windows", _parse_us, state.windows.len()));
         }
 
-        let root = state.layout;
+        let mut root = state.layout;
         let windows = state.windows;
         last_tree = state.tree;
         let base_index = state.base_index;
         let dim_preds = state.prediction_dimming;
         let clock_active = state.clock_mode;
         let state_cursor_style_code = state.cursor_style_code;
+
+        // ── Stabilise active pane's cursor visibility ────────────────
+        // ConPTY timing can cause hide_cursor to flip between frames.
+        // Use hysteresis: only hide after HIDE_CURSOR_THRESHOLD
+        // consecutive frames report hide_cursor=true.
+        {
+            fn active_hide_cursor(node: &LayoutJson) -> Option<bool> {
+                match node {
+                    LayoutJson::Leaf { active, hide_cursor, .. } => {
+                        if *active { Some(*hide_cursor) } else { None }
+                    }
+                    LayoutJson::Split { children, .. } => {
+                        children.iter().find_map(active_hide_cursor)
+                    }
+                }
+            }
+            fn set_active_hide_cursor(node: &mut LayoutJson, val: bool) {
+                match node {
+                    LayoutJson::Leaf { active, hide_cursor, .. } => {
+                        if *active { *hide_cursor = val; }
+                    }
+                    LayoutJson::Split { children, .. } => {
+                        for c in children { set_active_hide_cursor(c, val); }
+                    }
+                }
+            }
+            if let Some(hc) = active_hide_cursor(&root) {
+                if hc {
+                    hide_cursor_count = hide_cursor_count.saturating_add(1);
+                    if hide_cursor_count < HIDE_CURSOR_THRESHOLD {
+                        // Not enough consecutive hides — override to visible
+                        set_active_hide_cursor(&mut root, false);
+                    }
+                } else {
+                    hide_cursor_count = 0;
+                }
+            }
+        }
 
         // ── OSC 52: propagate server-side clipboard to local terminal ────
         // When the server copies text (yank_selection / copy mode),
@@ -1754,6 +1789,9 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
             let sz = terminal.size().unwrap_or_default();
             client_log("draw", &format!("pre-draw terminal_size={}x{}", sz.width, sz.height));
         }
+        // Hide cursor before diff-write so the cursor doesn't visibly
+        // jump around while ratatui writes cell changes.
+        let _ = crossterm::execute!(std::io::stdout(), crossterm::cursor::Hide);
         terminal.draw(|f| {
             let area = f.area();
             let constraints = if status_at_top {
@@ -2494,6 +2532,13 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
         // Forward active pane's cursor shape (DECSCUSR) to the real terminal.
         // If no child DECSCUSR was received (ConPTY ate it on Win10), fall
         // back to the user-configured cursor-style option.
+        //
+        // To prevent rapid blink-timer resets in Windows Terminal, we:
+        // 1. Only send DECSCUSR when the effective style actually changes.
+        // 2. During rapid output (content changing between frames), use the
+        //    *steady* variant of the cursor style.  This matches WT's own
+        //    behaviour of forcing the cursor ON during buffer mutations.
+        //    When output settles, the next idle frame restores blinking.
         {
             fn find_active_cursor_shape(node: &LayoutJson) -> Option<u8> {
                 match node {
@@ -2505,20 +2550,31 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                     }
                 }
             }
-            let effective = find_active_cursor_shape(&root)
+            let mut effective = find_active_cursor_shape(&root)
                 .unwrap_or_else(|| state_cursor_style_code.unwrap_or_else(crate::rendering::configured_cursor_code));
-            use crossterm::cursor::SetCursorStyle;
-            let style = match effective {
-                0 => SetCursorStyle::DefaultUserShape,
-                1 => SetCursorStyle::BlinkingBlock,
-                2 => SetCursorStyle::SteadyBlock,
-                3 => SetCursorStyle::BlinkingUnderScore,
-                4 => SetCursorStyle::SteadyUnderScore,
-                5 => SetCursorStyle::BlinkingBar,
-                6 => SetCursorStyle::SteadyBar,
-                _ => SetCursorStyle::DefaultUserShape,
-            };
-            let _ = crossterm::execute!(std::io::stdout(), style);
+            // During rapid output, use the steady variant (even DECSCUSR code)
+            // to prevent blink-timer jitter.  Odd codes 1/3/5 are blinking;
+            // even codes 2/4/6 are the steady equivalents.
+            let content_changed = got_frame && dump_buf != prev_dump_buf;
+            if content_changed && effective >= 1 && effective <= 5 && effective % 2 == 1 {
+                effective += 1; // blinking → steady
+            }
+            // Only send DECSCUSR when the effective style changes.
+            if effective != last_cursor_style {
+                last_cursor_style = effective;
+                use crossterm::cursor::SetCursorStyle;
+                let style = match effective {
+                    0 => SetCursorStyle::DefaultUserShape,
+                    1 => SetCursorStyle::BlinkingBlock,
+                    2 => SetCursorStyle::SteadyBlock,
+                    3 => SetCursorStyle::BlinkingUnderScore,
+                    4 => SetCursorStyle::SteadyUnderScore,
+                    5 => SetCursorStyle::BlinkingBar,
+                    6 => SetCursorStyle::SteadyBar,
+                    _ => SetCursorStyle::DefaultUserShape,
+                };
+                let _ = crossterm::execute!(std::io::stdout(), style);
+            }
         }
 
         let _render_us = _t_parse.elapsed().as_micros().saturating_sub(_parse_us as u128);

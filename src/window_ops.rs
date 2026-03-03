@@ -11,13 +11,19 @@ use crate::pane::{detect_shell, build_default_shell, set_tmux_env};
 use crate::copy_mode::{enter_copy_mode, exit_copy_mode, scroll_copy_up, scroll_copy_down, yank_selection};
 use crate::platform::mouse_inject;
 
-/// Mouse debug logger — writes to ~/.psmux/mouse_debug.log unconditionally.
+/// Mouse debug logger — writes to ~/.psmux/mouse_debug.log when
+/// PSMUX_MOUSE_DEBUG=1 is set.
 fn mouse_log(msg: &str) {
+    use std::sync::LazyLock;
+    static ENABLED: LazyLock<bool> = LazyLock::new(|| {
+        std::env::var("PSMUX_MOUSE_DEBUG").unwrap_or_default() == "1"
+    });
+    if !*ENABLED { return; }
+
     use std::sync::atomic::{AtomicU32, Ordering};
     static COUNT: AtomicU32 = AtomicU32::new(0);
-
     let n = COUNT.fetch_add(1, Ordering::Relaxed);
-    if n > 2000 { return; } // cap log size
+    if n > 2000 { return; }
 
     let home = std::env::var("USERPROFILE").or_else(|_| std::env::var("HOME")).unwrap_or_default();
     let path = format!("{}/.psmux/mouse_debug.log", home);

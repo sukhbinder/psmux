@@ -451,7 +451,13 @@ pub fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<
     let mut quit = false;
     #[cfg(windows)]
     let mut bp_state = bracket_paste_detect::State::new();
+    // Cache last-sent DECSCUSR code to avoid redundant writes that
+    // reset Windows Terminal's cursor blink timer every frame.
+    let mut last_cursor_style: u8 = 255;
     loop {
+        // Hide cursor before diff-write so the cursor doesn't visibly
+        // jump around while ratatui writes cell changes.
+        let _ = crossterm::execute!(std::io::stdout(), crossterm::cursor::Hide);
         terminal.draw(|f| {
             let area = f.area();
             let status_at_top = app.status_position == "top";
@@ -877,29 +883,33 @@ pub fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<
         // child's DECSCUSR (Windows 10 without passthrough mode).  In that
         // case, fall back to the user-configured cursor-style option so TUI
         // apps like Claude still get a sensible cursor (default: bar).
+        //
+        // Only send when the effective style changes to avoid resetting
+        // Windows Terminal's cursor blink timer every frame.
         {
             let win = &app.windows[app.active_idx];
             if let Some(pane) = crate::tree::active_pane(&win.root, &win.active_path) {
                 let shape = pane.cursor_shape.load(std::sync::atomic::Ordering::Relaxed);
-                // Resolve effective shape: child's DECSCUSR if received,
-                // otherwise the configured cursor-style fallback.
                 let effective = if shape <= 6 {
                     shape
                 } else {
                     crate::rendering::configured_cursor_code()
                 };
-                use crossterm::cursor::SetCursorStyle;
-                let style = match effective {
-                    0 => SetCursorStyle::DefaultUserShape,
-                    1 => SetCursorStyle::BlinkingBlock,
-                    2 => SetCursorStyle::SteadyBlock,
-                    3 => SetCursorStyle::BlinkingUnderScore,
-                    4 => SetCursorStyle::SteadyUnderScore,
-                    5 => SetCursorStyle::BlinkingBar,
-                    6 => SetCursorStyle::SteadyBar,
-                    _ => SetCursorStyle::DefaultUserShape,
-                };
-                let _ = crossterm::execute!(std::io::stdout(), style);
+                if effective != last_cursor_style {
+                    last_cursor_style = effective;
+                    use crossterm::cursor::SetCursorStyle;
+                    let style = match effective {
+                        0 => SetCursorStyle::DefaultUserShape,
+                        1 => SetCursorStyle::BlinkingBlock,
+                        2 => SetCursorStyle::SteadyBlock,
+                        3 => SetCursorStyle::BlinkingUnderScore,
+                        4 => SetCursorStyle::SteadyUnderScore,
+                        5 => SetCursorStyle::BlinkingBar,
+                        6 => SetCursorStyle::SteadyBar,
+                        _ => SetCursorStyle::DefaultUserShape,
+                    };
+                    let _ = crossterm::execute!(std::io::stdout(), style);
+                }
             }
         }
 
