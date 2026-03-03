@@ -80,13 +80,14 @@ pub fn create_window(pty_system: &dyn portable_pty::PtySystem, app: &mut AppStat
     // When no explicit command is given, use the configured default-shell
     // (from `set -g default-shell` / `default-command`).
     let mut shell_cmd = if command.is_some() {
-        build_command(command)
+        build_command(command, app.env_shim)
     } else if !app.default_shell.is_empty() {
-        build_default_shell(&app.default_shell)
+        build_default_shell(&app.default_shell, app.env_shim)
     } else {
-        build_command(None)
+        build_command(None, app.env_shim)
     };
     set_tmux_env(&mut shell_cmd, app.next_pane_id, app.control_port, app.socket_name.as_deref());
+    apply_user_environment(&mut shell_cmd, &app.environment);
     let child = pair
         .slave
         .spawn_command(shell_cmd)
@@ -116,7 +117,7 @@ pub fn create_window(pty_system: &dyn portable_pty::PtySystem, app: &mut AppStat
         .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("take writer error: {e}")))?;
     conpty_preemptive_dsr_response(&mut *pty_writer);
     let epoch = std::time::Instant::now() - Duration::from_secs(2);
-    let pane = Pane { master: pair.master, writer: pty_writer, child, term, last_rows: size.rows, last_cols: size.cols, id: app.next_pane_id, title: format!("pane %{}", app.next_pane_id), child_pid, data_version, last_title_check: epoch, last_infer_title: epoch, dead: false, vt_bridge_cache: None, vti_mode_cache: None, mouse_input_cache: None, cursor_shape, copy_state: None };
+    let pane = Pane { master: pair.master, writer: pty_writer, child, term, last_rows: size.rows, last_cols: size.cols, id: app.next_pane_id, title: format!("pane %{}", app.next_pane_id), child_pid, data_version, last_title_check: epoch, last_infer_title: epoch, dead: false, vt_bridge_cache: None, vti_mode_cache: None, mouse_input_cache: None, cursor_shape, copy_state: None, pane_style: None };
     app.next_pane_id += 1;
     let win_name = command.map(|c| default_shell_name(Some(c), None)).unwrap_or_else(|| default_shell_name(None, configured_shell));
     app.windows.push(Window { root: Node::Leaf(pane), active_path: vec![], name: win_name, id: app.next_win_id, activity_flag: false, bell_flag: false, silence_flag: false, last_output_time: std::time::Instant::now(), last_seen_version: 0, manual_rename: false, layout_index: 0 });
@@ -141,6 +142,7 @@ pub fn create_window_raw(pty_system: &dyn portable_pty::PtySystem, app: &mut App
 
     let mut shell_cmd = build_raw_command(raw_args);
     set_tmux_env(&mut shell_cmd, app.next_pane_id, app.control_port, app.socket_name.as_deref());
+    apply_user_environment(&mut shell_cmd, &app.environment);
     let child = pair
         .slave
         .spawn_command(shell_cmd)
@@ -167,7 +169,7 @@ pub fn create_window_raw(pty_system: &dyn portable_pty::PtySystem, app: &mut App
         .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("take writer error: {e}")))?;
     conpty_preemptive_dsr_response(&mut *pty_writer);
     let epoch = std::time::Instant::now() - Duration::from_secs(2);
-    let pane = Pane { master: pair.master, writer: pty_writer, child, term, last_rows: size.rows, last_cols: size.cols, id: app.next_pane_id, title: format!("pane %{}", app.next_pane_id), child_pid, data_version, last_title_check: epoch, last_infer_title: epoch, dead: false, vt_bridge_cache: None, vti_mode_cache: None, mouse_input_cache: None, cursor_shape, copy_state: None };
+    let pane = Pane { master: pair.master, writer: pty_writer, child, term, last_rows: size.rows, last_cols: size.cols, id: app.next_pane_id, title: format!("pane %{}", app.next_pane_id), child_pid, data_version, last_title_check: epoch, last_infer_title: epoch, dead: false, vt_bridge_cache: None, vti_mode_cache: None, mouse_input_cache: None, cursor_shape, copy_state: None, pane_style: None };
     app.next_pane_id += 1;
     let win_name = std::path::Path::new(&raw_args[0]).file_stem().and_then(|s| s.to_str()).unwrap_or(&raw_args[0]).to_string();
     app.windows.push(Window { root: Node::Leaf(pane), active_path: vec![], name: win_name, id: app.next_win_id, activity_flag: false, bell_flag: false, silence_flag: false, last_output_time: std::time::Instant::now(), last_seen_version: 0, manual_rename: false, layout_index: 0 });
@@ -248,13 +250,14 @@ pub fn split_active_with_command(app: &mut AppState, kind: LayoutKind, command: 
     let pair = pty_system.openpty(size).map_err(|e| io::Error::new(io::ErrorKind::Other, format!("openpty error: {e}")))?;
     // When no explicit command is given, use the configured default-shell.
     let mut shell_cmd = if command.is_some() {
-        build_command(command)
+        build_command(command, app.env_shim)
     } else if !app.default_shell.is_empty() {
-        build_default_shell(&app.default_shell)
+        build_default_shell(&app.default_shell, app.env_shim)
     } else {
-        build_command(None)
+        build_command(None, app.env_shim)
     };
     set_tmux_env(&mut shell_cmd, app.next_pane_id, app.control_port, app.socket_name.as_deref());
+    apply_user_environment(&mut shell_cmd, &app.environment);
     let child = pair.slave.spawn_command(shell_cmd).map_err(|e| io::Error::new(io::ErrorKind::Other, format!("spawn shell error: {e}")))?;
     // Close the slave handle immediately – see create_window() comment.
     drop(pair.slave);
@@ -271,7 +274,7 @@ pub fn split_active_with_command(app: &mut AppState, kind: LayoutKind, command: 
         .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("take writer error: {e}")))?;
     conpty_preemptive_dsr_response(&mut *pty_writer);
     let epoch = std::time::Instant::now() - Duration::from_secs(2);
-    let new_leaf = Node::Leaf(Pane { master: pair.master, writer: pty_writer, child, term, last_rows: size.rows, last_cols: size.cols, id: app.next_pane_id, title: format!("pane %{}", app.next_pane_id), child_pid, data_version, last_title_check: epoch, last_infer_title: epoch, dead: false, vt_bridge_cache: None, vti_mode_cache: None, mouse_input_cache: None, cursor_shape, copy_state: None });
+    let new_leaf = Node::Leaf(Pane { master: pair.master, writer: pty_writer, child, term, last_rows: size.rows, last_cols: size.cols, id: app.next_pane_id, title: format!("pane %{}", app.next_pane_id), child_pid, data_version, last_title_check: epoch, last_infer_title: epoch, dead: false, vt_bridge_cache: None, vti_mode_cache: None, mouse_input_cache: None, cursor_shape, copy_state: None, pane_style: None });
     app.next_pane_id += 1;
     let win = &mut app.windows[app.active_idx];
     replace_leaf_with_split(&mut win.root, &win.active_path, kind, new_leaf);
@@ -294,7 +297,7 @@ pub fn kill_active_pane(app: &mut AppState) -> io::Result<()> {
 }
 
 pub fn detect_shell() -> CommandBuilder {
-    build_command(None)
+    build_command(None, false)
 }
 
 /// Set TMUX and TMUX_PANE environment variables on a CommandBuilder.
@@ -311,7 +314,73 @@ pub fn set_tmux_env(builder: &mut CommandBuilder, pane_id: usize, control_port: 
     builder.env("TMUX_PANE", format!("%{}", pane_id));
 }
 
-pub fn build_command(command: Option<&str>) -> CommandBuilder {
+/// Apply user-defined environment variables (from set-environment -g) to a CommandBuilder.
+/// This ensures variables set via config or runtime `set-environment` are explicitly
+/// passed to every child pane, in addition to process inheritance.
+pub fn apply_user_environment(builder: &mut CommandBuilder, environment: &std::collections::HashMap<String, String>) {
+    for (key, value) in environment {
+        builder.env(key, value);
+    }
+}
+
+/// PowerShell env shim snippet — defines a `Global:env` function that translates
+/// POSIX `env VAR=val ... command args` invocations into PowerShell equivalents.
+/// Only defined when no native `env.exe` is found on PATH.
+///
+/// Key design decisions for Windows + Claude Code agent teams compatibility:
+///   1. POSIX backslash-escape removal uses `\\([^\w\\])` so that escapes like
+///      `\@` and `\:` (produced by shell-quote) are stripped, while Windows
+///      path separators (`\U` in `C:\Users`) are preserved (letter after `\`
+///      is a `\w` character, so the regex does NOT match).
+///   2. Escape stripping is applied to ALL arguments (env var values, the
+///      command itself, and every trailing arg), not just env-var values.
+///   3. `.js` / `.mjs` files are detected and automatically executed via
+///      `node` because Windows associates `.js` with WScript.exe (WSH),
+///      which cannot run Node.js code and instead shows error dialogs.
+const ENV_SHIM_PS: &str = concat!(
+    "if(-not(Get-Command env -EA 0 -Type Application)){ ",
+    "function Global:env { ",
+    // _pu: POSIX-unescape helper — strips `\` before non-word, non-backslash
+    // chars (e.g. \@ → @, \: → :) produced by npm shell-quote.
+    // SKIPS Windows absolute paths (C:\...) where `\` is a directory
+    // separator, not a POSIX escape.  On Linux paths use `/` so
+    // there's never a collision; on Windows `\@` in a path like
+    // `node_modules\@anthropic-ai` must be preserved.
+    "function _pu($s){if($s -match '^[A-Za-z]:\\\\'){return $s}; $s -replace '\\\\([^\\w\\\\])','$1'}; ",
+    // _shebang: reads the first line of a script file and extracts the
+    // interpreter, mimicking Linux kernel shebang execution.
+    // Handles #!/usr/bin/env node, #!/usr/bin/node, #!/usr/bin/env deno, etc.
+    "function _shebang($f){ ",
+    "try{ $l=(Get-Content $f -TotalCount 1 -EA Stop); ",
+    "if($l -match '^#!\\s*(.+)$'){ ",
+    "$p=$Matches[1].Trim(); ",
+    "if($p -match '/env\\s+(.+)$'){return ($Matches[1].Trim()-split'\\s+')[0]}; ",
+    "return ($p-split'/')[-1] } }catch{}; $null }; ",
+    "$v=@{}; $i=0; ",
+    "while($i -lt $args.Count){ ",
+    "if([string]$args[$i] -match '^([A-Za-z_]\\w*)=(.*)$'){ ",
+    "$v[$Matches[1]]=(_pu $Matches[2]); $i++ ",
+    "} else { break } }; ",
+    "if($i -lt $args.Count){ ",
+    "foreach($e in $v.GetEnumerator()){[Environment]::SetEnvironmentVariable($e.Key,$e.Value,'Process')}; ",
+    "$cmd=(_pu ([string]$args[$i])); $rest=@(); ",
+    "if($i+1 -lt $args.Count){$rest=@($args[($i+1)..($args.Count-1)]|ForEach-Object{_pu ([string]$_)})}; ",
+    // For script files (.js/.mjs/.ts/.sh/.py/etc), read the shebang line
+    // to determine the interpreter — exactly like Linux kernel does.
+    // Falls back to node for .js/.mjs only if no shebang is found
+    // (since Windows associates .js with WScript.exe, not node).
+    "$interp=$null; ",
+    "$resolved=$cmd; if($cmd -match '^''(.+)''$'){$resolved=$Matches[1]}; ",
+    "if(Test-Path $resolved -EA 0){$interp=(_shebang $resolved)}; ",
+    "if($interp){& $interp $cmd @rest} ",
+    "elseif($cmd -match '\\.m?js$'){& node $cmd @rest} ",
+    "else{& $cmd @rest} ",
+    "} elseif($v.Count -gt 0){ ",
+    "foreach($e in $v.GetEnumerator()){[Environment]::SetEnvironmentVariable($e.Key,$e.Value,'Process')} ",
+    "} else { Get-ChildItem Env:|ForEach-Object{$_.Name+'='+$_.Value} } } }",
+);
+
+pub fn build_command(command: Option<&str>, env_shim: bool) -> CommandBuilder {
     // Capture CWD early — portable_pty on Windows defaults to USERPROFILE
     // (home dir) when no cwd is set on CommandBuilder, so we must set it
     // explicitly to honour the caller's working directory.
@@ -350,12 +419,17 @@ pub fn build_command(command: Option<&str>) -> CommandBuilder {
         // Predictions cause display corruption in terminal multiplexers because
         // PSReadLine's VT rendering races with ConPTY output capture.
         // We aggressively disable ALL prediction features with multiple fallback layers.
-        let psrl_init = concat!(
+        let psrl_base = concat!(
             "$PSStyle.OutputRendering = 'Ansi'; ",
             "try { Set-PSReadLineOption -PredictionSource None -ErrorAction Stop } catch {}; ",
             "try { Set-PSReadLineOption -PredictionViewStyle InlineView -ErrorAction Stop } catch {}; ",
             "try { Remove-PSReadLineKeyHandler -Chord 'F2' -ErrorAction Stop } catch {}",
         );
+        let psrl_init = if env_shim {
+            format!("{}; {}", psrl_base, ENV_SHIM_PS)
+        } else {
+            psrl_base.to_string()
+        };
         match shell {
             Some(path) => {
                 let mut builder = CommandBuilder::new(&path);
@@ -364,7 +438,7 @@ pub fn build_command(command: Option<&str>) -> CommandBuilder {
                 builder.env("COLORTERM", "truecolor");
                 builder.env("PSMUX_SESSION", "1");
                 if path.to_lowercase().contains("pwsh") {
-                    builder.args(["-NoLogo", "-NoExit", "-Command", psrl_init]);
+                    builder.args(["-NoLogo", "-NoExit", "-Command", &psrl_init]);
                 }
                 builder
             }
@@ -403,7 +477,7 @@ fn cached_which(program: &str) -> String {
 /// Build a CommandBuilder that launches the given shell path interactively.
 /// Used when `default-shell` / `default-command` is configured.
 /// Supports pwsh, powershell, cmd, and any arbitrary executable.
-pub fn build_default_shell(shell_path: &str) -> CommandBuilder {
+pub fn build_default_shell(shell_path: &str, env_shim: bool) -> CommandBuilder {
     // Extract the program (first token) and optional extra arguments.
     let parts: Vec<&str> = shell_path.split_whitespace().collect();
     let program = parts.first().copied().unwrap_or(shell_path);
@@ -429,13 +503,18 @@ pub fn build_default_shell(shell_path: &str) -> CommandBuilder {
 
     if lower.contains("pwsh") || lower.contains("powershell") {
         // PSReadLine prediction workaround for PowerShell-based shells.
-        let psrl_init = concat!(
+        let psrl_base = concat!(
             "$PSStyle.OutputRendering = 'Ansi'; ",
             "try { Set-PSReadLineOption -PredictionSource None -ErrorAction Stop } catch {}; ",
             "try { Set-PSReadLineOption -PredictionViewStyle InlineView -ErrorAction Stop } catch {}; ",
             "try { Remove-PSReadLineKeyHandler -Chord 'F2' -ErrorAction Stop } catch {}",
         );
-        builder.args(["-NoLogo", "-NoExit", "-Command", psrl_init]);
+        let psrl_init = if env_shim {
+            format!("{}; {}", psrl_base, ENV_SHIM_PS)
+        } else {
+            psrl_base.to_string()
+        };
+        builder.args(["-NoLogo", "-NoExit", "-Command", &psrl_init]);
     }
 
     builder
@@ -446,7 +525,7 @@ pub fn build_default_shell(shell_path: &str) -> CommandBuilder {
 /// Used when -- separator is specified in new-session.
 pub fn build_raw_command(raw_args: &[String]) -> CommandBuilder {
     if raw_args.is_empty() {
-        return build_command(None);
+        return build_command(None, true);
     }
     let program = &raw_args[0];
     let mut builder = CommandBuilder::new(program);

@@ -49,6 +49,11 @@ pub struct Pane {
     /// Per-pane copy mode state (tmux-style pane-local copy mode).
     /// Some(_) when this pane is in copy mode, None otherwise.
     pub copy_state: Option<CopyModeState>,
+    /// Per-pane style string (set via `select-pane -P "bg=...,fg=..."`).
+    /// Matches tmux's `window-style` / `window-active-style` pane option.
+    /// Stored for API compatibility; ConPTY rendering doesn't support
+    /// per-pane fg/bg tinting so this is not rendered yet.
+    pub pane_style: Option<String>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -383,6 +388,10 @@ pub struct AppState {
     pub set_clipboard: String,
     /// One-shot clipboard text to be sent to the client via OSC 52 (set by yank, consumed by dump-state).
     pub clipboard_osc52: Option<String>,
+    /// env-shim: inject a Unix-compatible `env` function into PowerShell panes
+    /// so that `env VAR=val command` syntax works (required by Claude Code, etc.).
+    /// Default: on
+    pub env_shim: bool,
 }
 
 impl AppState {
@@ -501,6 +510,7 @@ impl AppState {
             command_aliases: std::collections::HashMap::new(),
             set_clipboard: "on".to_string(),
             clipboard_osc52: None,
+            env_shim: true,
         }
     }
 
@@ -610,6 +620,7 @@ pub enum CtrlReq {
     ListTree(mpsc::Sender<String>),
     ToggleSync,
     SetPaneTitle(String),
+    SetPaneStyle(String),
     SendKeys(String, bool),
     SendKeysX(String),  // send-keys -X copy-mode-command
     SelectPane(String),
@@ -677,6 +688,7 @@ pub enum CtrlReq {
     ConfirmBefore(String, String),
     ClockMode,
     ResizePaneAbsolute(String, u16),
+    ResizePanePercent(String, u8), // axis, percentage (0-100)
     ShowOptionValue(mpsc::Sender<String>, String),
     ChooseBuffer(mpsc::Sender<String>),
     ServerInfo(mpsc::Sender<String>),

@@ -318,7 +318,10 @@ pub fn parse_config_line(app: &mut AppState, line: &str) {
         let mut i = 1;
         while i < parts.len() && parts[i].starts_with('-') { i += 1; }
         if i + 1 < parts.len() {
-            app.environment.insert(parts[i].to_string(), parts[i+1..].join(" "));
+            let val = parts[i+1..].join(" ");
+            app.environment.insert(parts[i].to_string(), val.clone());
+            // Also set on the server process so child panes inherit via env block
+            std::env::set_var(parts[i], &val);
         }
     }
 }
@@ -572,6 +575,9 @@ pub fn parse_option_value(app: &mut AppState, rest: &str, _is_global: bool) {
         "allow-passthrough" => { app.allow_passthrough = value.to_string(); }
         "copy-command" => { app.copy_command = value.to_string(); }
         "set-clipboard" => { app.set_clipboard = value.to_string(); }
+        "env-shim" => {
+            app.env_shim = matches!(value, "on" | "true" | "1");
+        }
         "command-alias" => {
             if let Some(pos) = value.find('=') {
                 let alias = value[..pos].trim().to_string();

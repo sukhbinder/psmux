@@ -853,11 +853,12 @@ pub fn respawn_active_pane(app: &mut AppState, pty_system_ref: Option<&dyn porta
     let size = PtySize { rows: pane.last_rows, cols: pane.last_cols, pixel_width: 0, pixel_height: 0 };
     let pair = pty_system.openpty(size).map_err(|e| io::Error::new(io::ErrorKind::Other, format!("openpty error: {e}")))?;
     let mut shell_cmd = if !app.default_shell.is_empty() {
-        build_default_shell(&app.default_shell)
+        build_default_shell(&app.default_shell, app.env_shim)
     } else {
         detect_shell()
     };
     set_tmux_env(&mut shell_cmd, pane_id, app.control_port, app.socket_name.as_deref());
+    crate::pane::apply_user_environment(&mut shell_cmd, &app.environment);
     let child = pair.slave.spawn_command(shell_cmd).map_err(|e| io::Error::new(io::ErrorKind::Other, format!("spawn shell error: {e}")))?;
     // Close the slave handle immediately – required for ConPTY.
     drop(pair.slave);

@@ -597,6 +597,16 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     let win = &mut app.windows[app.active_idx];
                     if let Some(p) = active_pane_mut(&mut win.root, &win.active_path) { p.title = title; }
                 }
+                CtrlReq::SetPaneStyle(style) => {
+                    // Per-pane styling (e.g. "bg=default,fg=blue") matching
+                    // tmux's `-P` flag which sets window-style + window-active-style.
+                    // Store on the pane for API compatibility; ConPTY rendering
+                    // doesn't support per-pane fg/bg tinting yet.
+                    let win = &mut app.windows[app.active_idx];
+                    if let Some(p) = active_pane_mut(&mut win.root, &win.active_path) {
+                        p.pane_style = Some(style);
+                    }
+                }
                 CtrlReq::SendKeys(keys, literal) => {
                     let in_copy = matches!(app.mode, Mode::CopyMode | Mode::CopySearch { .. });
                     if in_copy {
@@ -1855,6 +1865,13 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 }
                 CtrlReq::ResizePaneAbsolute(axis, size) => {
                     resize_pane_absolute(&mut app, &axis, size);
+                }
+                CtrlReq::ResizePanePercent(axis, pct) => {
+                    // Convert percentage to absolute size based on current window dimensions
+                    let area = app.last_window_area;
+                    let total = if axis == "x" { area.width } else { area.height };
+                    let abs_size = ((total as u32) * (pct as u32) / 100).max(1) as u16;
+                    resize_pane_absolute(&mut app, &axis, abs_size);
                 }
                 CtrlReq::ShowOptionValue(resp, name) => {
                     let val = get_option_value(&app, &name);

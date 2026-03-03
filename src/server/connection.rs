@@ -480,6 +480,13 @@ match cmd {
         if let Some(t) = title {
             let _ = tx.send(CtrlReq::SetPaneTitle(t));
         }
+        // Handle -P style (per-pane style, e.g. "bg=default,fg=blue")
+        // Claude Code uses this for agent pane coloring. Store silently
+        // even if rendering doesn't support it yet.
+        let pane_style = args.windows(2).find(|w| w[0] == "-P").map(|w| w[1].to_string());
+        if let Some(style) = pane_style {
+            let _ = tx.send(CtrlReq::SetPaneStyle(style));
+        }
         let _ = tx.send(CtrlReq::SelectPane(dir.to_string()));
     }
     "select-window" | "selectw" => {
@@ -543,11 +550,20 @@ match cmd {
         if args.iter().any(|a| *a == "-Z") {
             let _ = tx.send(CtrlReq::ZoomPane);
         } else
-        // Check for absolute resize (-x N or -y N)
-        if let Some(xv) = args.windows(2).find(|w| w[0] == "-x").and_then(|w| w[1].parse::<u16>().ok()) {
-            let _ = tx.send(CtrlReq::ResizePaneAbsolute("x".to_string(), xv));
-        } else if let Some(yv) = args.windows(2).find(|w| w[0] == "-y").and_then(|w| w[1].parse::<u16>().ok()) {
-            let _ = tx.send(CtrlReq::ResizePaneAbsolute("y".to_string(), yv));
+        // Check for absolute resize (-x N or -y N), supporting both
+        // absolute values (e.g. "60") and percentage strings (e.g. "30%").
+        if let Some(xval) = args.windows(2).find(|w| w[0] == "-x").map(|w| w[1]) {
+            if let Some(pct) = xval.strip_suffix('%').and_then(|n| n.parse::<u8>().ok()) {
+                let _ = tx.send(CtrlReq::ResizePanePercent("x".to_string(), pct));
+            } else if let Ok(abs) = xval.parse::<u16>() {
+                let _ = tx.send(CtrlReq::ResizePaneAbsolute("x".to_string(), abs));
+            }
+        } else if let Some(yval) = args.windows(2).find(|w| w[0] == "-y").map(|w| w[1]) {
+            if let Some(pct) = yval.strip_suffix('%').and_then(|n| n.parse::<u8>().ok()) {
+                let _ = tx.send(CtrlReq::ResizePanePercent("y".to_string(), pct));
+            } else if let Ok(abs) = yval.parse::<u16>() {
+                let _ = tx.send(CtrlReq::ResizePaneAbsolute("y".to_string(), abs));
+            }
         } else {
             let amount = args.iter().find(|a| a.parse::<u16>().is_ok()).and_then(|s| s.parse::<u16>().ok()).unwrap_or(1);
             let dir = if args.iter().any(|a| *a == "-U") { "U" }
