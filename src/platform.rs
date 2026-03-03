@@ -802,8 +802,21 @@ pub mod mouse_inject {
                     chars.push(b as u16);
                 }
             }
-            // Encode paste text as UTF-16
+            // Encode paste text as UTF-16, normalizing \n → \r for the
+            // console input buffer (Windows apps expect CR for line breaks;
+            // PSReadLine and other readline implementations treat \r as Enter).
+            let mut prev_cr = false;
             for c in text.chars() {
+                if c == '\n' {
+                    if !prev_cr {
+                        // Bare \n → \r
+                        chars.push('\r' as u16);
+                    }
+                    // If preceded by \r, the \r was already pushed; skip this \n
+                    prev_cr = false;
+                    continue;
+                }
+                prev_cr = c == '\r';
                 let mut buf = [0u16; 2];
                 let encoded = c.encode_utf16(&mut buf);
                 for &unit in encoded.iter() {
@@ -834,16 +847,49 @@ pub mod mouse_inject {
                 });
             }
 
-            let mut written: u32 = 0;
-            let result = WriteConsoleInputW(
-                handle,
-                records.as_ptr() as *const INPUT_RECORD,
-                records.len() as u32,
-                &mut written,
-            );
+            // WriteConsoleInputW can perform partial writes (returns fewer
+            // records than requested).  Retry in a loop so that large pastes
+            // are delivered in full; without this the closing bracket sequence
+            // can be silently dropped, breaking bracket paste mode in the
+            // child application.
+            //
+            // For very large pastes, the console input buffer may fill up.
+            // We limit each write to CHUNK_SIZE records and yield briefly
+            // between chunks to let the consumer (PSReadLine etc.) drain.
+            const CHUNK_SIZE: usize = 2048;
+            let mut offset: usize = 0;
+            let mut last_result: i32 = 1;
+            while offset < records.len() {
+                let mut written: u32 = 0;
+                let remaining = (records.len() - offset).min(CHUNK_SIZE);
+                last_result = WriteConsoleInputW(
+                    handle,
+                    records[offset..].as_ptr() as *const INPUT_RECORD,
+                    remaining as u32,
+                    &mut written,
+                );
+                if last_result == 0 || written == 0 {
+                    // Brief yield and retry once (buffer may temporarily be full)
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                    last_result = WriteConsoleInputW(
+                        handle,
+                        records[offset..].as_ptr() as *const INPUT_RECORD,
+                        remaining as u32,
+                        &mut written,
+                    );
+                    if last_result == 0 || written == 0 {
+                        break;
+                    }
+                }
+                offset += written as usize;
+                // Yield between chunks to let the consumer drain the buffer
+                if offset < records.len() && remaining >= CHUNK_SIZE {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+            }
 
             debug_log(&format!("send_bracketed_paste: pid={} bracket={} text_len={} records={} written={} ok={}",
-                child_pid, bracket, text.len(), records.len(), written, result != 0));
+                child_pid, bracket, text.len(), records.len(), offset, last_result != 0));
 
             CloseHandle(handle);
             FreeConsole();
@@ -851,7 +897,7 @@ pub mod mouse_inject {
                 AttachConsole(ATTACH_PARENT_PROCESS);
             }
 
-            result != 0
+            last_result != 0 && offset == records.len()
         }
     }
 }

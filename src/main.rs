@@ -829,6 +829,18 @@ fn run_main() -> io::Result<()> {
                 send_control(cmd)?;
                 return Ok(());
             }
+            // send-paste - Send text as a bracketed paste to the active pane
+            "send-paste" => {
+                // Accepts base64-encoded text (same as internal protocol)
+                if let Some(encoded) = cmd_args.get(1) {
+                    let cmd = format!("send-paste {}\n", encoded);
+                    send_control(cmd)?;
+                } else {
+                    eprintln!("psmux send-paste: requires base64-encoded text argument");
+                    std::process::exit(1);
+                }
+                return Ok(());
+            }
             // select-pane - Select the active pane
             "select-pane" | "selectp" => {
                 let mut cmd = "select-pane".to_string();

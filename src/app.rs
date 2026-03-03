@@ -30,6 +30,281 @@ use crate::window_ops::{toggle_zoom, remote_mouse_down, remote_mouse_drag, remot
     remote_mouse_button, remote_mouse_motion, remote_scroll_up, remote_scroll_down};
 use crate::util::{list_windows_json, list_tree_json};
 
+// ── Bracket Paste Detector ───────────────────────────────────────────────────
+//
+// Crossterm 0.28 on Windows does NOT emit Event::Paste.  The outer terminal
+// (Windows Terminal) sends \e[200~<text>\e[201~ as individual KEY_EVENT records,
+// and crossterm delivers each character as Event::Key.
+//
+// This state machine detects bracket paste sequences from individual key events
+// and accumulates the paste content.  When the close sequence is detected, the
+// complete text is returned for delivery via send_paste_to_active().
+//
+// The SSH input path already has its own bracket paste parser in ssh_input.rs;
+// this detector covers the local (non-SSH, crossterm) input path on Windows.
+
+#[cfg(windows)]
+mod bracket_paste_detect {
+    use crossterm::event::{KeyCode, KeyEvent};
+
+    const OPEN:  &[u8] = b"\x1b[200~";
+    const CLOSE: &[u8] = b"\x1b[201~";
+
+    pub enum State {
+        /// Normal operation; watching for start of \e[200~.
+        Idle,
+        /// Matching characters of the open sequence at index `idx`.
+        MatchOpen { idx: usize, pending: Vec<KeyEvent> },
+        /// Accumulating paste content between open and close sequences.
+        Pasting { buf: String },
+        /// Inside paste, matching characters of the close sequence.
+        MatchClose { idx: usize, buf: String },
+    }
+
+    pub enum Action {
+        /// Key should be forwarded to handle_key normally.
+        Forward(KeyEvent),
+        /// Key events that were buffered during a failed open match.
+        /// Replay them all through handle_key.
+        Replay(Vec<KeyEvent>, KeyEvent),
+        /// Key was consumed (part of bracket sequence or paste content).
+        Consumed,
+        /// A complete paste was detected.
+        Paste(String),
+    }
+
+    impl State {
+        pub fn new() -> Self { State::Idle }
+    }
+
+    fn key_byte(key: &KeyEvent) -> Option<u8> {
+        match key.code {
+            KeyCode::Esc => Some(0x1b),
+            KeyCode::Char(c) if (c as u32) < 128 => Some(c as u8),
+            KeyCode::Enter => Some(b'\r'),
+            _ => None,
+        }
+    }
+
+    pub fn feed(state: &mut State, key: KeyEvent) -> Action {
+        // We need to take ownership of state to replace it.
+        let old = std::mem::replace(state, State::Idle);
+        match old {
+            State::Idle => {
+                if let Some(b) = key_byte(&key) {
+                    if b == OPEN[0] {
+                        // Potential bracket paste start — buffer this ESC.
+                        *state = State::MatchOpen {
+                            idx: 1,
+                            pending: vec![key],
+                        };
+                        return Action::Consumed;
+                    }
+                }
+                Action::Forward(key)
+            }
+            State::MatchOpen { idx, mut pending } => {
+                if let Some(b) = key_byte(&key) {
+                    if b == OPEN[idx] {
+                        pending.push(key);
+                        let next = idx + 1;
+                        if next >= OPEN.len() {
+                            // Full open sequence matched!
+                            *state = State::Pasting { buf: String::new() };
+                            return Action::Consumed;
+                        }
+                        *state = State::MatchOpen { idx: next, pending };
+                        return Action::Consumed;
+                    }
+                }
+                // Mismatch — replay buffered keys and process current.
+                *state = State::Idle;
+                Action::Replay(pending, key)
+            }
+            State::Pasting { mut buf } => {
+                if let Some(b) = key_byte(&key) {
+                    if b == CLOSE[0] {
+                        // Potential close sequence start.
+                        *state = State::MatchClose { idx: 1, buf };
+                        return Action::Consumed;
+                    }
+                }
+                // Regular paste content.
+                match key.code {
+                    KeyCode::Char(c) => buf.push(c),
+                    KeyCode::Enter   => buf.push('\r'),
+                    KeyCode::Tab     => buf.push('\t'),
+                    KeyCode::Esc     => buf.push('\x1b'),
+                    _ => {} // ignore non-text keys during paste
+                }
+                *state = State::Pasting { buf };
+                Action::Consumed
+            }
+            State::MatchClose { idx, mut buf } => {
+                if let Some(b) = key_byte(&key) {
+                    if b == CLOSE[idx] {
+                        let next = idx + 1;
+                        if next >= CLOSE.len() {
+                            // Full close sequence — paste complete!
+                            *state = State::Idle;
+                            return Action::Paste(buf);
+                        }
+                        *state = State::MatchClose { idx: next, buf };
+                        return Action::Consumed;
+                    }
+                }
+                // Close match failed — flush partial close chars into paste buf.
+                for i in 0..idx {
+                    buf.push(CLOSE[i] as char);
+                }
+                // Re-check current key: it might start a new close sequence.
+                *state = State::Pasting { buf };
+                return feed(state, key);
+            }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, KeyEventKind, KeyEventState};
+
+        fn mk(code: KeyCode) -> KeyEvent {
+            KeyEvent {
+                code,
+                modifiers: KeyModifiers::NONE,
+                kind: KeyEventKind::Press,
+                state: KeyEventState::NONE,
+            }
+        }
+
+        fn feed_str(state: &mut State, s: &str) -> Vec<Action> {
+            s.chars().map(|c| {
+                let key = if c == '\x1b' { mk(KeyCode::Esc) }
+                          else if c == '\r' { mk(KeyCode::Enter) }
+                          else { mk(KeyCode::Char(c)) };
+                feed(state, key)
+            }).collect()
+        }
+
+        #[test]
+        fn simple_paste() {
+            let mut st = State::new();
+            let actions = feed_str(&mut st, "\x1b[200~hello\x1b[201~");
+            // All but the last should be Consumed; last should be Paste("hello")
+            let last = actions.last().unwrap();
+            match last {
+                Action::Paste(text) => assert_eq!(text, "hello"),
+                _ => panic!("expected Paste, got something else"),
+            }
+            for a in &actions[..actions.len()-1] {
+                assert!(matches!(a, Action::Consumed));
+            }
+        }
+
+        #[test]
+        fn multiline_paste_preserves_indentation() {
+            let mut st = State::new();
+            let payload = "line1\r   indented\r      more\r";
+            let full = format!("\x1b[200~{}\x1b[201~", payload);
+            let actions = feed_str(&mut st, &full);
+            match actions.last().unwrap() {
+                Action::Paste(text) => {
+                    assert_eq!(text, payload);
+                    // Verify indentation preserved exactly
+                    let lines: Vec<&str> = text.split('\r').collect();
+                    assert!(lines[1].starts_with("   indented"));
+                    assert!(lines[2].starts_with("      more"));
+                }
+                _ => panic!("expected Paste"),
+            }
+        }
+
+        #[test]
+        fn aborted_open_replays_keys() {
+            let mut st = State::new();
+            // Send partial open sequence then a non-matching char
+            let actions = feed_str(&mut st, "\x1b[2x");
+            // First 3 (\x1b, [, 2) are consumed, then 'x' triggers Replay
+            assert!(matches!(actions[0], Action::Consumed));
+            assert!(matches!(actions[1], Action::Consumed));
+            assert!(matches!(actions[2], Action::Consumed));
+            match &actions[3] {
+                Action::Replay(pending, current) => {
+                    assert_eq!(pending.len(), 3); // ESC, [, 2
+                    assert_eq!(current.code, KeyCode::Char('x'));
+                }
+                _ => panic!("expected Replay"),
+            }
+        }
+
+        #[test]
+        fn non_esc_forwarded() {
+            let mut st = State::new();
+            let actions = feed_str(&mut st, "abc");
+            for a in &actions {
+                assert!(matches!(a, Action::Forward(_)));
+            }
+        }
+
+        #[test]
+        fn esc_in_paste_is_not_close() {
+            // ESC inside paste followed by non-[ should be captured
+            let mut st = State::new();
+            let full = "\x1b[200~before\x1bxafter\x1b[201~";
+            let actions = feed_str(&mut st, full);
+            match actions.last().unwrap() {
+                Action::Paste(text) => {
+                    assert!(text.contains("\x1bx"));
+                    assert!(text.contains("before"));
+                    assert!(text.contains("after"));
+                }
+                _ => panic!("expected Paste"),
+            }
+        }
+
+        #[test]
+        fn large_paste_content() {
+            let mut st = State::new();
+            // Build a large payload with varied indentation
+            let mut payload = String::new();
+            for i in 0..200 {
+                let indent = " ".repeat(i % 8);
+                payload.push_str(&format!("{}line {}\r", indent, i));
+            }
+            let full = format!("\x1b[200~{}\x1b[201~", payload);
+            let actions = feed_str(&mut st, &full);
+            match actions.last().unwrap() {
+                Action::Paste(text) => {
+                    assert_eq!(text, &payload);
+                    assert_eq!(text.matches('\r').count(), 200);
+                }
+                _ => panic!("expected Paste"),
+            }
+        }
+
+        #[test]
+        fn consecutive_pastes() {
+            let mut st = State::new();
+            // First paste
+            let a1 = feed_str(&mut st, "\x1b[200~first\x1b[201~");
+            match a1.last().unwrap() {
+                Action::Paste(t) => assert_eq!(t, "first"),
+                _ => panic!("expected Paste"),
+            }
+            // Normal key between pastes
+            let a2 = feed_str(&mut st, "x");
+            assert!(matches!(a2[0], Action::Forward(_)));
+            // Second paste
+            let a3 = feed_str(&mut st, "\x1b[200~second\x1b[201~");
+            match a3.last().unwrap() {
+                Action::Paste(t) => assert_eq!(t, "second"),
+                _ => panic!("expected Paste"),
+            }
+        }
+    }
+}
+
 pub fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<()> {
     let pty_system = native_pty_system();
 
@@ -174,6 +449,8 @@ pub fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<
 
     let mut last_resize = Instant::now();
     let mut quit = false;
+    #[cfg(windows)]
+    let mut bp_state = bracket_paste_detect::State::new();
     loop {
         terminal.draw(|f| {
             let area = f.area();
@@ -633,8 +910,40 @@ pub fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<
         if event::poll(Duration::from_millis(20))? {
             match event::read()? {
                 Event::Key(key) if key.kind == KeyEventKind::Press || key.kind == KeyEventKind::Repeat => {
-                    if handle_key(&mut app, key)? {
-                        quit = true;
+                    // On Windows, crossterm does not emit Event::Paste — bracket
+                    // paste sequences arrive as individual Key events.  Feed each
+                    // key through the detector; when a complete paste is found,
+                    // deliver it via send_paste_to_active() instead of forwarding
+                    // characters one-by-one (which defeats bracket paste mode and
+                    // causes compounding indentation in editors like nvim).
+                    #[cfg(windows)]
+                    {
+                        match bracket_paste_detect::feed(&mut bp_state, key) {
+                            bracket_paste_detect::Action::Forward(k) => {
+                                if handle_key(&mut app, k)? { quit = true; }
+                            }
+                            bracket_paste_detect::Action::Replay(pending, current) => {
+                                for pk in pending {
+                                    if handle_key(&mut app, pk)? { quit = true; break; }
+                                }
+                                if !quit {
+                                    if handle_key(&mut app, current)? { quit = true; }
+                                }
+                            }
+                            bracket_paste_detect::Action::Consumed => {}
+                            bracket_paste_detect::Action::Paste(text) => {
+                                crate::debug_log::input_log("paste", &format!(
+                                    "bracket_paste_detect: captured paste len={} preview={:?}",
+                                    text.len(), &text[..text.len().min(100)]));
+                                send_paste_to_active(&mut app, &text)?;
+                            }
+                        }
+                    }
+                    #[cfg(not(windows))]
+                    {
+                        if handle_key(&mut app, key)? {
+                            quit = true;
+                        }
                     }
                 }
                 Event::Mouse(me) => {
