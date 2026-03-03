@@ -1588,16 +1588,18 @@ pub fn handle_mouse(app: &mut AppState, me: MouseEvent, window_area: Rect) -> io
             // enables mouse tracking on ConPTY.
             // SGR button 35 = bare motion with no button held (WT parity).
             //
-            // NOTE: ConPTY strips DECSET 1049h, so screen.alternate_screen()
-            // is always false for native children.  Use is_fullscreen_tui()
-            // which has the same heuristic fallback as layout.rs.
+            // Use screen_has_tui_content() — the permissive heuristic that
+            // matches layout.rs (last row has content).  The stricter
+            // is_fullscreen_tui() requires the cursor in the bottom 3 rows,
+            // which fails for apps like opencode whose cursor is mid-screen.
+            // False positives (hover to shell) are harmless.
             if app.last_hover_pos == Some((me.column, me.row)) {
                 return Ok(());
             }
             app.last_hover_pos = Some((me.column, me.row));
 
             let child_in_tui = active_pane(&win.root, &win.active_path)
-                .map_or(false, |p| crate::window_ops::is_fullscreen_tui(p));
+                .map_or(false, |p| crate::window_ops::screen_has_tui_content(p));
             if child_in_tui {
                 if let Some(area) = active_area {
                     if let Some(active) = active_pane_mut(&mut win.root, &win.active_path) {

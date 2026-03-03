@@ -92,6 +92,37 @@ fn is_vt_bridge(name: &str) -> bool {
     lower.contains("wsl") || lower.contains("ssh")
 }
 
+/// Permissive TUI detection for hover events — matches layout.rs heuristic.
+///
+/// Returns true when the last row of the pane screen has non-blank content,
+/// which indicates a fullscreen app (status bar, menu bar, etc.).
+///
+/// This is deliberately less strict than `is_fullscreen_tui()`:
+///   - `is_fullscreen_tui()` also requires the cursor in the bottom 3 rows,
+///     which fails for apps like opencode whose cursor sits at a mid-screen
+///     text input.
+///   - For hover events, false positives are harmless — shells ignore bare
+///     motion (SGR button 35).  False negatives break TUI hover (opencode,
+///     etc.), so we use the permissive check.
+pub(crate) fn screen_has_tui_content(pane: &Pane) -> bool {
+    if let Ok(parser) = pane.term.lock() {
+        let screen = parser.screen();
+        if screen.alternate_screen() {
+            return true;
+        }
+        let last_row = pane.last_rows.saturating_sub(1);
+        for col in 0..pane.last_cols.min(80) {
+            if let Some(cell) = screen.cell(last_row, col) {
+                let t = cell.contents();
+                if !t.is_empty() && t != " " {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
 /// Check if the pane is likely running a fullscreen TUI app (htop, vim, etc.)
 /// by detecting alternate screen buffer usage.
 ///
@@ -572,12 +603,15 @@ pub fn remote_mouse_motion(app: &mut AppState, x: u16, y: u16) {
     let mut rects: Vec<(Vec<usize>, Rect)> = Vec::new();
     compute_rects(&win.root, app.last_window_area, &mut rects);
 
-    // Only forward hover when the active pane is running a fullscreen TUI.
-    // NOTE: ConPTY strips DECSET 1049h, so screen.alternate_screen() is
-    // always false for native children.  Use is_fullscreen_tui() which has
-    // the same heuristic fallback as layout.rs and the scroll-event gating.
+    // Use the permissive heuristic for hover: only check if the last row
+    // has content (matches layout.rs).  The strict is_fullscreen_tui()
+    // requires the cursor in the bottom 3 rows, which fails for apps like
+    // opencode where the cursor sits at a mid-screen text input field.
+    // False positives (hover sent to shell) are harmless — shells ignore
+    // bare motion events.
     let in_tui = active_pane(&win.root, &win.active_path)
-        .map_or(false, |p| is_fullscreen_tui(p));
+        .map_or(false, |p| screen_has_tui_content(p));
+    mouse_log(&format!("remote_mouse_motion: x={} y={} screen_has_tui_content={}", x, y, in_tui));
     if !in_tui {
         return;
     }
