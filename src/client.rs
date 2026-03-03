@@ -487,11 +487,6 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
     // Cache the last-sent DECSCUSR code so we only write it when it
     // actually changes (avoids resetting WT's blink timer every frame).
     let mut last_cursor_style: u8 = 255;
-    // Hysteresis counter: only hide cursor after N consecutive frames
-    // where the server reports hide_cursor=true.  Prevents rapid
-    // show/hide cycling caused by ConPTY timing jitter.
-    let mut hide_cursor_count: u8 = 0;
-    const HIDE_CURSOR_THRESHOLD: u8 = 3;
     loop {
         // Expire stale key_send_instant after 30ms — ConPTY echo should
         // have arrived by then; stop force-dumping to save CPU.
@@ -1620,7 +1615,7 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
             client_log("parse", &format!("OK in {}us, {} windows", _parse_us, state.windows.len()));
         }
 
-        let mut root = state.layout;
+        let root = state.layout;
         let windows = state.windows;
         last_tree = state.tree;
         let base_index = state.base_index;
@@ -1628,40 +1623,31 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
         let clock_active = state.clock_mode;
         let state_cursor_style_code = state.cursor_style_code;
 
-        // ── Stabilise active pane's cursor visibility ────────────────
-        // ConPTY timing can cause hide_cursor to flip between frames.
-        // Use hysteresis: only hide after HIDE_CURSOR_THRESHOLD
-        // consecutive frames report hide_cursor=true.
+        // ── Extract active pane's cursor state ──────────────────────
+        // We collect cursor info here but DON'T use
+        // f.set_cursor_position() inside the draw callback for the
+        // normal (non-copy-mode) active pane.  Instead we write
+        // cursor show/hide + position + style as ONE atomic write
+        // after terminal.draw().  This prevents ratatui's separate
+        // execute!(..., Show/Hide) flushes from creating intermediate
+        // states visible to Windows Terminal between vsync frames,
+        // which causes rapid cursor flicker during high-frequency
+        // output (e.g. opencode streaming).
+        let mut post_draw_cursor: Option<(u16, u16)> = None; // pane-local (col, row)
         {
-            fn active_hide_cursor(node: &LayoutJson) -> Option<bool> {
+            fn active_cursor_info(node: &LayoutJson) -> Option<(bool, u16, u16, bool)> {
                 match node {
-                    LayoutJson::Leaf { active, hide_cursor, .. } => {
-                        if *active { Some(*hide_cursor) } else { None }
+                    LayoutJson::Leaf { active, hide_cursor, cursor_row, cursor_col, copy_mode, .. } => {
+                        if *active { Some((*hide_cursor, *cursor_row, *cursor_col, *copy_mode)) } else { None }
                     }
                     LayoutJson::Split { children, .. } => {
-                        children.iter().find_map(active_hide_cursor)
+                        children.iter().find_map(active_cursor_info)
                     }
                 }
             }
-            fn set_active_hide_cursor(node: &mut LayoutJson, val: bool) {
-                match node {
-                    LayoutJson::Leaf { active, hide_cursor, .. } => {
-                        if *active { *hide_cursor = val; }
-                    }
-                    LayoutJson::Split { children, .. } => {
-                        for c in children { set_active_hide_cursor(c, val); }
-                    }
-                }
-            }
-            if let Some(hc) = active_hide_cursor(&root) {
-                if hc {
-                    hide_cursor_count = hide_cursor_count.saturating_add(1);
-                    if hide_cursor_count < HIDE_CURSOR_THRESHOLD {
-                        // Not enough consecutive hides — override to visible
-                        set_active_hide_cursor(&mut root, false);
-                    }
-                } else {
-                    hide_cursor_count = 0;
+            if let Some((hide, cr, cc, copy)) = active_cursor_info(&root) {
+                if !hide && !clock_active && !copy {
+                    post_draw_cursor = Some((cc, cr));
                 }
             }
         }
@@ -1789,9 +1775,6 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
             let sz = terminal.size().unwrap_or_default();
             client_log("draw", &format!("pre-draw terminal_size={}x{}", sz.width, sz.height));
         }
-        // Hide cursor before diff-write so the cursor doesn't visibly
-        // jump around while ratatui writes cell changes.
-        let _ = crossterm::execute!(std::io::stdout(), crossterm::cursor::Hide);
         terminal.draw(|f| {
             let area = f.area();
             let constraints = if status_at_top {
@@ -1862,7 +1845,7 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                         cursor_row,
                         cursor_col,
                         alternate_screen,
-                        hide_cursor,
+                        hide_cursor: _,
                         cursor_shape: _,
                         active,
                         copy_mode,
@@ -2000,16 +1983,13 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                             if clock_mode {
                                 render_clock_overlay(f, inner);
                             }
-                            // Respect the child's cursor-visibility state.
-                            // TUI apps like Claude draw their own cursor via
-                            // cell inverse-video and hide the real terminal
-                            // cursor — honour that so we don't place a stray
-                            // cursor at ConPTY's parking position.
-                            if !*hide_cursor {
-                                let cy = inner.y + (*cursor_row).min(inner.height.saturating_sub(1));
-                                let cx = inner.x + (*cursor_col).min(inner.width.saturating_sub(1));
-                                f.set_cursor_position((cx, cy));
-                            }
+                            // Cursor visibility is handled entirely outside
+                            // the draw callback — see the post-draw atomic
+                            // cursor write below.  We intentionally do NOT
+                            // call f.set_cursor_position() here so that
+                            // ratatui never emits separate ?25h/?25l flushes
+                            // that would create intermediate states visible
+                            // to WT between vsync frames.
                         }
 
                         // In copy mode, show cursor at copy_pos with a
@@ -2529,17 +2509,14 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
             last_mouse_enable = Instant::now();
         }
 
-        // Forward active pane's cursor shape (DECSCUSR) to the real terminal.
-        // If no child DECSCUSR was received (ConPTY ate it on Win10), fall
-        // back to the user-configured cursor-style option.
-        //
-        // To prevent rapid blink-timer resets in Windows Terminal, we:
-        // 1. Only send DECSCUSR when the effective style actually changes.
-        // 2. During rapid output (content changing between frames), use the
-        //    *steady* variant of the cursor style.  This matches WT's own
-        //    behaviour of forcing the cursor ON during buffer mutations.
-        //    When output settles, the next idle frame restores blinking.
+        // ── Post-draw: atomic cursor write ──────────────────────────
+        // Write cursor visibility + position + style as ONE batch to
+        // avoid the separate execute!() flushes that ratatui's normal
+        // show_cursor()/set_cursor_position() would produce.  Multiple
+        // separate console writes create intermediate states visible
+        // to WT between vsync frames, causing rapid cursor flicker.
         {
+            use std::io::Write;
             fn find_active_cursor_shape(node: &LayoutJson) -> Option<u8> {
                 match node {
                     LayoutJson::Leaf { active, cursor_shape, .. } => {
@@ -2550,30 +2527,72 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                     }
                 }
             }
-            let mut effective = find_active_cursor_shape(&root)
+            let effective = find_active_cursor_shape(&root)
                 .unwrap_or_else(|| state_cursor_style_code.unwrap_or_else(crate::rendering::configured_cursor_code));
-            // During rapid output, use the steady variant (even DECSCUSR code)
-            // to prevent blink-timer jitter.  Odd codes 1/3/5 are blinking;
-            // even codes 2/4/6 are the steady equivalents.
-            let content_changed = got_frame && dump_buf != prev_dump_buf;
-            if content_changed && effective >= 1 && effective <= 5 && effective % 2 == 1 {
-                effective += 1; // blinking → steady
+            // Compute the active pane's screen Rect so we can translate
+            // pane-local cursor coords to terminal-global coords.
+            fn find_active_rect(node: &LayoutJson, area: Rect) -> Option<Rect> {
+                match node {
+                    LayoutJson::Leaf { active, .. } => {
+                        if *active { Some(area) } else { None }
+                    }
+                    LayoutJson::Split { kind, sizes, children } => {
+                        let eff: Vec<u16> = if sizes.len() == children.len() {
+                            sizes.clone()
+                        } else {
+                            vec![(100 / children.len().max(1)) as u16; children.len()]
+                        };
+                        let rects = crate::tree::split_with_gaps(kind == "Horizontal", &eff, area);
+                        for (i, child) in children.iter().enumerate() {
+                            if i < rects.len() {
+                                if let Some(r) = find_active_rect(child, rects[i]) { return Some(r); }
+                            }
+                        }
+                        None
+                    }
+                }
             }
-            // Only send DECSCUSR when the effective style changes.
+            let active_pane_area: Option<Rect> = {
+                let sz = terminal.size().unwrap_or_default();
+                let constraints = if status_at_top {
+                    vec![Constraint::Length(status_lines as u16), Constraint::Min(1)]
+                } else {
+                    vec![Constraint::Min(1), Constraint::Length(status_lines as u16)]
+                };
+                let chunks = Layout::default().direction(Direction::Vertical)
+                    .constraints(constraints).split(sz.into());
+                let content_chunk = if status_at_top { chunks[1] } else { chunks[0] };
+                find_active_rect(&root, content_chunk)
+            };
+            // Compute screen-global cursor position from pane-local coords.
+            let cursor_visible = if let (Some((cc, cr)), Some(inner)) = (post_draw_cursor, active_pane_area) {
+                let cy = inner.y + cr.min(inner.height.saturating_sub(1));
+                let cx = inner.x + cc.min(inner.width.saturating_sub(1));
+                Some((cx, cy))
+            } else {
+                None
+            };
+            // Build a single VT string with: ?25h + CUP + DECSCUSR
+            // ratatui's draw() always emits ?25l (since we never call
+            // f.set_cursor_position), so we must re-emit ?25h + CUP
+            // every frame when the cursor should be visible.
+            let mut buf = String::with_capacity(32);
+            if let Some((cx, cy)) = cursor_visible {
+                buf.push_str("\x1b[?25h");
+                use std::fmt::Write as FmtWrite;
+                let _ = write!(buf, "\x1b[{};{}H", cy + 1, cx + 1);
+            }
+            // DECSCUSR only when style actually changes (avoids blink
+            // timer resets in WT).
             if effective != last_cursor_style {
                 last_cursor_style = effective;
-                use crossterm::cursor::SetCursorStyle;
-                let style = match effective {
-                    0 => SetCursorStyle::DefaultUserShape,
-                    1 => SetCursorStyle::BlinkingBlock,
-                    2 => SetCursorStyle::SteadyBlock,
-                    3 => SetCursorStyle::BlinkingUnderScore,
-                    4 => SetCursorStyle::SteadyUnderScore,
-                    5 => SetCursorStyle::BlinkingBar,
-                    6 => SetCursorStyle::SteadyBar,
-                    _ => SetCursorStyle::DefaultUserShape,
-                };
-                let _ = crossterm::execute!(std::io::stdout(), style);
+                use std::fmt::Write as FmtWrite;
+                let _ = write!(buf, "\x1b[{} q", effective);
+            }
+            if !buf.is_empty() {
+                let mut out = std::io::stdout().lock();
+                let _ = out.write_all(buf.as_bytes());
+                let _ = out.flush();
             }
         }
 
