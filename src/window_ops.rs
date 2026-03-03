@@ -572,16 +572,13 @@ pub fn remote_mouse_motion(app: &mut AppState, x: u16, y: u16) {
     let mut rects: Vec<(Vec<usize>, Rect)> = Vec::new();
     compute_rects(&win.root, app.last_window_area, &mut rects);
 
-    // Only forward hover when the active pane is in alternate screen
-    // (reliable TUI detection -- matches scroll-event gating logic).
-    let in_alt = active_pane(&win.root, &win.active_path)
-        .map_or(false, |p| {
-            if let Ok(parser) = p.term.lock() {
-                return parser.screen().alternate_screen();
-            }
-            false
-        });
-    if !in_alt {
+    // Only forward hover when the active pane is running a fullscreen TUI.
+    // NOTE: ConPTY strips DECSET 1049h, so screen.alternate_screen() is
+    // always false for native children.  Use is_fullscreen_tui() which has
+    // the same heuristic fallback as layout.rs and the scroll-event gating.
+    let in_tui = active_pane(&win.root, &win.active_path)
+        .map_or(false, |p| is_fullscreen_tui(p));
+    if !in_tui {
         return;
     }
 

@@ -138,14 +138,26 @@ Test "Code uses SGR button 35 for bare hover" $uses35
 # ── Test 4: Alt-screen gating check ──
 Write-Host "`n=== Test Group 4: Alt-screen gating for hover ==="
 
-# Hover should only be forwarded when pane is in alt screen (TUI app active).
+# Hover should only be forwarded when pane is running a TUI app.
 # At a shell prompt, hover is wasteful and causes PSReadLine issues.
-# Check that the Moved handler block references alternate_screen or child_in_alt
+# IMPORTANT: Must use is_fullscreen_tui() not raw alternate_screen() because
+# ConPTY strips DECSET 1049h so alternate_screen() is always false.
 $movedBlockInput = [regex]::Match($inputRs, '(?s)MouseEventKind::Moved\s*=>\s*\{(.+?)(?=MouseEventKind::Scroll)').Groups[1].Value
-$altGatedInput = $movedBlockInput -match 'alternate_screen|child_in_alt|in_alt'
+$altGatedInput = $movedBlockInput -match 'is_fullscreen_tui|child_in_tui'
 $movedBlockWinOps = [regex]::Match($winOps, '(?s)fn remote_mouse_motion\(.*?\{(.+?)(?=fn\s)').Groups[1].Value
-$altGatedWinOps = $movedBlockWinOps -match 'alternate_screen|in_alt'
-Test "Hover forwarding is gated on alt-screen" ($altGatedInput -and $altGatedWinOps)
+$altGatedWinOps = $movedBlockWinOps -match 'is_fullscreen_tui|in_tui'
+Test "Hover uses is_fullscreen_tui (not raw alternate_screen)" ($altGatedInput -and $altGatedWinOps)
+
+# Verify ConPTY-awareness: must NOT use raw alternate_screen() in hover path
+$rawAltInHover = $movedBlockInput -match 'parser\.screen\(\)\.alternate_screen' -or
+                 $movedBlockWinOps -match 'parser\.screen\(\)\.alternate_screen'
+Test "Hover does NOT use raw alternate_screen() (ConPTY strips it)" (-not $rawAltInHover)
+
+# Verify server sets state_dirty for MouseMove (so client sees frame updates)
+$serverRs = Get-Content (Join-Path $srcRoot "server\mod.rs") -Raw
+$serverMouseMove = [regex]::Match($serverRs, 'MouseMove\(x,y\)\s*=>\s*\{([^}]+)\}').Groups[1].Value
+$hasStateDirty = $serverMouseMove -match 'state_dirty\s*=\s*true'
+Test "Server MouseMove sets state_dirty for frame updates" $hasStateDirty
 
 # ── Test 5: WT-style dedup (same-coord suppression) ──
 Write-Host "`n=== Test Group 5: Same-coordinate deduplication ==="

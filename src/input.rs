@@ -1583,23 +1583,22 @@ pub fn handle_mouse(app: &mut AppState, me: MouseEvent, window_area: Rect) -> io
         }
         MouseEventKind::Moved => {
             // Forward bare mouse motion (hover) to child PTY when the
-            // active pane is in alternate screen mode (real TUI app like
-            // nvim, opencode, htop).  Shell prompts are excluded -- PSReadLine
-            // spuriously enables mouse tracking on ConPTY.
+            // active pane is running a fullscreen TUI app (opencode, nvim,
+            // htop).  Shell prompts are excluded -- PSReadLine spuriously
+            // enables mouse tracking on ConPTY.
             // SGR button 35 = bare motion with no button held (WT parity).
+            //
+            // NOTE: ConPTY strips DECSET 1049h, so screen.alternate_screen()
+            // is always false for native children.  Use is_fullscreen_tui()
+            // which has the same heuristic fallback as layout.rs.
             if app.last_hover_pos == Some((me.column, me.row)) {
                 return Ok(());
             }
             app.last_hover_pos = Some((me.column, me.row));
 
-            let child_in_alt = active_pane(&win.root, &win.active_path)
-                .map_or(false, |p| {
-                    if let Ok(parser) = p.term.lock() {
-                        return parser.screen().alternate_screen();
-                    }
-                    false
-                });
-            if child_in_alt {
+            let child_in_tui = active_pane(&win.root, &win.active_path)
+                .map_or(false, |p| crate::window_ops::is_fullscreen_tui(p));
+            if child_in_tui {
                 if let Some(area) = active_area {
                     if let Some(active) = active_pane_mut(&mut win.root, &win.active_path) {
                         forward_mouse_to_pane_ex(active, area, me.column, me.row,
