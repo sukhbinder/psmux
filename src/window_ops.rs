@@ -326,6 +326,26 @@ pub(crate) fn inject_mouse_combined(pane: &mut Pane, col: i16, row: i16, vt_butt
     if vt_bridge {
         // WSL/SSH bridge — bypass ConPTY, inject as KEY_EVENT records.
         // The bridge (wsl.exe, ssh.exe) relays these to the Linux PTY.
+        //
+        // Gate on mouse_protocol_mode (tmux + Windows Terminal parity):
+        // Only forward mouse events when the remote app has explicitly
+        // enabled mouse tracking (DECSET 1000/1002/1003).  For VT bridge
+        // children, VT escape sequences pass through unmodified, so
+        // mouse_protocol_mode() accurately reflects the remote app's
+        // actual mouse tracking state.
+        //
+        // Without this gate, SGR mouse sequences are injected as KEY_EVENT
+        // records → ssh.exe/wsl.exe relays them as literal text → the
+        // remote shell prints raw escape sequences at the prompt.
+        // This is the root cause of issue #77 (mouse events leak as raw
+        // text into SSH panes).
+        let wants = pane.term.lock().ok()
+            .map_or(false, |t| t.screen().mouse_protocol_mode() != vt100::MouseProtocolMode::None);
+        if !wants {
+            mouse_log(&format!("inject_mouse_combined: col={} row={} vt_btn={} press={} win={} vt_bridge=true -> SUPPRESSED (remote has no mouse tracking)",
+                col, row, vt_button, press, win_name));
+            return;
+        }
         mouse_log(&format!("inject_mouse_combined: col={} row={} vt_btn={} press={} win={} vt_bridge=true -> WriteConsoleInputW KEY_EVENT injection",
             col, row, vt_button, press, win_name));
         inject_sgr_mouse(pane, col, row, vt_button, press);
