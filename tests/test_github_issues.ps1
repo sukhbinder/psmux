@@ -100,13 +100,19 @@ Write-Host ("=" * 70)
 New-TestSession
 $conn = Connect-TCP
 
+# Query base-index so we use correct window numbers regardless of config
+$baseIdx = & $PSMUX show-options -t $SESSION -v base-index 2>&1
+$baseIdx = [int]($baseIdx.ToString().Trim())
+if ($baseIdx -lt 0 -or $baseIdx -gt 100) { $baseIdx = 0 }
+Write-Info "base-index=$baseIdx (windows will be $baseIdx, $($baseIdx+1), $($baseIdx+2))"
+
 # Create 3 windows
 Send-Fire $conn "new-window"
 Start-Sleep -Seconds 2
 Send-Fire $conn "new-window"
 Start-Sleep -Seconds 2
 
-# Get initial state - should show window 2 as active (0-indexed: window 2)
+# Get initial state - should show last window as active (array[2])
 $state1 = Get-FreshDump $conn
 $json1 = $state1 | ConvertFrom-Json -ErrorAction SilentlyContinue
 $activeWindows1 = @($json1.windows | Where-Object { $_.active -eq $true })
@@ -118,9 +124,10 @@ if ($activeWindows1.Count -eq 1) {
     Write-Fail "Expected 1 active window, got $($activeWindows1.Count)"
 }
 
-# Switch to window 0 via select-window (base-index=0, so windows are 0,1,2)
-Write-Test "select-window 0 updates active flag in dump-state"
-Send-Fire $conn "select-window 0"
+# Switch to first window via select-window (base-index aware)
+$firstWin = $baseIdx
+Write-Test "select-window $firstWin updates active flag in dump-state"
+Send-Fire $conn "select-window $firstWin"
 Start-Sleep -Milliseconds 500
 
 # Get new state
@@ -129,13 +136,12 @@ $json2 = $state2 | ConvertFrom-Json -ErrorAction SilentlyContinue
 $activeWindows2 = @($json2.windows | Where-Object { $_.active -eq $true })
 
 if ($activeWindows2.Count -eq 1) {
-    # Check which window is active (array index 0 = display index 1 with base-index=1)
     $activeIdx = 0
     for ($i = 0; $i -lt $json2.windows.Count; $i++) {
         if ($json2.windows[$i].active) { $activeIdx = $i }
     }
     if ($activeIdx -eq 0) {
-        Write-Pass "Window 0 (array[0]) is now active after select-window 0"
+        Write-Pass "First window (array[0]) is now active after select-window $firstWin"
     } else {
         Write-Fail "Active window is array[$activeIdx], expected array[0] (tab color would be wrong!)"
     }
@@ -143,9 +149,10 @@ if ($activeWindows2.Count -eq 1) {
     Write-Fail "Expected 1 active window after select-window, got $($activeWindows2.Count)"
 }
 
-# Switch to window 1 (array index 1)
-Write-Test "select-window 1 updates active flag"
-Send-Fire $conn "select-window 1"
+# Switch to second window (array index 1)
+$secondWin = $baseIdx + 1
+Write-Test "select-window $secondWin updates active flag"
+Send-Fire $conn "select-window $secondWin"
 Start-Sleep -Milliseconds 500
 
 $state3 = Get-FreshDump $conn
@@ -155,7 +162,7 @@ for ($i = 0; $i -lt $json3.windows.Count; $i++) {
     if ($json3.windows[$i].active) { $activeIdx3 = $i }
 }
 if ($activeIdx3 -eq 1) {
-    Write-Pass "Window 1 (array[1]) is active after select-window 1"
+    Write-Pass "Second window (array[1]) is active after select-window $secondWin"
 } else {
     Write-Fail "Active window is array[$activeIdx3], expected array[1]"
 }
