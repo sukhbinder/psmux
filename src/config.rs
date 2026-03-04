@@ -598,6 +598,36 @@ pub fn parse_option_value(app: &mut AppState, rest: &str, _is_global: bool) {
             }
             // Store any unknown option in the environment map for plugin compat
             app.environment.insert(key.to_string(), value.to_string());
+
+            // Auto-source plugin conf files when @plugin is declared.
+            // This makes theme/settings load synchronously during config
+            // parsing instead of waiting for PPM's async run-shell to
+            // source them later (which causes a visible flash).
+            //
+            // Format: set -g @plugin 'org/plugin-name' or 'plugin-name'
+            // Tries:  ~/.psmux/plugins/<full-value>/plugin.conf
+            //   then: ~/.psmux/plugins/<last-component>/plugin.conf
+            if key == "@plugin" && !value.is_empty() {
+                let plugin_name = value.rsplit('/').next().unwrap_or(value);
+                if plugin_name != "ppm" {
+                    let home = env::var("USERPROFILE").or_else(|_| env::var("HOME")).unwrap_or_default();
+                    let candidates = [
+                        format!("{}\\.psmux\\plugins\\{}\\plugin.conf", home, value.replace('/', "\\")),
+                        format!("{}\\.psmux\\plugins\\{}\\plugin.conf", home, plugin_name),
+                    ];
+                    for conf in &candidates {
+                        if std::path::Path::new(conf).exists() {
+                            let prev_file = current_config_file();
+                            set_current_config_file(conf);
+                            if let Ok(content) = std::fs::read_to_string(conf) {
+                                parse_config_content(app, &content);
+                            }
+                            set_current_config_file(&prev_file);
+                            break;
+                        }
+                    }
+                }
+            }
         }
     }
 }

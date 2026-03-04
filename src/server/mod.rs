@@ -42,6 +42,10 @@ use crate::format::{expand_format, format_list_windows, format_list_panes, set_b
 use crate::help;
 
 pub fn run_server(session_name: String, socket_name: Option<String>, initial_command: Option<String>, raw_command: Option<Vec<String>>, start_dir: Option<String>, window_name: Option<String>, init_size: Option<(u16, u16)>) -> io::Result<()> {
+    // DEBUG: absolute first thing in run_server
+    let home_dbg = std::env::var("USERPROFILE").unwrap_or_default();
+    let _ = std::fs::write(format!("{}\\.psmux\\debug_server.log", home_dbg), format!("run_server called for '{}'\n", session_name));
+    
     // Write crash info to a log file when stderr is unavailable (detached server)
     std::panic::set_hook(Box::new(|info| {
         let home = std::env::var("USERPROFILE").or_else(|_| std::env::var("HOME")).unwrap_or_default();
@@ -58,19 +62,19 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
     app.socket_name = socket_name;
     // Server starts detached with a reasonable default window size
     app.attached_clients = 0;
-    load_config(&mut app);
-    // Bind the control listener BEFORE creating the initial window so that
-    // the first pane's $TMUX env var contains the real port (not 0).
+
+    // Bind the control listener BEFORE loading config so that run-shell
+    // commands spawned by load_config can connect back to the server.
     let (tx, rx) = mpsc::channel::<CtrlReq>();
     app.control_rx = Some(rx);
     let listener = TcpListener::bind(("127.0.0.1", 0))?;
     let port = listener.local_addr()?.port();
     app.control_port = Some(port);
 
-    // Write port and key files IMMEDIATELY after binding, BEFORE creating the
-    // initial window.  The client polls for the port file to know the server is
-    // ready to accept connections.  Writing early (before the slow ConPTY +
-    // pwsh spawn) shaves 200-400ms off first-start latency.
+    // Write port and key files IMMEDIATELY after binding, BEFORE loading
+    // config or creating windows.  run-shell scripts (e.g. PPM) need the
+    // port file to discover the server, and the client polls for it to know
+    // the server is ready.
     let home = env::var("USERPROFILE").or_else(|_| env::var("HOME")).unwrap_or_default();
     let dir = format!("{}\\.psmux", home);
     let _ = std::fs::create_dir_all(&dir);
@@ -108,6 +112,39 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
             .map(|mut f| std::io::Write::write_all(&mut f, session_key.as_bytes()));
     }
 
+    // Start accept thread BEFORE load_config so that run-shell commands
+    // (e.g. PPM plugin manager) spawned during config parsing can connect
+    // to the server.  Without this, run-shell scripts fail silently because
+    // there is no TCP listener accepting connections yet.
+    // Initialize shared aliases empty — will be populated after load_config.
+    let shared_aliases: std::sync::Arc<std::sync::RwLock<std::collections::HashMap<String, String>>> =
+        std::sync::Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
+    let shared_aliases_main = shared_aliases.clone();
+
+    thread::spawn(move || {
+        for conn in listener.incoming() {
+            if let Ok(stream) = conn {
+                let tx = tx.clone();
+                let session_key_clone = session_key.clone();
+                let aliases = shared_aliases.clone();
+                thread::spawn(move || {
+                    connection::handle_connection(stream, tx, &session_key_clone, aliases);
+                }); // end per-connection thread
+            }
+        }
+    });
+
+    // Load config AFTER the TCP listener is bound, port/key files are written,
+    // and the accept thread is running.  This ensures that run-shell commands
+    // in the config (e.g. `run '~/.psmux/plugins/ppm/ppm.ps1'`) can connect
+    // back to the server to apply settings.
+    load_config(&mut app);
+
+    // Update shared aliases now that config has been loaded
+    if let Ok(mut w) = shared_aliases_main.write() {
+        *w = app.command_aliases.clone();
+    }
+
     // Create initial window with optional command (this spawns ConPTY + pwsh,
     // which is the slowest step — but the port file is already written so the
     // client can connect immediately without waiting)
@@ -126,24 +163,6 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
     if let Some(prev) = saved_dir { env::set_current_dir(prev).ok(); }
     // Apply window name if specified via -n
     if let Some(n) = window_name { app.windows.last_mut().map(|w| w.name = n); }
-    
-    // Shared command aliases map — updated by main loop, read by handler threads
-    let shared_aliases: std::sync::Arc<std::sync::RwLock<std::collections::HashMap<String, String>>> =
-        std::sync::Arc::new(std::sync::RwLock::new(app.command_aliases.clone()));
-    let shared_aliases_main = shared_aliases.clone();
-
-    thread::spawn(move || {
-        for conn in listener.incoming() {
-            if let Ok(stream) = conn {
-                let tx = tx.clone();
-                let session_key_clone = session_key.clone();
-                let aliases = shared_aliases.clone();
-                thread::spawn(move || {
-                    connection::handle_connection(stream, tx, &session_key_clone, aliases);
-                }); // end per-connection thread
-            }
-        }
-    });
     // Fire client-attached hooks once at startup so plugins populate initial
     // data (e.g. CPU/battery) even for detached sessions (tppanel previews).
     {
