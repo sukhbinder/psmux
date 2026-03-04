@@ -58,6 +58,7 @@ pub fn handle_key(app: &mut AppState, key: KeyEvent) -> io::Result<bool> {
                 || app.prefix2_key.map_or(false, |p2| (key.code, key.modifiers) == p2);
             if is_prefix {
                 app.mode = Mode::Prefix { armed_at: Instant::now() };
+                app.prefix_repeating = false;
                 return Ok(false);
             }
             // Check root key table for bindings (bind-key -n / bind-key -T root)
@@ -70,14 +71,25 @@ pub fn handle_key(app: &mut AppState, key: KeyEvent) -> io::Result<bool> {
         }
         Mode::Prefix { armed_at } => {
             let elapsed = armed_at.elapsed().as_millis() as u64;
+
+            // If we're in repeat mode and the repeat window has expired,
+            // exit prefix and forward the key to the active pane (tmux parity).
+            if app.prefix_repeating && elapsed >= app.repeat_time_ms {
+                app.mode = Mode::Passthrough;
+                app.prefix_repeating = false;
+                forward_key_to_active(app, key)?;
+                return Ok(false);
+            }
             
             let key_tuple = normalize_key_for_binding((key.code, key.modifiers));
             if let Some(bind) = app.key_tables.get("prefix").and_then(|t| t.iter().find(|b| b.key == key_tuple)).cloned() {
                 if bind.repeat {
                     // Stay in prefix mode for repeat-time window
                     app.mode = Mode::Prefix { armed_at: Instant::now() };
+                    app.prefix_repeating = true;
                 } else {
                     app.mode = Mode::Passthrough;
+                    app.prefix_repeating = false;
                 }
                 return execute_action(app, &bind.action);
             }
@@ -299,10 +311,20 @@ pub fn handle_key(app: &mut AppState, key: KeyEvent) -> io::Result<bool> {
             };
 
             if matches!(app.mode, Mode::Prefix { .. }) {
-                if !handled && elapsed < app.escape_time_ms {
+                // Arrow keys are repeatable by default (tmux binds them with -r)
+                let is_repeatable = matches!(key.code,
+                    KeyCode::Up | KeyCode::Down | KeyCode::Left | KeyCode::Right
+                );
+                if handled && is_repeatable {
+                    // Stay in prefix mode for repeat-time window
+                    app.mode = Mode::Prefix { armed_at: Instant::now() };
+                    app.prefix_repeating = true;
+                } else if !handled && elapsed < app.escape_time_ms {
                     return Ok(false);
+                } else {
+                    app.mode = Mode::Passthrough;
+                    app.prefix_repeating = false;
                 }
-                app.mode = Mode::Passthrough;
             }
             Ok(false)
         }

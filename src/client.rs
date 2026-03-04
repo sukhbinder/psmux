@@ -277,6 +277,9 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
 
     let mut quit = false;
     let mut prefix_armed = false;
+    let mut prefix_armed_at = Instant::now();
+    let mut prefix_repeating = false;
+    let mut repeat_time_ms: u64 = 500;
     let mut renaming = false;
     let mut session_renaming = false;
     let mut rename_buf = String::new();
@@ -359,6 +362,7 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
     fn default_status_right_length() -> usize { 40 }
     fn default_status_lines() -> usize { 1 }
     fn default_status_visible() -> bool { true }
+    fn default_repeat_time() -> u64 { 500 }
 
     /// A single key binding synced from the server.
     #[derive(serde::Deserialize, Clone, Debug)]
@@ -451,6 +455,9 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
         /// One-shot clipboard text (base64-encoded) for OSC 52 delivery.
         #[serde(default)]
         clipboard_osc52: Option<String>,
+        /// Repeat key timeout in ms (default: 500, synced from server)
+        #[serde(default = "default_repeat_time")]
+        repeat_time: u64,
     }
 
     let mut cmd_batch: Vec<String> = Vec::new();
@@ -726,6 +733,16 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                             || prefix2_key.map_or(false, |p2| (key.code, key.modifiers) == p2)
                             || prefix2_raw_char.map_or(false, |c| matches!(key.code, KeyCode::Char(ch) if ch == c));
 
+                        // Expire repeat-mode prefix if repeat-time has elapsed.
+                        // This ensures keys are forwarded to the PTY rather than
+                        // being interpreted as prefix bindings (tmux parity).
+                        if prefix_armed && prefix_repeating
+                            && prefix_armed_at.elapsed().as_millis() >= repeat_time_ms as u128
+                        {
+                            prefix_armed = false;
+                            prefix_repeating = false;
+                        }
+
                         // Overlay Esc must be checked BEFORE selection-Esc so that
                         // pressing Esc always closes the active overlay first.
                         if matches!(key.code, KeyCode::Esc) && (command_input || renaming || pane_renaming || chooser || tree_chooser || session_chooser || confirm_cmd.is_some() || keys_viewer) {
@@ -748,7 +765,7 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                             rsel_end = None;
                             selection_changed = true;
                         }
-                        else if is_prefix { prefix_armed = true; }
+                        else if is_prefix { prefix_armed = true; prefix_armed_at = Instant::now(); prefix_repeating = false; }
                         // Check root-table bindings (bind-key -n / bind-key -T root)
                         // These fire without prefix, before keys are forwarded to PTY
                         else if !command_input && !renaming && !pane_renaming && !chooser && !tree_chooser && !session_chooser && !keys_viewer && confirm_cmd.is_none() && {
@@ -1046,7 +1063,19 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                                 }
                             }
                             } // end of else (no user binding override)
-                            prefix_armed = false;
+                            // Arrow keys are repeatable by default (tmux -r flag).
+                            // User-defined bindings also respect the repeat flag.
+                            let is_repeatable_default = matches!(key.code,
+                                KeyCode::Up | KeyCode::Down | KeyCode::Left | KeyCode::Right
+                            );
+                            let is_user_repeat = user_binding.map_or(false, |e| e.r);
+                            if is_repeatable_default || is_user_repeat {
+                                prefix_armed_at = Instant::now();
+                                prefix_repeating = true;
+                            } else {
+                                prefix_armed = false;
+                                prefix_repeating = false;
+                            }
                         } else {
                             match key.code {
                                 KeyCode::Up if session_chooser => { if session_selected > 0 { session_selected -= 1; } }
@@ -1711,6 +1740,8 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
         if !state.bindings.is_empty() || !synced_bindings.is_empty() {
             synced_bindings = state.bindings;
         }
+        // Sync repeat-time from server
+        repeat_time_ms = state.repeat_time;
         // Update status-left / status-right from server (already format-expanded)
         if let Some(sl) = state.status_left {
             if !sl.is_empty() {

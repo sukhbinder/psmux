@@ -211,6 +211,8 @@ pub struct AppState {
     pub mode: Mode,
     pub escape_time_ms: u64,
     pub repeat_time_ms: u64,
+    /// True when prefix mode was re-armed by a repeatable binding (not initial prefix press).
+    pub prefix_repeating: bool,
     pub prefix_key: (KeyCode, KeyModifiers),
     pub prefix2_key: Option<(KeyCode, KeyModifiers)>,
     pub prediction_dimming: bool,
@@ -407,6 +409,7 @@ impl AppState {
             mode: Mode::Passthrough,
             escape_time_ms: 500,
             repeat_time_ms: 500,
+            prefix_repeating: false,
             prefix_key: (crossterm::event::KeyCode::Char('b'), crossterm::event::KeyModifiers::CONTROL),
             prefix2_key: None,
             prediction_dimming: std::env::var("PSMUX_DIM_PREDICTIONS")
