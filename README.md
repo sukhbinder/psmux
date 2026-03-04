@@ -91,6 +91,19 @@ target\release\pmux.exe
 target\release\tmux.exe
 ```
 
+### Docker (build environment)
+
+A ready-made Windows container with Rust + MSVC + SSH for building psmux:
+
+```powershell
+cd docker
+docker build -t psmux-dev .
+docker run -d --name psmux-dev -p 127.0.0.1:2222:22 -e ADMIN_PASSWORD=YourPass123! psmux-dev
+ssh ContainerAdministrator@localhost -p 2222
+```
+
+See [docker/README.md](docker/README.md) for full details.
+
 ### Requirements
 
 - Windows 10 or Windows 11
