@@ -1187,6 +1187,86 @@ pub fn find_wrap_target(
 /// be unit-tested without needing a full `AppState`.
 ///
 /// Returns `None` for key codes we don't handle (F-keys, etc.).
+/// Compute xterm modifier parameter: 1 + Shift*1 + Alt*2 + Ctrl*4.
+/// Returns 1 when no modifiers are held (callers use >1 to decide whether to
+/// emit the extended `;mod` form).
+fn modifier_param(mods: KeyModifiers) -> u8 {
+    let mut m: u8 = 1;
+    if mods.contains(KeyModifiers::SHIFT) { m += 1; }
+    if mods.contains(KeyModifiers::ALT) { m += 2; }
+    if mods.contains(KeyModifiers::CONTROL) { m += 4; }
+    m
+}
+
+/// Parse modifier+special key names like "C-Left", "S-Right", "C-S-Up",
+/// "C-M-Home", etc. and return the xterm escape sequence.
+/// Returns None if the string isn't a recognized modified special key.
+pub fn parse_modified_special_key(s: &str) -> Option<String> {
+    let upper = s.to_uppercase();
+    // Extract modifier prefixes and base key name
+    let mut rest = upper.as_str();
+    let mut m: u8 = 1;
+    loop {
+        if rest.starts_with("C-") { m |= 4; rest = &rest[2..]; }
+        else if rest.starts_with("M-") { m |= 2; rest = &rest[2..]; }
+        else if rest.starts_with("S-") { m |= 1; rest = &rest[2..]; }
+        else { break; }
+    }
+    if m <= 1 { return None; } // no modifiers found
+    // Match the base key name
+    match rest {
+        "LEFT" => Some(format!("\x1b[1;{}D", m)),
+        "RIGHT" => Some(format!("\x1b[1;{}C", m)),
+        "UP" => Some(format!("\x1b[1;{}A", m)),
+        "DOWN" => Some(format!("\x1b[1;{}B", m)),
+        "HOME" => Some(format!("\x1b[1;{}H", m)),
+        "END" => Some(format!("\x1b[1;{}F", m)),
+        "INSERT" | "IC" => Some(format!("\x1b[2;{}~", m)),
+        "DELETE" | "DC" => Some(format!("\x1b[3;{}~", m)),
+        "PAGEUP" | "PPAGE" => Some(format!("\x1b[5;{}~", m)),
+        "PAGEDOWN" | "NPAGE" => Some(format!("\x1b[6;{}~", m)),
+        s if s.starts_with('F') && s.len() >= 2 => {
+            if let Ok(n) = s[1..].parse::<u8>() {
+                let seq = encode_fkey(n, m);
+                if seq.is_empty() { None } else { Some(String::from_utf8_lossy(&seq).into_owned()) }
+            } else { None }
+        }
+        _ => None,
+    }
+}
+
+/// Encode an F-key with optional xterm modifier parameter.
+fn encode_fkey(n: u8, m: u8) -> Vec<u8> {
+    // F1-F4 use SS3 when unmodified, CSI with modifier when modified.
+    let (prefix, num) = match n {
+        1 => if m > 1 { ("", Some((11, 'P'))) } else { return b"\x1bOP".to_vec() },
+        2 => if m > 1 { ("", Some((12, 'Q'))) } else { return b"\x1bOQ".to_vec() },
+        3 => if m > 1 { ("", Some((13, 'R'))) } else { return b"\x1bOR".to_vec() },
+        4 => if m > 1 { ("", Some((14, 'S'))) } else { return b"\x1bOS".to_vec() },
+        5 => ("", Some((15, '~'))),
+        6 => ("", Some((17, '~'))),
+        7 => ("", Some((18, '~'))),
+        8 => ("", Some((19, '~'))),
+        9 => ("", Some((20, '~'))),
+        10 => ("", Some((21, '~'))),
+        11 => ("", Some((23, '~'))),
+        12 => ("", Some((24, '~'))),
+        _ => return Vec::new(),
+    };
+    let _ = prefix;
+    if let Some((code, suffix)) = num {
+        if suffix == '~' {
+            if m > 1 { format!("\x1b[{};{}~", code, m).into_bytes() }
+            else { format!("\x1b[{}~", code).into_bytes() }
+        } else {
+            // F1-F4 modified: \x1b[1;{mod}P/Q/R/S
+            format!("\x1b[1;{}{}", m, suffix).into_bytes()
+        }
+    } else {
+        Vec::new()
+    }
+}
+
 pub fn encode_key_event(key: &KeyEvent) -> Option<Vec<u8>> {
     let encoded: Vec<u8> = match key.code {
         // AltGr detection: On Windows, AltGr is reported as Ctrl+Alt by the
@@ -1227,10 +1307,41 @@ pub fn encode_key_event(key: &KeyEvent) -> Option<Vec<u8>> {
         KeyCode::BackTab => b"\x1b[Z".to_vec(),
         KeyCode::Backspace => b"\x08".to_vec(),
         KeyCode::Esc => b"\x1b".to_vec(),
-        KeyCode::Left => b"\x1b[D".to_vec(),
-        KeyCode::Right => b"\x1b[C".to_vec(),
-        KeyCode::Up => b"\x1b[A".to_vec(),
-        KeyCode::Down => b"\x1b[B".to_vec(),
+        // Arrow keys and special keys with xterm modifier encoding.
+        // Format: \x1b[1;{mod}{letter} where mod = 1 + Shift*1 + Alt*2 + Ctrl*4
+        KeyCode::Left | KeyCode::Right | KeyCode::Up | KeyCode::Down |
+        KeyCode::Home | KeyCode::End => {
+            let letter = match key.code {
+                KeyCode::Up => 'A', KeyCode::Down => 'B',
+                KeyCode::Right => 'C', KeyCode::Left => 'D',
+                KeyCode::Home => 'H', KeyCode::End => 'F',
+                _ => unreachable!(),
+            };
+            let m = modifier_param(key.modifiers);
+            if m > 1 {
+                format!("\x1b[1;{}{}", m, letter).into_bytes()
+            } else {
+                format!("\x1b[{}", letter).into_bytes()
+            }
+        }
+        // Tilde-style keys: \x1b[{N};{mod}~ when modifiers present
+        KeyCode::Insert | KeyCode::Delete | KeyCode::PageUp | KeyCode::PageDown => {
+            let n = match key.code {
+                KeyCode::Insert => 2, KeyCode::Delete => 3,
+                KeyCode::PageUp => 5, KeyCode::PageDown => 6,
+                _ => unreachable!(),
+            };
+            let m = modifier_param(key.modifiers);
+            if m > 1 {
+                format!("\x1b[{};{}~", n, m).into_bytes()
+            } else {
+                format!("\x1b[{}~", n).into_bytes()
+            }
+        }
+        KeyCode::F(n) => {
+            let m = modifier_param(key.modifiers);
+            encode_fkey(n, m)
+        }
         _ => return None,
     };
     Some(encoded)
@@ -2258,6 +2369,11 @@ pub fn send_key_to_active(app: &mut AppState, k: &str) -> io::Result<()> {
                 let c = s.chars().nth(4).unwrap_or('c');
                 let ctrl_char = (c.to_ascii_lowercase() as u8) & 0x1F;
                 let _ = p.writer.write_all(&[0x1b, ctrl_char]);
+            }
+            // Modifier + special key combos: C-Left, S-Right, C-S-Up, C-M-Home, etc.
+            s if parse_modified_special_key(s).is_some() => {
+                let seq = parse_modified_special_key(s).unwrap();
+                let _ = p.writer.write_all(seq.as_bytes());
             }
             _ => {}
         }

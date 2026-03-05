@@ -863,7 +863,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                                 "UP" | "DOWN" | "RIGHT" | "LEFT" | "HOME" | "END" |
                                 "PAGEUP" | "PPAGE" | "PAGEDOWN" | "NPAGE" | "DELETE" | "DC" | "INSERT" | "IC" |
                                 "F1" | "F2" | "F3" | "F4" | "F5" | "F6" | "F7" | "F8" | "F9" | "F10" | "F11" | "F12"
-                            ) || key_upper.starts_with("C-") || key_upper.starts_with("M-");
+                            ) || key_upper.starts_with("C-") || key_upper.starts_with("M-") || key_upper.starts_with("S-");
                             
                             match key_upper.as_str() {
                                 "ENTER" => send_text_to_active(&mut app, "\r")?,
@@ -894,6 +894,12 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                                 "F10" => send_text_to_active(&mut app, "\x1b[21~")?,
                                 "F11" => send_text_to_active(&mut app, "\x1b[23~")?,
                                 "F12" => send_text_to_active(&mut app, "\x1b[24~")?,
+                                // Modifier + special key combos (C-Left, S-Right, C-M-Up, etc.)
+                                // must be checked BEFORE the generic C-x / M-x single-char handlers.
+                                s if crate::input::parse_modified_special_key(s).is_some() => {
+                                    let seq = crate::input::parse_modified_special_key(s).unwrap();
+                                    send_text_to_active(&mut app, &seq)?;
+                                }
                                 s if s.starts_with("C-M-") || s.starts_with("C-m-") => {
                                     if let Some(c) = key.chars().nth(4) {
                                         let ctrl = (c.to_ascii_lowercase() as u8) & 0x1F;
@@ -942,7 +948,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                                             "UP" | "DOWN" | "RIGHT" | "LEFT" | "HOME" | "END" |
                                             "PAGEUP" | "PPAGE" | "PAGEDOWN" | "NPAGE" | "DELETE" | "DC" | "INSERT" | "IC" |
                                             "F1" | "F2" | "F3" | "F4" | "F5" | "F6" | "F7" | "F8" | "F9" | "F10" | "F11" | "F12"
-                                        ) || next_upper.starts_with("C-") || next_upper.starts_with("M-");
+                                        ) || next_upper.starts_with("C-") || next_upper.starts_with("M-") || next_upper.starts_with("S-");
                                         if !next_is_special {
                                             send_text_to_active(&mut app, " ")?;
                                         }

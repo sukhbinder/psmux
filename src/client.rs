@@ -19,6 +19,19 @@ use crate::debug_log::{client_log, client_log_enabled, input_log, input_log_enab
 use crate::layout::RowRunsJson;
 use crate::tree::split_with_gaps;
 
+/// Build a send-key name with modifier prefix (e.g. "C-Left", "S-Right", "C-S-Up").
+fn modified_key_name(base: &str, mods: KeyModifiers) -> String {
+    let mut prefix = String::new();
+    if mods.contains(KeyModifiers::CONTROL) { prefix.push_str("C-"); }
+    if mods.contains(KeyModifiers::ALT) { prefix.push_str("M-"); }
+    if mods.contains(KeyModifiers::SHIFT) { prefix.push_str("S-"); }
+    if prefix.is_empty() {
+        base.to_lowercase()
+    } else {
+        format!("{}{}", prefix, base)
+    }
+}
+
 /// Extract selected text from the layout tree given absolute terminal coordinates.
 /// Computes pane areas via the same Layout splitting render_json uses, then reads
 /// characters from the run-length-encoded rows_v2 data.
@@ -1299,18 +1312,18 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                                 }
                                 KeyCode::BackTab => { cmd_batch.push("send-key btab\n".into()); }
                                 KeyCode::Backspace => { cmd_batch.push("send-key backspace\n".into()); }
-                                KeyCode::Delete => { cmd_batch.push("send-key delete\n".into()); }
+                                KeyCode::Delete => { cmd_batch.push(format!("send-key {}\n", modified_key_name("Delete", key.modifiers))); }
                                 KeyCode::Esc => { cmd_batch.push("send-key esc\n".into()); }
-                                KeyCode::Left => { cmd_batch.push("send-key left\n".into()); }
-                                KeyCode::Right => { cmd_batch.push("send-key right\n".into()); }
-                                KeyCode::Up => { cmd_batch.push("send-key up\n".into()); }
-                                KeyCode::Down => { cmd_batch.push("send-key down\n".into()); }
-                                KeyCode::PageUp => { cmd_batch.push("send-key pageup\n".into()); }
-                                KeyCode::PageDown => { cmd_batch.push("send-key pagedown\n".into()); }
-                                KeyCode::Home => { cmd_batch.push("send-key home\n".into()); }
-                                KeyCode::End => { cmd_batch.push("send-key end\n".into()); }
-                                KeyCode::Insert => { cmd_batch.push("send-key insert\n".into()); }
-                                KeyCode::F(n) => { cmd_batch.push(format!("send-key f{}\n", n)); }
+                                KeyCode::Left => { cmd_batch.push(format!("send-key {}\n", modified_key_name("Left", key.modifiers))); }
+                                KeyCode::Right => { cmd_batch.push(format!("send-key {}\n", modified_key_name("Right", key.modifiers))); }
+                                KeyCode::Up => { cmd_batch.push(format!("send-key {}\n", modified_key_name("Up", key.modifiers))); }
+                                KeyCode::Down => { cmd_batch.push(format!("send-key {}\n", modified_key_name("Down", key.modifiers))); }
+                                KeyCode::PageUp => { cmd_batch.push(format!("send-key {}\n", modified_key_name("PageUp", key.modifiers))); }
+                                KeyCode::PageDown => { cmd_batch.push(format!("send-key {}\n", modified_key_name("PageDown", key.modifiers))); }
+                                KeyCode::Home => { cmd_batch.push(format!("send-key {}\n", modified_key_name("Home", key.modifiers))); }
+                                KeyCode::End => { cmd_batch.push(format!("send-key {}\n", modified_key_name("End", key.modifiers))); }
+                                KeyCode::Insert => { cmd_batch.push(format!("send-key {}\n", modified_key_name("Insert", key.modifiers))); }
+                                KeyCode::F(n) => { cmd_batch.push(format!("send-key {}\n", modified_key_name(&format!("F{}", n), key.modifiers))); }
                                 _ => {}
                             }
                         }
