@@ -872,13 +872,13 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                                 "F12" => send_text_to_active(&mut app, "\x1b[24~")?,
                                 s if s.starts_with("C-M-") || s.starts_with("C-m-") => {
                                     if let Some(c) = key.chars().nth(4) {
-                                        let ctrl = (c.to_ascii_lowercase() as u8).wrapping_sub(b'a').wrapping_add(1);
+                                        let ctrl = (c.to_ascii_lowercase() as u8) & 0x1F;
                                         send_text_to_active(&mut app, &format!("\x1b{}", ctrl as char))?;
                                     }
                                 }
                                 s if s.starts_with("C-") => {
                                     if let Some(c) = s.chars().nth(2) {
-                                        let ctrl = (c.to_ascii_lowercase() as u8).wrapping_sub(b'a').wrapping_add(1);
+                                        let ctrl = (c.to_ascii_lowercase() as u8) & 0x1F;
                                         send_text_to_active(&mut app, &String::from(ctrl as char))?;
                                         // For Ctrl+C (0x03), also send GenerateConsoleCtrlEvent
                                         // to handle broken ENABLE_PROCESSED_INPUT after TUI apps.
@@ -2150,7 +2150,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     let prefix = app.prefix_key;
                     let encoded: Vec<u8> = match prefix.0 {
                         crossterm::event::KeyCode::Char(c) if prefix.1.contains(crossterm::event::KeyModifiers::CONTROL) => {
-                            vec![(c.to_ascii_lowercase() as u8).wrapping_sub(b'a' - 1)]
+                            vec![(c.to_ascii_lowercase() as u8) & 0x1F]
                         }
                         crossterm::event::KeyCode::Char(c) => format!("{}", c).into_bytes(),
                         _ => vec![],

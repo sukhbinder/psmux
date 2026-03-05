@@ -864,7 +864,7 @@ pub fn handle_key(app: &mut AppState, key: KeyEvent) -> io::Result<bool> {
                     }
                     KeyCode::Char(c) => {
                         if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) {
-                            let ctrl = (c as u8).wrapping_sub(b'a').wrapping_add(1);
+                            let ctrl = (c as u8) & 0x1F;
                             let _ = pty.writer.write_all(&[ctrl]);
                         } else {
                             let mut buf = [0u8; 4];
@@ -1206,14 +1206,14 @@ pub fn encode_key_event(key: &KeyEvent) -> Option<Vec<u8>> {
         }
         KeyCode::Char(c) if key.modifiers.contains(KeyModifiers::CONTROL) && key.modifiers.contains(KeyModifiers::ALT) => {
             // Genuine Ctrl+Alt+letter — encode as ESC + ctrl-char.
-            let ctrl_char = (c.to_ascii_lowercase() as u8).wrapping_sub(b'a' - 1);
+            let ctrl_char = (c as u8) & 0x1F;
             vec![0x1b, ctrl_char]
         }
         KeyCode::Char(c) if key.modifiers.contains(KeyModifiers::ALT) => {
             format!("\x1b{}", c).into_bytes()
         }
         KeyCode::Char(c) if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            let ctrl_char = (c.to_ascii_lowercase() as u8).wrapping_sub(b'a' - 1);
+            let ctrl_char = (c as u8) & 0x1F;
             vec![ctrl_char]
         }
         KeyCode::Char(c) if (c as u32) >= 0x01 && (c as u32) <= 0x1A => {
@@ -1362,6 +1362,63 @@ fn forward_mouse_to_pane_ex(pane: &mut Pane, area: Rect, abs_x: u16, abs_y: u16,
 
 pub fn handle_mouse(app: &mut AppState, me: MouseEvent, window_area: Rect) -> io::Result<()> {
     use crossterm::event::{MouseEventKind, MouseButton};
+
+    // --- MenuMode: handle mouse clicks on menu items ---
+    if let Mode::MenuMode { ref mut menu } = app.mode {
+        if matches!(me.kind, MouseEventKind::Down(MouseButton::Left)) {
+            // Recompute menu_area the same way as the renderer (app.rs).
+            let full_area = Rect {
+                x: 0, y: 0,
+                width: window_area.width,
+                height: window_area.height + app.status_lines as u16,
+            };
+            let item_count = menu.items.len();
+            let height = (item_count as u16 + 2).min(20);
+            let width = menu.items.iter().map(|i| i.name.len()).max().unwrap_or(10).max(menu.title.len()) as u16 + 8;
+            let menu_area = if let (Some(x), Some(y)) = (menu.x, menu.y) {
+                let x = if x < 0 { (full_area.width as i16 + x).max(0) as u16 } else { x as u16 };
+                let y = if y < 0 { (full_area.height as i16 + y).max(0) as u16 } else { y as u16 };
+                Rect { x: x.min(full_area.width.saturating_sub(width)), y: y.min(full_area.height.saturating_sub(height)), width, height }
+            } else {
+                crate::rendering::centered_rect((width * 100 / full_area.width.max(1)).max(30), height, full_area)
+            };
+            let pos = ratatui::layout::Position { x: me.column, y: me.row };
+            if menu_area.contains(pos) {
+                // Block border is 1 row top
+                let inner_y = me.row.saturating_sub(menu_area.y + 1);
+                let idx = inner_y as usize;
+                if idx < menu.items.len() && !menu.items[idx].is_separator && !menu.items[idx].command.is_empty() {
+                    let cmd = menu.items[idx].command.clone();
+                    app.mode = Mode::Passthrough;
+                    let _ = execute_command_string(app, &cmd);
+                } else {
+                    app.mode = Mode::Passthrough;
+                }
+            } else {
+                app.mode = Mode::Passthrough;
+            }
+            return Ok(());
+        }
+        if matches!(me.kind, MouseEventKind::ScrollUp) {
+            if menu.selected > 0 {
+                menu.selected -= 1;
+                while menu.selected > 0 && menu.items.get(menu.selected).map(|i| i.is_separator).unwrap_or(false) {
+                    menu.selected -= 1;
+                }
+            }
+            return Ok(());
+        }
+        if matches!(me.kind, MouseEventKind::ScrollDown) {
+            if menu.selected + 1 < menu.items.len() {
+                menu.selected += 1;
+                while menu.selected + 1 < menu.items.len() && menu.items.get(menu.selected).map(|i| i.is_separator).unwrap_or(false) {
+                    menu.selected += 1;
+                }
+            }
+            return Ok(());
+        }
+        return Ok(());
+    }
 
     // --- Tab click: check if click is on the status bar row ---
     let status_row = window_area.y + window_area.height; // status bar is 1 row below window area
@@ -2179,7 +2236,7 @@ pub fn send_key_to_active(app: &mut AppState, k: &str) -> io::Result<()> {
             }
             s if s.starts_with("C-") && s.len() == 3 => {
                 let c = s.chars().nth(2).unwrap_or('c');
-                let ctrl_char = (c.to_ascii_lowercase() as u8).wrapping_sub(b'a' - 1);
+                let ctrl_char = (c.to_ascii_lowercase() as u8) & 0x1F;
                 let _ = p.writer.write_all(&[ctrl_char]);
                 // For C-c (Ctrl+C), also send GenerateConsoleCtrlEvent to
                 // handle broken ENABLE_PROCESSED_INPUT after TUI apps.
@@ -2199,7 +2256,7 @@ pub fn send_key_to_active(app: &mut AppState, k: &str) -> io::Result<()> {
             }
             s if (s.starts_with("C-M-") || s.starts_with("c-m-")) && s.len() == 5 => {
                 let c = s.chars().nth(4).unwrap_or('c');
-                let ctrl_char = (c.to_ascii_lowercase() as u8).wrapping_sub(b'a' - 1);
+                let ctrl_char = (c.to_ascii_lowercase() as u8) & 0x1F;
                 let _ = p.writer.write_all(&[0x1b, ctrl_char]);
             }
             _ => {}

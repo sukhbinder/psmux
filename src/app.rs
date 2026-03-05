@@ -46,6 +46,7 @@ use crate::util::{list_windows_json, list_tree_json};
 #[cfg(windows)]
 mod bracket_paste_detect {
     use crossterm::event::{KeyCode, KeyEvent};
+    use std::time::Instant;
 
     const OPEN:  &[u8] = b"\x1b[200~";
     const CLOSE: &[u8] = b"\x1b[201~";
@@ -54,7 +55,7 @@ mod bracket_paste_detect {
         /// Normal operation; watching for start of \e[200~.
         Idle,
         /// Matching characters of the open sequence at index `idx`.
-        MatchOpen { idx: usize, pending: Vec<KeyEvent> },
+        MatchOpen { idx: usize, pending: Vec<KeyEvent>, started: Instant },
         /// Accumulating paste content between open and close sequences.
         Pasting { buf: String },
         /// Inside paste, matching characters of the close sequence.
@@ -73,8 +74,34 @@ mod bracket_paste_detect {
         Paste(String),
     }
 
+    /// Returned by flush_timeout when buffered keys expire.
+    pub enum TimeoutAction {
+        /// Nothing buffered, no action needed.
+        None,
+        /// Buffered keys should be replayed through handle_key.
+        Replay(Vec<KeyEvent>),
+    }
+
     impl State {
         pub fn new() -> Self { State::Idle }
+    }
+
+    /// Check if the bracket paste detector has buffered an ESC that
+    /// hasn't been followed by the rest of \e[200~ within 5ms.
+    /// If so, flush the pending events.  This prevents Ctrl+[ (ESC)
+    /// from being swallowed indefinitely while the detector waits
+    /// for a `[` that never arrives.
+    pub fn flush_timeout(state: &mut State) -> TimeoutAction {
+        // Check if we're in MatchOpen and the timeout expired WITHOUT
+        // moving the state (avoids borrow issues).
+        let expired = matches!(state, State::MatchOpen { started, .. } if started.elapsed().as_millis() >= 5);
+        if expired {
+            let old = std::mem::replace(state, State::Idle);
+            if let State::MatchOpen { pending, .. } = old {
+                return TimeoutAction::Replay(pending);
+            }
+        }
+        TimeoutAction::None
     }
 
     fn key_byte(key: &KeyEvent) -> Option<u8> {
@@ -97,13 +124,14 @@ mod bracket_paste_detect {
                         *state = State::MatchOpen {
                             idx: 1,
                             pending: vec![key],
+                            started: Instant::now(),
                         };
                         return Action::Consumed;
                     }
                 }
                 Action::Forward(key)
             }
-            State::MatchOpen { idx, mut pending } => {
+            State::MatchOpen { idx, mut pending, .. } => {
                 if let Some(b) = key_byte(&key) {
                     if b == OPEN[idx] {
                         pending.push(key);
@@ -113,7 +141,7 @@ mod bracket_paste_detect {
                             *state = State::Pasting { buf: String::new() };
                             return Action::Consumed;
                         }
-                        *state = State::MatchOpen { idx: next, pending };
+                        *state = State::MatchOpen { idx: next, pending, started: Instant::now() };
                         return Action::Consumed;
                     }
                 }
@@ -935,7 +963,13 @@ pub fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<
         // responsive. When there are no pending control requests and no PTY
         // output, use the full 20ms timeout to reduce CPU usage.
         let has_pty_data = crate::types::PTY_DATA_READY.swap(false, std::sync::atomic::Ordering::AcqRel);
-        let poll_ms = if has_pty_data { 1 } else { 20 };
+        // Use fast polling when bracket paste detector has buffered an ESC
+        // so the timeout flush fires promptly (within ~1-2ms).
+        #[cfg(windows)]
+        let bp_pending = matches!(bp_state, bracket_paste_detect::State::MatchOpen { .. });
+        #[cfg(not(windows))]
+        let bp_pending = false;
+        let poll_ms = if bp_pending { 1 } else if has_pty_data { 1 } else { 20 };
         if event::poll(Duration::from_millis(poll_ms))? {
             match event::read()? {
                 Event::Key(key) if key.kind == KeyEventKind::Press || key.kind == KeyEventKind::Repeat => {
@@ -998,6 +1032,22 @@ pub fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<
                     send_paste_to_active(&mut app, &text)?;
                 }
                 _ => {}
+            }
+        }
+
+        // Flush bracket paste detector if ESC was buffered but no follow-up
+        // key arrived within the timeout (5ms).  Without this, pressing
+        // Ctrl+[ (ESC) would be permanently stuck in the detector when no
+        // subsequent key is pressed — breaking nvim's insert→normal switch.
+        #[cfg(windows)]
+        {
+            match bracket_paste_detect::flush_timeout(&mut bp_state) {
+                bracket_paste_detect::TimeoutAction::Replay(pending) => {
+                    for pk in pending {
+                        if handle_key(&mut app, pk)? { quit = true; break; }
+                    }
+                }
+                bracket_paste_detect::TimeoutAction::None => {}
             }
         }
 
