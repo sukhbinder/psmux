@@ -18,14 +18,16 @@ pub(crate) fn handle_connection(
     session_key: &str,
     aliases: std::sync::Arc<std::sync::RwLock<std::collections::HashMap<String, String>>>,
 ) {
+// Enable TCP_NODELAY for low-latency responses
+let _ = stream.set_nodelay(true);
 // Clone stream for writing, original goes into BufReader for reading
 let mut write_stream = match stream.try_clone() {
     Ok(s) => s,
     Err(_) => return,
 };
 
-// Set initial long timeout for auth
-let _ = stream.set_read_timeout(Some(Duration::from_millis(5000)));
+// Set initial timeout for auth (reduced from 5s - client sends immediately)
+let _ = stream.set_read_timeout(Some(Duration::from_millis(2000)));
 let mut r = io::BufReader::new(stream);
 
 // Read the authentication line
@@ -53,7 +55,7 @@ let _ = write_stream.write_all(b"OK\n");
 let _ = write_stream.flush();
 
 // Set short read timeout for batched command processing
-let _ = r.get_ref().set_read_timeout(Some(Duration::from_millis(50)));
+let _ = r.get_ref().set_read_timeout(Some(Duration::from_millis(10)));
 
 // Check for PERSISTENT flag and optional TARGET line
 let mut persistent = false;
@@ -86,11 +88,20 @@ if line.trim() == "PERSISTENT" {
     // writes it to TCP in order.
     let mut ws_bg = write_stream.try_clone().unwrap();
     let (resp_tx, resp_rx) = mpsc::channel::<mpsc::Receiver<String>>();
+
+    // Register a clone for server-pushed frames (event-driven rendering).
+    // The server auto-pushes serialized frames when PTY output arrives,
+    // eliminating the need for the client to poll dump-state.
+    crate::types::register_frame_sender(resp_tx.clone());
+
     std::thread::spawn(move || {
         while let Ok(rrx) = resp_rx.recv() {
             if let Ok(text) = rrx.recv() {
-                let _ = write!(ws_bg, "{}\n", text);
-                let _ = ws_bg.flush();
+                // Break on write errors so the thread exits when the
+                // TCP connection drops.  This lets push_frame() prune
+                // dead senders via retain() on the next call.
+                if write!(ws_bg, "{}\n", text).is_err() { break; }
+                if ws_bg.flush().is_err() { break; }
             }
         }
     });
@@ -542,6 +553,17 @@ match cmd {
     "rename-session" | "rename" => {
         if let Some(name) = args.iter().find(|a| !a.starts_with('-')) {
             let _ = tx.send(CtrlReq::RenameSession((*name).to_string()));
+        }
+    }
+    "claim-session" => {
+        // Warm-server claim: rename + synchronous response so CLI knows it's done.
+        if let Some(name) = args.iter().find(|a| !a.starts_with('-')) {
+            let (rtx, rrx) = mpsc::channel::<String>();
+            let _ = tx.send(CtrlReq::ClaimSession((*name).to_string(), rtx));
+            if let Ok(resp) = rrx.recv_timeout(std::time::Duration::from_secs(5)) {
+                let _ = write!(write_stream, "{}", resp);
+                let _ = write_stream.flush();
+            }
         }
     }
     "swap-pane" | "swapp" => {

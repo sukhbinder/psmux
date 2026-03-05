@@ -562,10 +562,28 @@ pub fn pane_index_in_window(node: &Node, path: &[usize]) -> Option<usize> {
 }
 
 /// Reap exited children from the app. Returns (all_empty, any_pruned).
+/// Fast check: does any pane in this node tree have an exited child?
+/// Uses try_wait() but avoids the full tree rebuild if nothing has exited.
+fn has_any_exited(node: &mut Node) -> bool {
+    match node {
+        Node::Leaf(p) => {
+            if p.dead { return false; } // Already dead, handled
+            matches!(p.child.try_wait(), Ok(Some(_)))
+        }
+        Node::Split { children, .. } => {
+            children.iter_mut().any(|c| has_any_exited(c))
+        }
+    }
+}
+
 pub fn reap_children(app: &mut AppState) -> io::Result<(bool, bool)> {
     let remain = app.remain_on_exit;
     let mut any_pruned = false;
     for i in (0..app.windows.len()).rev() {
+        // Fast path: skip full tree rebuild if no panes have exited
+        if !has_any_exited(&mut app.windows[i].root) {
+            continue;
+        }
         let leaves_before = count_panes(&app.windows[i].root);
         let root = std::mem::replace(&mut app.windows[i].root, Node::Split { kind: LayoutKind::Horizontal, sizes: vec![], children: vec![] });
         match prune_exited(root, remain) {

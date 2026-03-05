@@ -59,8 +59,21 @@ fn main() {
 fn run_main() -> io::Result<()> {
     let args: Vec<String> = env::args().collect();
     
-    // Clean up any stale port files at startup
-    cleanup_stale_port_files();
+    // Defer stale port file cleanup: only run for commands that enumerate
+    // sessions (ls, list-sessions, attach, has-session, new-session).
+    // For fire-and-forget commands (new-window, split-window, send-keys, etc.),
+    // cleanup adds unnecessary latency (TCP connect probes per port file).
+    let subcmd = args.iter().skip(1)
+        .find(|a| !a.starts_with('-') && *a != "-L" && *a != "-t" && *a != "-f" && *a != "-S")
+        .map(|s| s.as_str())
+        .unwrap_or("");
+    let needs_cleanup = matches!(subcmd,
+        "" | "ls" | "list-sessions" | "attach" | "attach-session" | "a"
+        | "has-session" | "has" | "new-session" | "new" | "start-server"
+        | "kill-server");
+    if needs_cleanup {
+        cleanup_stale_port_files();
+    }
     
     // Parse -L flag early (tmux-compatible: names the server socket for namespace isolation)
     // In psmux, -L <name> creates a namespace prefix for session port/key files.
@@ -513,6 +526,61 @@ fn run_main() -> io::Result<()> {
                 if env::var("PSMUX_REMOTE_ATTACH").ok().as_deref() == Some("1") {
                     // Already set up for attach — skip server spawn
                 } else {
+                // ── Fast path: claim a pre-spawned warm server ──────────────
+                // When conditions are met (default shell, no start-dir, no raw cmd),
+                // check if a warm server (__warm__) is already running.  If so,
+                // rename it to the desired session name via claim-session — this
+                // skips the entire server startup + config load + shell spawn,
+                // making new-session nearly instant.
+                let warm_claimed = if initial_cmd.is_none() && start_dir.is_none() && raw_cmd_args.is_none() {
+                    let warm_base = if let Some(ref l) = l_socket_name {
+                        format!("{}____warm__", l)
+                    } else {
+                        "__warm__".to_string()
+                    };
+                    let warm_port_path = format!("{}\\.psmux\\{}.port", home, warm_base);
+                    if std::path::Path::new(&warm_port_path).exists() {
+                        // Try to claim the warm server
+                        let warm_key = crate::session::read_session_key(&warm_base).unwrap_or_default();
+                        if let Ok(port_str) = std::fs::read_to_string(&warm_port_path) {
+                            if let Ok(port) = port_str.trim().parse::<u16>() {
+                                let addr = format!("127.0.0.1:{}", port);
+                                if let Ok(mut stream) = std::net::TcpStream::connect_timeout(
+                                    &addr.parse().unwrap(),
+                                    Duration::from_millis(500),
+                                ) {
+                                    let _ = stream.set_nodelay(true);
+                                    let _ = stream.set_read_timeout(Some(Duration::from_millis(3000)));
+                                    let _ = write!(stream, "AUTH {}\n", warm_key);
+                                    let _ = write!(stream, "claim-session {}\n", name);
+                                    let _ = stream.flush();
+                                    // Read response
+                                    let mut buf = Vec::new();
+                                    let mut temp = [0u8; 256];
+                                    loop {
+                                        match std::io::Read::read(&mut stream, &mut temp) {
+                                            Ok(0) => break,
+                                            Ok(n) => { buf.extend_from_slice(&temp[..n]); break; }
+                                            Err(_) => break,
+                                        }
+                                    }
+                                    let resp = String::from_utf8_lossy(&buf);
+                                    if resp.contains("OK") {
+                                        // Apply window name if specified
+                                        if let Some(ref wn) = window_name {
+                                            env::set_var("PSMUX_TARGET_SESSION", &name);
+                                            let _ = send_control_with_response(
+                                                format!("rename-window {}\n", wn));
+                                        }
+                                        true
+                                    } else { false }
+                                } else { false }
+                            } else { false }
+                        } else { false }
+                    } else { false }
+                } else { false };
+
+                if !warm_claimed {
                 // Always spawn a background server first
                 let exe = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("psmux"));
                 let mut server_args: Vec<String> = vec!["server".into(), "-s".into(), name.clone()];
@@ -537,6 +605,21 @@ fn run_main() -> io::Result<()> {
                     server_args.push(wn.clone());
                 }
                 // Pass initial dimensions to server
+                // If user didn't specify -x/-y but this is an interactive (non-detached)
+                // session, auto-detect terminal size so the server pre-spawns the warm
+                // pane at the correct dimensions — making the first window instant.
+                if init_width.is_none() && init_height.is_none() && !detached {
+                    if let Ok((tw, th)) = crossterm::terminal::size() {
+                        // Height minus 1 for status bar, matching client-size convention
+                        let h = th.saturating_sub(1);
+                        if tw > 0 && h > 0 {
+                            server_args.push("-x".into());
+                            server_args.push(tw.to_string());
+                            server_args.push("-y".into());
+                            server_args.push(h.to_string());
+                        }
+                    }
+                }
                 if let Some(w) = init_width {
                     server_args.push("-x".into());
                     server_args.push(w.to_string());
@@ -587,6 +670,7 @@ fn run_main() -> io::Result<()> {
                     cmd.stderr(std::process::Stdio::null());
                     let _child = cmd.spawn().map_err(|e| io::Error::new(io::ErrorKind::Other, format!("failed to spawn server: {e}")))?;
                 }
+                } // end if !warm_claimed
                 } // end else (not PSMUX_REMOTE_ATTACH)
                 
                 // Wait for server to create port file (up to 5 seconds)

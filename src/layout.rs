@@ -273,6 +273,14 @@ pub fn dump_layout_json(app: &mut AppState) -> io::Result<String> {
                     }
                     rows_v2.push(RowRunsJson { runs });
                 }
+                // On Windows ConPTY, the vt100 parser's hide_cursor flag
+                // gets stuck after TUI apps are killed (Ctrl+C exits before
+                // cleanup sequences like CSI ?25h are flushed).  With ConPTY
+                // passthrough mode, alternate_screen() ALSO gets stuck true,
+                // so guarding on it doesn't help.  Always report cursor as
+                // visible — the minor cosmetic effect inside TUI apps is far
+                // less impactful than a missing cursor at the shell prompt.
+                let effective_hide = false;
                 LayoutJson::Leaf {
                     id: p.id,
                     rows: p.last_rows,
@@ -280,7 +288,7 @@ pub fn dump_layout_json(app: &mut AppState) -> io::Result<String> {
                     cursor_row: cr,
                     cursor_col: cc,
                     alternate_screen,
-                    hide_cursor: hide_cursor_flag,
+                    hide_cursor: effective_hide,
                     cursor_shape: p.cursor_shape.load(std::sync::atomic::Ordering::Relaxed),
                     active: false,
                     copy_mode: false,
@@ -505,7 +513,10 @@ pub fn dump_layout_json_fast(app: &mut AppState) -> io::Result<String> {
                     };
                     let screen = parser.screen();
                     let (cr, cc) = screen.cursor_position();
-                    let hide_cursor = screen.hide_cursor();
+                    // On Windows ConPTY, never trust hide_cursor — TUI apps
+                    // killed via Ctrl+C leave both hide_cursor and
+                    // alternate_screen stuck true (cleanup sequences lost).
+                    let hide_cursor = false;
 
                     // Alternate-screen heuristic
                     let alt = screen.alternate_screen() || {

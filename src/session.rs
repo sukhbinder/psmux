@@ -42,6 +42,7 @@ pub fn read_session_key(session: &str) -> io::Result<String> {
 pub fn send_auth_cmd(addr: &str, key: &str, cmd: &[u8]) -> io::Result<()> {
     let sock_addr: std::net::SocketAddr = addr.parse().map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
     if let Ok(mut s) = std::net::TcpStream::connect_timeout(&sock_addr, Duration::from_millis(50)) {
+        let _ = s.set_nodelay(true);
         let _ = write!(s, "AUTH {}\n", key);
         let _ = std::io::Write::write_all(&mut s, cmd);
         let _ = s.flush();
@@ -52,6 +53,7 @@ pub fn send_auth_cmd(addr: &str, key: &str, cmd: &[u8]) -> io::Result<()> {
 /// Send an authenticated command and get response
 pub fn send_auth_cmd_response(addr: &str, key: &str, cmd: &[u8]) -> io::Result<String> {
     let mut s = std::net::TcpStream::connect(addr)?;
+    let _ = s.set_nodelay(true);
     let _ = s.set_read_timeout(Some(Duration::from_millis(500)));
     let _ = write!(s, "AUTH {}\n", key);
     let _ = std::io::Write::write_all(&mut s, cmd);
@@ -71,9 +73,10 @@ pub fn send_control(line: String) -> io::Result<()> {
     let path = format!("{}\\.psmux\\{}.port", home, target);
     let port = std::fs::read_to_string(&path).ok().and_then(|s| s.trim().parse::<u16>().ok()).ok_or_else(|| io::Error::new(io::ErrorKind::Other, format!("no server running on session '{}'", target)))?.clone();
     let session_key = read_session_key(&target).unwrap_or_default();
-    let addr = format!("127.0.0.1:{}", port);
-    let mut stream = std::net::TcpStream::connect(addr)?;
-    let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
+    let addr: std::net::SocketAddr = format!("127.0.0.1:{}", port).parse().unwrap();
+    let mut stream = std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(500))?;
+    let _ = stream.set_nodelay(true);
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(50)));
     let _ = write!(stream, "AUTH {}\n", session_key);
     if let Some(ref ft) = full_target {
         let _ = write!(stream, "TARGET {}\n", ft);
@@ -97,6 +100,7 @@ pub fn send_control_with_response(line: String) -> io::Result<String> {
     let session_key = read_session_key(&target).unwrap_or_default();
     let addr = format!("127.0.0.1:{}", port);
     let mut stream = std::net::TcpStream::connect(&addr)?;
+    let _ = stream.set_nodelay(true);
     let _ = stream.set_read_timeout(Some(Duration::from_millis(2000)));
     let _ = write!(stream, "AUTH {}\n", session_key);
     if let Some(ref ft) = full_target {

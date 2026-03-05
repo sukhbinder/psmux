@@ -68,6 +68,37 @@ fn default_shell_name(command: Option<&str>, configured_shell: Option<&str>) -> 
 }
 
 pub fn create_window(pty_system: &dyn portable_pty::PtySystem, app: &mut AppState, command: Option<&str>) -> io::Result<()> {
+    // ── Fast path: use pre-spawned warm pane when creating a default shell ──
+    // The warm pane has its shell already loaded (~470ms for pwsh), so the
+    // prompt appears instantly — matching wezterm's "instant tab" feel.
+    if command.is_none() && app.warm_pane.is_some() {
+        let wp = app.warm_pane.take().unwrap();
+        // Resize to current terminal dimensions if they changed since pre-spawn
+        let area = app.last_window_area;
+        let rows = if area.height > 1 { area.height } else { 30 }.max(MIN_PANE_DIM);
+        let cols = if area.width > 1 { area.width } else { 120 }.max(MIN_PANE_DIM);
+        if rows != wp.rows || cols != wp.cols {
+            let size = PtySize { rows, cols, pixel_width: 0, pixel_height: 0 };
+            wp.master.resize(size).ok();
+            // Resize the vt100 parser too — otherwise it stays at the
+            // old warm-pane dimensions while last_rows/last_cols are
+            // set to the new size, causing resize_all_panes to skip
+            // it (dimensions already match) and the parser to render
+            // rows/cols beyond its grid as blank spaces.
+            if let Ok(mut parser) = wp.term.lock() {
+                parser.screen_mut().set_size(rows, cols);
+            }
+        }
+        let epoch = std::time::Instant::now() - Duration::from_secs(2);
+        let configured_shell = if app.default_shell.is_empty() { None } else { Some(app.default_shell.as_str()) };
+        let pane = Pane { master: wp.master, writer: wp.writer, child: wp.child, term: wp.term, last_rows: rows, last_cols: cols, id: wp.pane_id, title: format!("pane %{}", wp.pane_id), child_pid: wp.child_pid, data_version: wp.data_version, last_title_check: epoch, last_infer_title: epoch, dead: false, vt_bridge_cache: None, vti_mode_cache: None, mouse_input_cache: None, cursor_shape: wp.cursor_shape, copy_state: None, pane_style: None };
+        let win_name = default_shell_name(None, configured_shell);
+        app.windows.push(Window { root: Node::Leaf(pane), active_path: vec![], name: win_name, id: app.next_win_id, activity_flag: false, bell_flag: false, silence_flag: false, last_output_time: std::time::Instant::now(), last_seen_version: 0, manual_rename: false, layout_index: 0 });
+        app.next_win_id += 1;
+        app.active_idx = app.windows.len() - 1;
+        return Ok(());
+    }
+    // ── Normal path: spawn a new ConPTY + shell synchronously ──
     // Use actual terminal size if known, otherwise fall back to defaults
     let area = app.last_window_area;
     let rows = if area.height > 1 { area.height } else { 30 }.max(MIN_PANE_DIM);
@@ -124,6 +155,50 @@ pub fn create_window(pty_system: &dyn portable_pty::PtySystem, app: &mut AppStat
     app.next_win_id += 1;
     app.active_idx = app.windows.len() - 1;
     Ok(())
+}
+
+/// Pre-spawn a shell in the background so the next `new-window` (default shell,
+/// no custom command) can transplant it instantly.  The returned `WarmPane` has
+/// its reader thread already running — by the time the user creates a new window
+/// (typically 500ms+), pwsh will have fully loaded its profile and the prompt
+/// is ready.
+pub fn spawn_warm_pane(pty_system: &dyn portable_pty::PtySystem, app: &mut AppState) -> io::Result<crate::types::WarmPane> {
+    let area = app.last_window_area;
+    let rows = if area.height > 1 { area.height } else { 30 }.max(MIN_PANE_DIM);
+    let cols = if area.width > 1 { area.width } else { 120 }.max(MIN_PANE_DIM);
+    let size = PtySize { rows, cols, pixel_width: 0, pixel_height: 0 };
+    let pair = pty_system
+        .openpty(size)
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("openpty error: {e}")))?;
+    let mut shell_cmd = if !app.default_shell.is_empty() {
+        build_default_shell(&app.default_shell, app.env_shim)
+    } else {
+        build_command(None, app.env_shim)
+    };
+    let pane_id = app.next_pane_id;
+    app.next_pane_id += 1;
+    set_tmux_env(&mut shell_cmd, pane_id, app.control_port, app.socket_name.as_deref());
+    apply_user_environment(&mut shell_cmd, &app.environment);
+    let child = pair.slave
+        .spawn_command(shell_cmd)
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("spawn shell error: {e}")))?;
+    drop(pair.slave);
+    let scrollback = app.history_limit as u32;
+    let term: Arc<Mutex<vt100::Parser>> = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, scrollback as usize)));
+    let term_reader = term.clone();
+    let data_version = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let dv_writer = data_version.clone();
+    let cursor_shape = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(CURSOR_SHAPE_UNSET));
+    let cs_writer = cursor_shape.clone();
+    let reader = pair.master
+        .try_clone_reader()
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("clone reader error: {e}")))?;
+    spawn_reader_thread(reader, term_reader, dv_writer, cs_writer);
+    let child_pid = crate::platform::mouse_inject::get_child_pid(&*child);
+    let mut pty_writer = pair.master.take_writer()
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("take writer error: {e}")))?;
+    conpty_preemptive_dsr_response(&mut *pty_writer);
+    Ok(crate::types::WarmPane { master: pair.master, writer: pty_writer, child, term, data_version, cursor_shape, child_pid, pane_id, rows, cols })
 }
 
 pub fn split_active(app: &mut AppState, kind: LayoutKind) -> io::Result<()> {
@@ -247,6 +322,33 @@ pub fn split_active_with_command(app: &mut AppState, kind: LayoutKind, command: 
         }
     };
     let size = PtySize { rows, cols, pixel_width: 0, pixel_height: 0 };
+
+    // ── Fast path: transplant warm pane for default-shell splits ─────
+    // The warm pane has its shell already loaded (~470ms for pwsh).  Even
+    // though its ConPTY was created at full-window size, resizing to the
+    // split dimensions only costs a ConPTY repaint (~10-50ms) vs a full
+    // cold spawn (~500ms).  Net result: split feels nearly instant.
+    if command.is_none() && app.warm_pane.is_some() {
+        let wp = app.warm_pane.take().unwrap();
+        // Resize ConPTY + parser to the split dimensions
+        if rows != wp.rows || cols != wp.cols {
+            let sz = PtySize { rows, cols, pixel_width: 0, pixel_height: 0 };
+            wp.master.resize(sz).ok();
+            if let Ok(mut parser) = wp.term.lock() {
+                parser.screen_mut().set_size(rows, cols);
+            }
+        }
+        let epoch = std::time::Instant::now() - Duration::from_secs(2);
+        let new_leaf = Node::Leaf(Pane { master: wp.master, writer: wp.writer, child: wp.child, term: wp.term, last_rows: rows, last_cols: cols, id: wp.pane_id, title: format!("pane %{}", wp.pane_id), child_pid: wp.child_pid, data_version: wp.data_version, last_title_check: epoch, last_infer_title: epoch, dead: false, vt_bridge_cache: None, vti_mode_cache: None, mouse_input_cache: None, cursor_shape: wp.cursor_shape, copy_state: None, pane_style: None });
+        let win = &mut app.windows[app.active_idx];
+        replace_leaf_with_split(&mut win.root, &win.active_path, kind, new_leaf);
+        let mut new_path = win.active_path.clone();
+        new_path.push(1);
+        win.active_path = new_path;
+        return Ok(());
+    }
+
+    // ── Normal path: cold-spawn a new ConPTY + shell ────────────────
     let pair = pty_system.openpty(size).map_err(|e| io::Error::new(io::ErrorKind::Other, format!("openpty error: {e}")))?;
     // When no explicit command is given, use the configured default-shell.
     let mut shell_cmd = if command.is_some() {

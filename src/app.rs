@@ -330,7 +330,13 @@ pub fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<
     let _ = std::fs::write(&regpath, port.to_string());
     thread::spawn(move || {
         for conn in listener.incoming() {
-            if let Ok(mut stream) = conn {
+            if let Ok(stream) = conn {
+                let tx = tx.clone();
+                // Handle each connection in its own thread so rapid-fire
+                // commands (e.g. 200x new-window) don't queue behind each
+                // other on the accept loop.
+                thread::spawn(move || {
+                let mut stream = stream;
                 let mut line = String::new();
                 let mut r = io::BufReader::new(stream.try_clone().unwrap());
                 let _ = r.read_line(&mut line);
@@ -411,6 +417,10 @@ pub fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<
                             .find(|a| !a.starts_with('-') && args.windows(2).all(|w| !(w[0] == "-n" && w[1] == **a)))
                             .map(|s| s.trim_matches('"').to_string());
                         let _ = tx.send(CtrlReq::NewWindow(cmd_str, name, false, None));
+                        // Write immediate acknowledgment so the client's read()
+                        // returns promptly instead of waiting for stream close.
+                        let _ = write!(stream, "OK\n");
+                        let _ = stream.flush();
                     }
                     "split-window" => {
                         let kind = if args.iter().any(|a| *a == "-h") { LayoutKind::Horizontal } else { LayoutKind::Vertical };
@@ -420,8 +430,10 @@ pub fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<
                             .map(|s| s.trim_matches('"').to_string());
                         let (rtx, _rrx) = mpsc::channel::<String>();
                         let _ = tx.send(CtrlReq::SplitWindow(kind, cmd_str, false, None, None, rtx));
+                        let _ = write!(stream, "OK\n");
+                        let _ = stream.flush();
                     }
-                    "kill-pane" => { let _ = tx.send(CtrlReq::KillPane); }
+                    "kill-pane" => { let _ = tx.send(CtrlReq::KillPane); let _ = write!(stream, "OK\n"); let _ = stream.flush(); }
                     "capture-pane" => {
                         let escape_seqs = args.iter().any(|a| *a == "-e");
                         let (rtx, rrx) = mpsc::channel::<String>();
@@ -443,11 +455,13 @@ pub fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<
                     }
                     _ => {}
                 }
+                }); // end per-connection thread
             }
         }
     });
 
     let mut last_resize = Instant::now();
+    let mut last_reap = Instant::now();
     let mut quit = false;
     #[cfg(windows)]
     let mut bp_state = bracket_paste_detect::State::new();
@@ -917,7 +931,12 @@ pub fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<
             if opened_at.elapsed() > Duration::from_millis(app.display_panes_time_ms) { app.mode = Mode::Passthrough; }
         }
 
-        if event::poll(Duration::from_millis(20))? {
+        // Use a shorter poll timeout when PTY data is pending to keep rendering
+        // responsive. When there are no pending control requests and no PTY
+        // output, use the full 20ms timeout to reduce CPU usage.
+        let has_pty_data = crate::types::PTY_DATA_READY.swap(false, std::sync::atomic::Ordering::AcqRel);
+        let poll_ms = if has_pty_data { 1 } else { 20 };
+        if event::poll(Duration::from_millis(poll_ms))? {
             match event::read()? {
                 Event::Key(key) if key.kind == KeyEventKind::Press || key.kind == KeyEventKind::Repeat => {
                     // On Windows, crossterm does not emit Event::Paste — bracket
@@ -987,12 +1006,11 @@ pub fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<
             let Some(req) = req else { break; };
             match req {
                 CtrlReq::NewWindow(cmd, name, _detached, _start_dir) => {
-                    let pty_system = native_pty_system();
                     create_window(&*pty_system, &mut app, cmd.as_deref())?;
                     if let Some(n) = name { app.windows.last_mut().map(|w| w.name = n); }
                     resize_all_panes(&mut app);
                 }
-                CtrlReq::SplitWindow(k, cmd, _detached, _start_dir, _size_pct, resp) => { let _ = resp.send(if let Err(e) = split_active_with_command(&mut app, k, cmd.as_deref(), None) { format!("{e}") } else { String::new() }); resize_all_panes(&mut app); }
+                CtrlReq::SplitWindow(k, cmd, _detached, _start_dir, _size_pct, resp) => { let _ = resp.send(if let Err(e) = split_active_with_command(&mut app, k, cmd.as_deref(), Some(&*pty_system)) { format!("{e}") } else { String::new() }); resize_all_panes(&mut app); }
                 CtrlReq::KillPane => { let _ = kill_active_pane(&mut app); resize_all_panes(&mut app); }
                 CtrlReq::CapturePane(resp) => {
                     if let Some(text) = capture_active_pane_text(&mut app)? { let _ = resp.send(text); } else { let _ = resp.send(String::new()); }
@@ -1085,12 +1103,18 @@ pub fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<
             }
         }
 
-        let (all_empty, any_pruned) = reap_children(&mut app)?;
-        if any_pruned {
-            resize_all_panes(&mut app);
-        }
-        if all_empty {
-            quit = true;
+        // Throttle reap_children to ~500ms to avoid O(N_panes) try_wait()
+        // syscalls on every 20ms frame. With hundreds of panes this saves
+        // significant CPU and reduces event-loop latency for command processing.
+        if last_reap.elapsed() > Duration::from_millis(500) {
+            last_reap = Instant::now();
+            let (all_empty, any_pruned) = reap_children(&mut app)?;
+            if any_pruned {
+                resize_all_panes(&mut app);
+            }
+            if all_empty {
+                quit = true;
+            }
         }
 
         if quit { break; }

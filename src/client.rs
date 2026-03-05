@@ -568,9 +568,11 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                 remaining
             }
             else {
-                let idle_frame: u64 = 50;
-                let remaining = idle_frame.saturating_sub(since_dump);
-                if remaining == 0 { 0 } else { remaining.min(50) }
+                // Server pushes frames proactively via auto-push —
+                // no need for fast idle polling.  16ms (~60fps) ensures
+                // pushed frames render within one vsync while using
+                // negligible CPU (vs 50ms poll + dump-state roundtrip).
+                16
             };
 
         cmd_batch.clear();
@@ -1603,8 +1605,11 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
         } else if typing_active {
             since_dump >= 10  // ~100fps cap when typing (matches poll_ms)
         } else {
-            let idle_frame: u64 = if overlays_active { 33 } else { 50 };
-            since_dump >= idle_frame
+            // Server auto-pushes frames when state changes (PTY output,
+            // new window, etc.) — no idle dump-state polling needed.
+            // This saves CPU + bandwidth: no 50-100KB JSON roundtrips
+            // when the client is just sitting idle.
+            false
         };
         if should_dump && !dump_in_flight {
             if writer.write_all(b"dump-state\n").is_err() { break; }

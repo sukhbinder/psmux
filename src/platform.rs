@@ -900,6 +900,120 @@ pub mod mouse_inject {
             last_result != 0 && offset == records.len()
         }
     }
+
+    /// Send a CTRL_C_EVENT to all processes on the child's console.
+    ///
+    /// TUI applications (pstop, btop, etc.) often disable ENABLE_PROCESSED_INPUT
+    /// on the ConPTY console and fail to restore it on exit.  When this flag is
+    /// off, writing 0x03 to the ConPTY input pipe no longer generates a
+    /// CTRL_C_EVENT signal — the byte is delivered as a regular key event that
+    /// most programs ignore.
+    ///
+    /// This function works around the issue by:
+    ///   1. Attaching to the child's hidden ConPTY console
+    ///   2. Re-enabling ENABLE_PROCESSED_INPUT if it was cleared
+    ///   3. Calling GenerateConsoleCtrlEvent(CTRL_C_EVENT, 0)
+    ///
+    /// The combination ensures Ctrl+C always delivers a signal regardless of
+    /// what a previous TUI application did to the console mode.
+    pub fn send_ctrl_c_event(child_pid: u32, reattach: bool) -> bool {
+        const CTRL_C_EVENT: u32 = 0;
+        const ENABLE_PROCESSED_INPUT: u32 = 0x0001;
+
+        type HandlerRoutine = unsafe extern "system" fn(u32) -> i32;
+
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn SetConsoleCtrlHandler(
+                handler: Option<HandlerRoutine>,
+                add: i32,
+            ) -> i32;
+            fn GenerateConsoleCtrlEvent(
+                ctrl_event: u32,
+                process_group_id: u32,
+            ) -> i32;
+            fn GetConsoleMode(h: *mut c_void, mode: *mut u32) -> i32;
+            fn SetConsoleMode(h: *mut c_void, mode: u32) -> i32;
+        }
+
+        // Always log to file for Ctrl+C events (critical signal path).
+        fn log(msg: &str) {
+            debug_log(&format!("ctrl_c: {}", msg));
+        }
+
+        unsafe {
+            let had_console = reattach && GetConsoleWindow() != 0;
+
+            FreeConsole();
+
+            log(&format!("called: pid={} reattach={} had_console={}", child_pid, reattach, had_console));
+
+            if AttachConsole(child_pid) == 0 {
+                let err = GetLastError();
+                log(&format!("AttachConsole({}) FAILED err={}", child_pid, err));
+                if had_console { AttachConsole(ATTACH_PARENT_PROCESS); }
+                return false;
+            }
+
+            // Open the console input buffer to check / fix ENABLE_PROCESSED_INPUT
+            let conin: [u16; 7] = [
+                'C' as u16, 'O' as u16, 'N' as u16,
+                'I' as u16, 'N' as u16, '$' as u16, 0,
+            ];
+            let handle = CreateFileW(
+                conin.as_ptr(),
+                GENERIC_READ | GENERIC_WRITE,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                std::ptr::null(),
+                OPEN_EXISTING,
+                0,
+                std::ptr::null(),
+            );
+
+            if handle != INVALID_HANDLE && handle != 0 {
+                let mut mode: u32 = 0;
+                if GetConsoleMode(handle as *mut c_void, &mut mode) != 0 {
+                    log(&format!("console mode=0x{:04X} PROCESSED_INPUT={}", mode, mode & ENABLE_PROCESSED_INPUT != 0));
+                    if mode & ENABLE_PROCESSED_INPUT == 0 {
+                        log(&format!("re-enabling ENABLE_PROCESSED_INPUT for pid={}", child_pid));
+                        SetConsoleMode(handle as *mut c_void, mode | ENABLE_PROCESSED_INPUT);
+                    }
+                }
+                CloseHandle(handle);
+            }
+
+            // Ignore CTRL_C in our own process so GenerateConsoleCtrlEvent
+            // doesn't kill psmux (we're temporarily on the child's console).
+            // Passing None as handler with add=1 tells the system to ignore
+            // Ctrl+C signals in this process.
+            SetConsoleCtrlHandler(None, 1);
+
+            let ok = GenerateConsoleCtrlEvent(CTRL_C_EVENT, 0);
+            let err = GetLastError();
+
+            log(&format!("GenerateConsoleCtrlEvent => ok={} err={}", ok, err));
+
+            // Detach from the child's console BEFORE restoring Ctrl+C handling.
+            // GenerateConsoleCtrlEvent dispatches asynchronously via a new thread;
+            // if we restore the default handler while still attached, the async
+            // handler thread might terminate psmux.  Detaching first ensures the
+            // event only targets processes that remain on the console.
+            FreeConsole();
+
+            // Brief sleep to let the async CTRL_C_EVENT handler thread finish
+            // before we re-enable default handling.
+            std::thread::sleep(std::time::Duration::from_millis(5));
+
+            // Restore default Ctrl+C handling now that we're detached
+            SetConsoleCtrlHandler(None, 0);
+
+            if had_console {
+                AttachConsole(ATTACH_PARENT_PROCESS);
+            }
+
+            ok != 0
+        }
+    }
 }
 
 #[cfg(not(windows))]
@@ -908,6 +1022,7 @@ pub mod mouse_inject {
     pub fn send_mouse_event(_pid: u32, _col: i16, _row: i16, _btn: u32, _flags: u32, _reattach: bool) -> bool { false }
     pub fn send_vt_sequence(_pid: u32, _sequence: &[u8]) -> bool { false }
     pub fn query_vti_enabled(_pid: u32) -> Option<bool> { None }
+    pub fn send_ctrl_c_event(_pid: u32, _reattach: bool) -> bool { false }
     pub fn query_mouse_input_enabled(_pid: u32) -> Option<bool> { None }
     pub fn send_bracketed_paste(_pid: u32, _text: &str, _bracket: bool) -> bool { false }
 }
