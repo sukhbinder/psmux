@@ -299,6 +299,7 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
     let mut confirm_cmd: Option<String> = None;  // pending kill confirmation
     let current_session = name.clone();
     let mut last_sent_size: (u16, u16) = (0, 0);
+    let mut last_status_lines: u16 = 1; // track server's status_lines for correct client-size height
     let mut last_dump_time = Instant::now() - Duration::from_millis(250);
     let mut force_dump = true;
     let mut last_tree: Vec<WinTree> = Vec::new();
@@ -629,25 +630,16 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                         paste_pend_start = None;
                     }
                 } else if paste_stage2 && elapsed > Duration::from_millis(300) {
-                    // Stage 2 timeout — no Ctrl+V Release arrived, flush as text
+                    // Stage 2 timeout — no Ctrl+V Release arrived.  Since we
+                    // accumulated ≥3 chars in <20ms this is almost certainly a
+                    // paste.  Send as send-paste so the server wraps it in
+                    // bracketed paste sequences and child apps (nvim, etc.) can
+                    // distinguish paste from typed input (fixes autoindent).
                     if input_log_enabled() {
-                        input_log("paste", &format!("stage2 timeout, flushing {} chars as normal", paste_pend.len()));
+                        input_log("paste", &format!("stage2 timeout, sending {} chars as send-paste", paste_pend.len()));
                     }
-                    for c in paste_pend.chars() {
-                        match c {
-                            '\n' => { cmd_batch.push("send-key enter\n".into()); }
-                            '\t' => { cmd_batch.push("send-key tab\n".into()); }
-                            ' '  => { cmd_batch.push("send-key space\n".into()); }
-                            _ => {
-                                let escaped = match c {
-                                    '"' => "\\\"".to_string(),
-                                    '\\' => "\\\\".to_string(),
-                                    _ => c.to_string(),
-                                };
-                                cmd_batch.push(format!("send-text \"{}\"\n", escaped));
-                            }
-                        }
-                    }
+                    let encoded = base64_encode(&paste_pend);
+                    cmd_batch.push(format!("send-paste {}\n", encoded));
                     paste_pend.clear();
                     paste_pend_start = None;
                     paste_stage2 = false;
@@ -1557,7 +1549,7 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
         let mut size_changed = false;
         {
             let ts = terminal.size()?;
-            let new_size = (ts.width, ts.height.saturating_sub(1));
+            let new_size = (ts.width, ts.height.saturating_sub(last_status_lines));
             if new_size != last_sent_size {
                 last_sent_size = new_size;
                 size_changed = true;
@@ -1763,6 +1755,15 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
             }
         }
         let status_lines = if state.status_visible { state.status_lines } else { 0 };
+        // If server's status_lines changed, re-send client-size with the
+        // correct content-area height so the server's pane rects match the
+        // client's render area exactly.
+        let new_sl = (status_lines as u16).max(1);
+        if new_sl != last_status_lines {
+            last_status_lines = new_sl;
+            // Force a client-size re-send on the next iteration
+            last_sent_size = (0, 0);
+        }
         let status_format = state.status_format;
         // Update pane border styles
         if let Some(ref pbs) = state.pane_border_style {
@@ -1956,16 +1957,30 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                                         c += 1;
                                     }
                                 }
+                                // Pad remaining columns so the Line fills the
+                                // full pane width — prevents a visible gap when
+                                // the server's content width differs from the
+                                // client's computed rect (e.g. during resize or
+                                // when status_lines > 1).
+                                if c < inner.width {
+                                    let last_bg = if !spans.is_empty() {
+                                        spans.last().unwrap().style.bg.unwrap_or(Color::Reset)
+                                    } else { Color::Reset };
+                                    let pad = " ".repeat((inner.width - c) as usize);
+                                    spans.push(Span::styled(pad, Style::default().bg(last_bg)));
+                                }
                                 lines.push(Line::from(spans));
                             }
                         } else {
                             for r in 0..inner.height.min(rows_v2.len() as u16) {
                                 let mut spans: Vec<Span> = Vec::new();
                                 let mut c: u16 = 0;
+                                let mut last_bg = Color::Reset;
                                 for run in &rows_v2[r as usize].runs {
                                     if c >= inner.width { break; }
                                     let mut fg = map_color(&run.fg);
                                     let bg = map_color(&run.bg);
+                                    last_bg = bg;
                                     if *active && dim_preds && !*alternate_screen
                                         && (r > *cursor_row || (r == *cursor_row && c >= *cursor_col))
                                     {
@@ -1982,6 +1997,12 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                                     let text: &str = if run.text.is_empty() { " " } else { &run.text };
                                     spans.push(Span::styled(text, style));
                                     c = c.saturating_add(run.width.max(1));
+                                }
+                                // Pad remaining columns with the last run's bg
+                                // so every Line fills the full pane width.
+                                if c < inner.width {
+                                    let pad = " ".repeat((inner.width - c) as usize);
+                                    spans.push(Span::styled(pad, Style::default().bg(last_bg)));
                                 }
                                 lines.push(Line::from(spans));
                             }
@@ -2683,18 +2704,26 @@ fn flush_paste_pend_as_text(
     if paste_pend.is_empty() {
         return;
     }
-    for c in paste_pend.chars() {
-        match c {
-            '\n' => { cmd_batch.push("send-key enter\n".into()); }
-            '\t' => { cmd_batch.push("send-key tab\n".into()); }
-            ' '  => { cmd_batch.push("send-key space\n".into()); }
-            _ => {
-                let escaped = match c {
-                    '"' => "\\\"".to_string(),
-                    '\\' => "\\\\".to_string(),
-                    _ => c.to_string(),
-                };
-                cmd_batch.push(format!("send-text \"{}\"\n", escaped));
+    // If we accumulated enough chars that stage2 was entered, this is
+    // almost certainly pasted content — send as send-paste so the server
+    // wraps it in bracketed paste sequences (fixes nvim autoindent).
+    if *paste_stage2 || paste_pend.len() >= 3 {
+        let encoded = crate::util::base64_encode(paste_pend);
+        cmd_batch.push(format!("send-paste {}\n", encoded));
+    } else {
+        for c in paste_pend.chars() {
+            match c {
+                '\n' => { cmd_batch.push("send-key enter\n".into()); }
+                '\t' => { cmd_batch.push("send-key tab\n".into()); }
+                ' '  => { cmd_batch.push("send-key space\n".into()); }
+                _ => {
+                    let escaped = match c {
+                        '"' => "\\\"".to_string(),
+                        '\\' => "\\\\".to_string(),
+                        _ => c.to_string(),
+                    };
+                    cmd_batch.push(format!("send-text \"{}\"\n", escaped));
+                }
             }
         }
     }
