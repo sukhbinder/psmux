@@ -501,8 +501,10 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
     // Buffered OSC 52 clipboard text — written AFTER terminal.draw() to
     // avoid corrupting ratatui's output buffer.
     let mut pending_osc52: Option<String> = None;
-    // SSH mode: periodically re-send mouse-enable escape sequences.
-    let is_ssh_mode = crate::ssh_input::is_ssh_session();
+    // VT input mode: periodically re-send mouse-enable escape sequences.
+    // Covers SSH sessions and JetBrains JediTerm (which sends VT mouse
+    // sequences through ConPTY instead of native MOUSE_EVENT records).
+    let is_ssh_mode = crate::ssh_input::needs_vt_input();
     let mut last_mouse_enable = Instant::now();
     // ── Cursor blink stabilisation ──────────────────────────────────
     // Cache the last-sent DECSCUSR code so we only write it when it

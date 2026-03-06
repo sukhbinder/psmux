@@ -189,6 +189,24 @@ pub fn is_ssh_session() -> bool {
         || std::env::var_os("SSH_TTY").is_some()
 }
 
+/// Returns `true` when the terminal sends VT mouse sequences through ConPTY
+/// input instead of native MOUSE_EVENT INPUT_RECORDs.
+///
+/// JetBrains IDEs (IntelliJ, Rider, etc.) use JediTerm, which writes VT
+/// mouse escape sequences to the ConPTY input pipe.  ConPTY does NOT
+/// translate these into MOUSE_EVENT records, so crossterm's
+/// ReadConsoleInputW-based reader never sees them as mouse events.  The raw
+/// VT bytes leak through as KEY_EVENT records and end up echoed as garbled
+/// text in the active pane.
+///
+/// The fix: use the same VT input parser as SSH sessions to properly decode
+/// X10/SGR mouse sequences from stdin.
+pub fn needs_vt_input() -> bool {
+    is_ssh_session()
+        || std::env::var("TERMINAL_EMULATOR")
+            .map_or(false, |v| v.contains("JetBrains"))
+}
+
 /// Returns the Windows build number (e.g. 19045 for Win10 22H2, 22631 for
 /// Win11 23H2).  Returns `None` on non-Windows or if the query fails.
 #[cfg(windows)]

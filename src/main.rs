@@ -44,7 +44,7 @@ use crate::session::{cleanup_stale_port_files, read_session_key, send_control,
 use crate::rendering::apply_cursor_style;
 use crate::server::run_server;
 use crate::client::run_remote;
-use crate::ssh_input::{is_ssh_session, send_mouse_enable, InputSource};
+use crate::ssh_input::{send_mouse_enable, InputSource};
 
 fn main() {
     if let Err(e) = run_main() {
@@ -2324,8 +2324,9 @@ fn run_main() -> io::Result<()> {
     enable_raw_mode()?;
 
     // Detect terminal type for input handling.
-    let is_ssh = is_ssh_session();
-    let use_vt_input = is_ssh;
+    // Use VT input parsing for SSH sessions and terminals that send VT mouse
+    // sequences through ConPTY (e.g. JetBrains JediTerm).
+    let use_vt_input = crate::ssh_input::needs_vt_input();
 
     // For standard terminals (not SSH), clear VTI flag from stdin if
     // crossterm or another layer set it — keeps normal ReadConsoleInputW
