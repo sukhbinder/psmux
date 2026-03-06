@@ -681,6 +681,12 @@ fn scan_cursor_shape(data: &[u8]) -> Option<u8> {
     last_shape
 }
 
+/// Returns true if `data` contains the RMCUP sequence (ESC[?1049l).
+fn scan_rmcup(data: &[u8]) -> bool {
+    const RMCUP: &[u8] = b"\x1b[?1049l";
+    data.windows(RMCUP.len()).any(|w| w == RMCUP)
+}
+
 pub fn spawn_reader_thread(
     mut reader: Box<dyn std::io::Read + Send>,
     term_reader: Arc<Mutex<vt100::Parser>>,
@@ -698,12 +704,17 @@ pub fn spawn_reader_thread(
                 Ok(n) if n > 0 => {
                     zero_reads = 0;
                     // Scan for DECSCUSR cursor shape before vt100 parser consumes data.
-                    // All valid DECSCUSR values (0-6) are accepted.
                     if let Some(shape) = scan_cursor_shape(&local[..n]) {
                         cursor_shape.store(shape, std::sync::atomic::Ordering::Release);
                     }
+                    let rmcup = scan_rmcup(&local[..n]);
                     if let Ok(mut parser) = term_reader.lock() {
                         parser.process(&local[..n]);
+                    }
+                    // When TUI sends RMCUP, reset cursor shape so it
+                    // doesn't persist from the exiting TUI app.
+                    if rmcup {
+                        cursor_shape.store(0, std::sync::atomic::Ordering::Release);
                     }
                     dv_writer.fetch_add(1, std::sync::atomic::Ordering::Release);
                     crate::types::PTY_DATA_READY.store(true, std::sync::atomic::Ordering::Release);
@@ -714,6 +725,17 @@ pub fn spawn_reader_thread(
                     thread::sleep(Duration::from_millis(1));
                 }
                 Err(_) => break,
+            }
+        }
+        // Reader exited (child process died / pipe closed).
+        // If parser is still in alt-screen the TUI crashed without
+        // sending RMCUP — force cleanup now (TUI is guaranteed dead).
+        if let Ok(mut parser) = term_reader.lock() {
+            if parser.screen().alternate_screen() {
+                parser.process(b"\x1b[?25h\x1b[?1049l");
+                cursor_shape.store(0, std::sync::atomic::Ordering::Release);
+                dv_writer.fetch_add(1, std::sync::atomic::Ordering::Release);
+                crate::types::PTY_DATA_READY.store(true, std::sync::atomic::Ordering::Release);
             }
         }
     });

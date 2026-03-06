@@ -1353,15 +1353,6 @@ pub fn forward_key_to_active(app: &mut AppState, key: KeyEvent) -> io::Result<()
         None => return Ok(()),
     };
 
-    // Detect Ctrl+C: the encoded byte is 0x03 and the key is 'c' with CONTROL.
-    // TUI apps (pstop, btop, …) often disable ENABLE_PROCESSED_INPUT on the
-    // ConPTY console and don't restore it on exit, which prevents the normal
-    // 0x03 pipe write from generating a CTRL_C_EVENT.  Sending
-    // GenerateConsoleCtrlEvent via the platform layer fixes this.
-    let is_ctrl_c = encoded == [0x03]
-        && matches!(key.code, KeyCode::Char('c'))
-        && key.modifiers.contains(KeyModifiers::CONTROL);
-
     if app.sync_input {
         // Fan out to ALL panes in the current window
         let win = &mut app.windows[app.active_idx];
@@ -1373,40 +1364,14 @@ pub fn forward_key_to_active(app: &mut AppState, key: KeyEvent) -> io::Result<()
             }
         }
         write_all_panes(&mut win.root, &encoded);
-        if is_ctrl_c {
-            fn ctrl_c_all_panes(node: &Node) {
-                match node {
-                    Node::Leaf(p) if !p.dead => {
-                        if let Some(pid) = p.child_pid {
-                            crate::platform::mouse_inject::send_ctrl_c_event(pid, true);
-                        }
-                        // Reset parser state: TUI may die before flushing
-                        // CSI ?25h / CSI ?1049l cleanup sequences.
-                        if let Ok(mut parser) = p.term.lock() {
-                            parser.process(b"\x1b[?25h\x1b[?1049l");
-                        }
-                    }
-                    Node::Leaf(_) => {}
-                    Node::Split { children, .. } => { for c in children { ctrl_c_all_panes(c); } }
-                }
-            }
-            ctrl_c_all_panes(&win.root);
-        }
+
     } else {
         let win = &mut app.windows[app.active_idx];
         if let Some(active) = active_pane_mut(&mut win.root, &win.active_path) {
             if !active.dead {
                 let _ = active.writer.write_all(&encoded);
                 let _ = active.writer.flush();
-                if is_ctrl_c {
-                    if let Some(pid) = active.child_pid {
-                        crate::platform::mouse_inject::send_ctrl_c_event(pid, true);
-                    }
-                    // Reset parser: TUI may die before cleanup sequences.
-                    if let Ok(mut parser) = active.term.lock() {
-                        parser.process(b"\x1b[?25h\x1b[?1049l");
-                    }
-                }
+
             }
         }
     }
@@ -2349,17 +2314,7 @@ pub fn send_key_to_active(app: &mut AppState, k: &str) -> io::Result<()> {
                 let c = s.chars().nth(2).unwrap_or('c');
                 let ctrl_char = (c.to_ascii_lowercase() as u8) & 0x1F;
                 let _ = p.writer.write_all(&[ctrl_char]);
-                // For C-c (Ctrl+C), also send GenerateConsoleCtrlEvent to
-                // handle broken ENABLE_PROCESSED_INPUT after TUI apps.
-                if ctrl_char == 0x03 {
-                    if let Some(pid) = p.child_pid {
-                        crate::platform::mouse_inject::send_ctrl_c_event(pid, false);
-                    }
-                    // Reset parser: TUI may die before cleanup sequences.
-                    if let Ok(mut parser) = p.term.lock() {
-                        parser.process(b"\x1b[?25h\x1b[?1049l");
-                    }
-                }
+
             }
             s if (s.starts_with("M-") || s.starts_with("m-")) && s.len() == 3 => {
                 let c = s.chars().nth(2).unwrap_or('a');

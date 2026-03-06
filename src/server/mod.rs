@@ -910,28 +910,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                                     if let Some(c) = s.chars().nth(2) {
                                         let ctrl = (c.to_ascii_lowercase() as u8) & 0x1F;
                                         send_text_to_active(&mut app, &String::from(ctrl as char))?;
-                                        // For Ctrl+C (0x03), also send GenerateConsoleCtrlEvent
-                                        // to handle broken ENABLE_PROCESSED_INPUT after TUI apps.
-                                        #[cfg(windows)]
-                                        if ctrl == 0x03 {
-                                            let win = &app.windows[app.active_idx];
-                                            if let Some(p) = crate::tree::active_pane(&win.root, &win.active_path) {
-                                                if let Some(pid) = p.child_pid {
-                                                    crate::platform::mouse_inject::send_ctrl_c_event(pid, false);
-                                                }
-                                            }
-                                            // After Ctrl+C, the TUI app may die before flushing
-                                            // cleanup sequences (CSI ?25h, CSI ?1049l), leaving
-                                            // the vt100 parser stuck in alternate-screen with a
-                                            // hidden cursor.  Feed reset sequences directly into
-                                            // the parser to restore sane terminal state.
-                                            let win = &app.windows[app.active_idx];
-                                            if let Some(p) = crate::tree::active_pane(&win.root, &win.active_path) {
-                                                if let Ok(mut parser) = p.term.lock() {
-                                                    parser.process(b"\x1b[?25h\x1b[?1049l");
-                                                }
-                                            }
-                                        }
+
                                     }
                                 }
                                 s if s.starts_with("M-") => {

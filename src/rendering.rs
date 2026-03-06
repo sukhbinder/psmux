@@ -246,13 +246,14 @@ pub fn render_node(
                 let cc = cc.min(target_cols.saturating_sub(1));
                 let cx = inner.x + cc;
                 let cy = inner.y + cr;
-                // Respect the child's cursor-visibility state, but only
-                // On Windows ConPTY, never trust hide_cursor — TUI apps
-                // killed via Ctrl+C leave it stuck true (cleanup sequences
-                // lost).  Always show cursor; the minor cosmetic effect
-                // inside TUI apps is far less impactful than a missing
-                // cursor at the shell prompt.
-                f.set_cursor_position((cx, cy));
+                // Respect the child's cursor-visibility state.
+                // TUI apps like Claude draw their own cursor via cell
+                // inverse-video and hide the real terminal cursor —
+                // honour that so we don't place a stray cursor at
+                // ConPTY's parking position.
+                if !screen.hide_cursor() {
+                    f.set_cursor_position((cx, cy));
+                }
             }
         }
         Node::Split { kind, sizes, children } => {
