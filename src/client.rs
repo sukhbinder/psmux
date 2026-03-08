@@ -604,7 +604,7 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                     if !paste_pend.is_empty() {
                         if input_log_enabled() {
                             input_log("paste", &format!("paste CONFIRMED (top), sending {} chars as send-paste: {:?}",
-                                paste_pend.len(), &paste_pend[..paste_pend.len().min(200)]));
+                                paste_pend.len(), &paste_pend.chars().take(200).collect::<String>()));
                         }
                         let encoded = base64_encode(&paste_pend);
                         cmd_batch.push(format!("send-paste {}\n", encoded));
@@ -615,12 +615,39 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                     paste_confirmed = false;
                 } else if !paste_stage2 && elapsed > Duration::from_millis(20) {
                     // 20ms window expired
-                    if paste_pend.len() >= 3 {
-                        // ≥3 chars in 20ms → likely paste, enter stage 2
+                    let has_non_ascii = paste_pend.chars().any(|c| !c.is_ascii());
+                    if paste_pend.len() >= 3 && !has_non_ascii {
+                        // ≥3 ASCII chars in 20ms → likely paste, enter stage 2.
+                        // Non-ASCII chars (IME composition, CJK input) are excluded
+                        // because IME routinely generates 3+ chars in <20ms and would
+                        // trigger a false-positive 300ms delay (fixes #91).
                         paste_stage2 = true;
                         if input_log_enabled() {
                             input_log("paste", &format!("stage2: {} chars in 20ms, waiting for Ctrl+V Release", paste_pend.len()));
                         }
+                    } else if paste_pend.len() >= 3 && has_non_ascii {
+                        // ≥3 chars but contains non-ASCII (IME input) — flush
+                        // immediately as normal text to avoid 300ms delay.
+                        if input_log_enabled() {
+                            input_log("paste", &format!("flush {} chars as normal (non-ASCII / IME detected)", paste_pend.len()));
+                        }
+                        for c in paste_pend.chars() {
+                            match c {
+                                '\n' => { cmd_batch.push("send-key enter\n".into()); }
+                                '\t' => { cmd_batch.push("send-key tab\n".into()); }
+                                ' '  => { cmd_batch.push("send-key space\n".into()); }
+                                _ => {
+                                    let escaped = match c {
+                                        '"' => "\\\"".to_string(),
+                                        '\\' => "\\\\".to_string(),
+                                        _ => c.to_string(),
+                                    };
+                                    cmd_batch.push(format!("send-text \"{}\"\n", escaped));
+                                }
+                            }
+                        }
+                        paste_pend.clear();
+                        paste_pend_start = None;
                     } else {
                         // <3 chars → normal typing, flush as send-text
                         if input_log_enabled() {
@@ -1536,7 +1563,7 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
             if paste_confirmed && !paste_pend.is_empty() {
                 if input_log_enabled() {
                     input_log("paste", &format!("paste CONFIRMED (post-event), sending {} chars as send-paste: {:?}",
-                        paste_pend.len(), &paste_pend[..paste_pend.len().min(200)]));
+                        paste_pend.len(), &paste_pend.chars().take(200).collect::<String>()));
                 }
                 let encoded = base64_encode(&paste_pend);
                 cmd_batch.push(format!("send-paste {}\n", encoded));
@@ -2719,10 +2746,13 @@ fn flush_paste_pend_as_text(
     if paste_pend.is_empty() {
         return;
     }
-    // If we accumulated enough chars that stage2 was entered, this is
-    // almost certainly pasted content — send as send-paste so the server
+    // If we accumulated enough ASCII chars that stage2 was entered, this
+    // is almost certainly pasted content — send as send-paste so the server
     // wraps it in bracketed paste sequences (fixes nvim autoindent).
-    if *paste_stage2 || paste_pend.len() >= 3 {
+    // Non-ASCII buffers (IME input) are always flushed as normal text to
+    // avoid the 300ms delay (fixes #91).
+    let has_non_ascii = paste_pend.chars().any(|c| !c.is_ascii());
+    if (*paste_stage2 || paste_pend.len() >= 3) && !has_non_ascii {
         let encoded = crate::util::base64_encode(paste_pend);
         cmd_batch.push(format!("send-paste {}\n", encoded));
     } else {
@@ -2745,4 +2775,101 @@ fn flush_paste_pend_as_text(
     paste_pend.clear();
     *paste_pend_start = None;
     *paste_stage2 = false;
+}
+
+/// Returns true if the buffer contains any non-ASCII characters (IME / CJK input).
+/// Used by the paste detection heuristic to skip Stage 2 for IME input (fixes #91).
+#[cfg(windows)]
+fn paste_buffer_has_non_ascii(buf: &str) -> bool {
+    buf.chars().any(|c| !c.is_ascii())
+}
+
+#[cfg(test)]
+mod tests {
+    #[cfg(windows)]
+    use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn ime_detection_ascii_only() {
+        // Pure ASCII text should NOT be detected as IME input
+        assert!(!paste_buffer_has_non_ascii("abc"));
+        assert!(!paste_buffer_has_non_ascii("hello world"));
+        assert!(!paste_buffer_has_non_ascii("12345"));
+        assert!(!paste_buffer_has_non_ascii(""));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn ime_detection_japanese() {
+        // Japanese IME input should be detected as non-ASCII
+        assert!(paste_buffer_has_non_ascii("日本語"));
+        assert!(paste_buffer_has_non_ascii("にほんご"));
+        assert!(paste_buffer_has_non_ascii("abc日本語"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn ime_detection_chinese() {
+        assert!(paste_buffer_has_non_ascii("中文"));
+        assert!(paste_buffer_has_non_ascii("你好世界"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn ime_detection_korean() {
+        assert!(paste_buffer_has_non_ascii("한국어"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn ime_detection_mixed() {
+        // Mixed ASCII + CJK should be detected as non-ASCII
+        assert!(paste_buffer_has_non_ascii("hello世界"));
+        assert!(paste_buffer_has_non_ascii("a日b"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn flush_paste_pend_ascii_sends_as_paste() {
+        // ASCII buffer with ≥3 chars should send as send-paste (paste detection intact)
+        let mut buf = String::from("abcdef");
+        let mut start: Option<std::time::Instant> = Some(std::time::Instant::now());
+        let mut stage2 = true;
+        let mut cmds: Vec<String> = Vec::new();
+        flush_paste_pend_as_text(&mut buf, &mut start, &mut stage2, &mut cmds);
+        assert_eq!(cmds.len(), 1);
+        assert!(cmds[0].starts_with("send-paste "));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn flush_paste_pend_cjk_sends_as_text() {
+        // Non-ASCII buffer should NEVER send as send-paste, even with ≥3 chars.
+        // This is the core fix for issue #91.
+        let mut buf = String::from("日本語テスト");
+        let mut start: Option<std::time::Instant> = Some(std::time::Instant::now());
+        let mut stage2 = false;
+        let mut cmds: Vec<String> = Vec::new();
+        flush_paste_pend_as_text(&mut buf, &mut start, &mut stage2, &mut cmds);
+        // Each character should be sent as individual send-text
+        assert!(cmds.len() > 1, "CJK should be sent as individual send-text commands");
+        for cmd in &cmds {
+            assert!(cmd.starts_with("send-text "), "CJK char should be send-text, got: {}", cmd);
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn flush_paste_pend_short_ascii_sends_as_text() {
+        // <3 ASCII chars should be sent as individual keystrokes
+        let mut buf = String::from("ab");
+        let mut start: Option<std::time::Instant> = Some(std::time::Instant::now());
+        let mut stage2 = false;
+        let mut cmds: Vec<String> = Vec::new();
+        flush_paste_pend_as_text(&mut buf, &mut start, &mut stage2, &mut cmds);
+        assert_eq!(cmds.len(), 2);
+        assert!(cmds[0].starts_with("send-text "));
+        assert!(cmds[1].starts_with("send-text "));
+    }
 }
