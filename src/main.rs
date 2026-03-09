@@ -831,7 +831,7 @@ fn run_main() -> io::Result<()> {
                     cmd_line.push_str(&format!(" -c \"{}\"", dir.replace("\"", "\\\"")));
                 }
                 if let Some(pct) = &size_pct {
-                    cmd_line.push_str(&format!(" -p {}", pct));
+                    cmd_line.push_str(&format!(" -p {}", pct.trim_end_matches('%')));
                 }
                 if !cmd_arg.is_empty() {
                     cmd_line.push_str(&format!(" \"{}\"", cmd_arg.replace("\"", "\\\"")));
@@ -1859,6 +1859,19 @@ fn run_main() -> io::Result<()> {
             "choose-buffer" | "chooseb" => {
                 let resp = send_control_with_response("choose-buffer\n".to_string())?;
                 print!("{}", resp);
+                return Ok(());
+            }
+            // choose-tree / choose-window / choose-session - interactive tree chooser
+            "choose-tree" => {
+                send_control("choose-tree\n".to_string())?;
+                return Ok(());
+            }
+            "choose-window" | "choosew" => {
+                send_control("choose-window\n".to_string())?;
+                return Ok(());
+            }
+            "choose-session" | "chooses" => {
+                send_control("choose-session\n".to_string())?;
                 return Ok(());
             }
             // set-environment / setenv - Set environment variable

@@ -584,6 +584,12 @@ pub fn parse_option_value(app: &mut AppState, rest: &str, _is_global: bool) {
         "env-shim" => {
             app.env_shim = matches!(value, "on" | "true" | "1");
         }
+        "claude-code-fix-tty" => {
+            app.claude_code_fix_tty = matches!(value, "on" | "true" | "1");
+        }
+        "claude-code-force-interactive" => {
+            app.claude_code_force_interactive = matches!(value, "on" | "true" | "1");
+        }
         "command-alias" => {
             if let Some(pos) = value.find('=') {
                 let alias = value[..pos].trim().to_string();

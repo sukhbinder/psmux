@@ -419,9 +419,27 @@ pub struct AppState {
     /// so that `env VAR=val command` syntax works (required by Claude Code, etc.).
     /// Default: on
     pub env_shim: bool,
+    /// claude-code-fix-tty: inject a Node.js preload script via NODE_OPTIONS
+    /// that patches process.stdout.isTTY = true inside ConPTY panes.  Works around
+    /// Claude Code's isTTY gate that forces in-process agent mode on Windows
+    /// (claude-code#26244).  Once Claude Code fixes the bug upstream, users can
+    /// disable this with: set -g claude-code-fix-tty off
+    /// Default: on
+    pub claude_code_fix_tty: bool,
+    /// claude-code-force-interactive: set CLAUDE_CODE_FORCE_INTERACTIVE=1 in
+    /// pane environments so Claude Code treats the session as interactive even
+    /// when its own heuristics disagree.  This prevents the non-interactive
+    /// fast-path that bypasses teammateMode entirely.
+    /// Once Claude Code fixes the bug upstream, disable with:
+    ///   set -g claude-code-force-interactive off
+    /// Default: on
+    pub claude_code_force_interactive: bool,
     /// Last mouse hover position (col, row) for same-coordinate deduplication.
     /// Windows Terminal suppresses consecutive MOUSE_MOVED at the same position.
     pub last_hover_pos: Option<(u16, u16)>,
+    /// Transient status-bar message from display-message (without -p).
+    /// Tuple of (message_text, timestamp_when_set).
+    pub status_message: Option<(String, std::time::Instant)>,
     /// Pre-spawned warm pane: shell already loaded, ready for instant new-window.
     pub warm_pane: Option<WarmPane>,
 }
@@ -548,7 +566,10 @@ impl AppState {
             set_clipboard: "on".to_string(),
             clipboard_osc52: None,
             env_shim: true,
+            claude_code_fix_tty: true,
+            claude_code_force_interactive: true,
             last_hover_pos: None,
+            status_message: None,
             warm_pane: None,
         }
     }
@@ -682,7 +703,7 @@ pub enum CtrlReq {
     ShowBuffer(mpsc::Sender<String>),
     ShowBufferAt(mpsc::Sender<String>, usize),
     DeleteBuffer,
-    DisplayMessage(mpsc::Sender<String>, String),
+    DisplayMessage(mpsc::Sender<String>, String, bool),  // resp, format, show_on_status_bar
     LastWindow,
     LastPane,
     RotateWindow(bool),

@@ -347,7 +347,15 @@ For more information: https://github.com/marlocarlo/psmux
 
 pub fn print_version() {
     let prog = get_program_name();
-    println!("{} {}", prog, VERSION);
+    // When invoked as "tmux", output tmux-compatible format (e.g. "tmux 3.1")
+    // so tools like Claude Code that parse `tmux -V` accept the version.
+    if prog == "tmux" {
+        // Strip any patch version to match tmux convention: "tmux 3.1"
+        let short = VERSION.rsplitn(2, '.').last().unwrap_or(VERSION);
+        println!("tmux {}", short);
+    } else {
+        println!("{} {}", prog, VERSION);
+    }
 }
 
 pub fn print_commands() {

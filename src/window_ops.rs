@@ -947,7 +947,7 @@ pub fn respawn_active_pane(app: &mut AppState, pty_system_ref: Option<&dyn porta
     } else {
         detect_shell()
     };
-    set_tmux_env(&mut shell_cmd, pane_id, app.control_port, app.socket_name.as_deref());
+    set_tmux_env(&mut shell_cmd, pane_id, app.control_port, app.socket_name.as_deref(), &app.session_name, app.claude_code_fix_tty, app.claude_code_force_interactive);
     crate::pane::apply_user_environment(&mut shell_cmd, &app.environment);
     let child = pair.slave.spawn_command(shell_cmd).map_err(|e| io::Error::new(io::ErrorKind::Other, format!("spawn shell error: {e}")))?;
     // Close the slave handle immediately – required for ConPTY.

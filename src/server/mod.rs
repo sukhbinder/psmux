@@ -18,7 +18,7 @@ use crate::platform::install_console_ctrl_handler;
 use crate::pane::{create_window, create_window_raw, split_active_with_command, kill_active_pane, spawn_warm_pane};
 use crate::tree::{self, active_pane, active_pane_mut, resize_all_panes, kill_all_children,
     find_window_index_by_id, focus_pane_by_id, focus_pane_by_index, get_active_pane_id,
-    path_exists};
+    get_split_mut, path_exists};
 
 use helpers::{collect_pane_paths_server, serialize_bindings_json, json_escape_string,
     list_windows_json_with_tabs, combined_data_version, TMUX_COMMANDS};
@@ -487,8 +487,13 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     }
                     if let Some(wp) = stashed_warm { app.warm_pane = Some(wp); }
                     // Apply size if specified (as percentage)
-                    if let Some(_pct) = size_pct {
-                        // Size will be applied by resize_all_panes using the layout ratios
+                    if let Some(pct) = size_pct {
+                        let pct = pct.clamp(1, 99);
+                        let win = &mut app.windows[app.active_idx];
+                        if let Some(Node::Split { sizes, .. }) = get_split_mut(&mut win.root, &prev_path) {
+                            sizes[0] = 100 - pct;
+                            sizes[1] = pct;
+                        }
                     }
                     if detached {
                         // Revert focus to the previously active pane.
@@ -517,7 +522,14 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         eprintln!("psmux: split-window error: {e}");
                     }
                     if let Some(wp) = stashed_warm { app.warm_pane = Some(wp); }
-                    if let Some(_pct) = size_pct { }
+                    if let Some(pct) = size_pct {
+                        let pct = pct.clamp(1, 99);
+                        let win = &mut app.windows[app.active_idx];
+                        if let Some(Node::Split { sizes, .. }) = get_split_mut(&mut win.root, &prev_path) {
+                            sizes[0] = 100 - pct;
+                            sizes[1] = pct;
+                        }
+                    }
                     // Use full format engine for -P output (tmux compatible)
                     let fmt = format_str.as_deref().unwrap_or("#{session_name}:#{window_index}.#{pane_index}");
                     let pane_info = crate::format::expand_format_for_window(fmt, &app, app.active_idx);
@@ -1507,8 +1519,12 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 CtrlReq::DeleteBuffer => {
                     if !app.paste_buffers.is_empty() { app.paste_buffers.remove(0); }
                 }
-                CtrlReq::DisplayMessage(resp, fmt) => {
+                CtrlReq::DisplayMessage(resp, fmt, show_on_status) => {
                     let result = expand_format(&fmt, &app);
+                    if show_on_status {
+                        app.status_message = Some((result.clone(), std::time::Instant::now()));
+                        state_dirty = true;
+                    }
                     let _ = resp.send(result);
                 }
                 CtrlReq::LastWindow => {

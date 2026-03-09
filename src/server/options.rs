@@ -92,6 +92,8 @@ pub(crate) fn get_option_value(app: &AppState, name: &str) -> String {
                 .collect::<Vec<_>>()
                 .join(",")
         }
+        "claude-code-fix-tty" => if app.claude_code_fix_tty { "on".into() } else { "off".into() },
+        "claude-code-force-interactive" => if app.claude_code_force_interactive { "on".into() } else { "off".into() },
         _ => {
             // Support @user-options and other env-stored options (e.g. default-terminal)
             app.environment.get(name).cloned().unwrap_or_default()
@@ -299,6 +301,12 @@ pub(crate) fn apply_set_option(app: &mut AppState, option: &str, value: &str, qu
                 let expansion = value[pos+1..].trim().to_string();
                 app.command_aliases.insert(alias, expansion);
             }
+        }
+        "claude-code-fix-tty" => {
+            app.claude_code_fix_tty = matches!(value, "on" | "true" | "1");
+        }
+        "claude-code-force-interactive" => {
+            app.claude_code_force_interactive = matches!(value, "on" | "true" | "1");
         }
         _ => {
             // Handle status-format[N] patterns

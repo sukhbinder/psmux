@@ -660,6 +660,18 @@ pub fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<
             f.render_widget(Clear, status_chunk);
             f.render_widget(status_bar, status_chunk);
 
+            // Display-message override: show transient message on status bar
+            if let Some((ref msg, since)) = app.status_message {
+                if since.elapsed().as_millis() < app.display_time_ms as u128 {
+                    let msg_style = parse_tmux_style(&app.message_style);
+                    let para = Paragraph::new(msg.as_str()).style(msg_style);
+                    f.render_widget(Clear, status_chunk);
+                    f.render_widget(para, status_chunk);
+                } else {
+                    app.status_message = None;
+                }
+            }
+
             // Command prompt — render at bottom (tmux style), not centered popup
             if let Mode::CommandPrompt { input, cursor } = &app.mode {
                 let msg_style = parse_tmux_style(&app.message_command_style);

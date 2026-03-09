@@ -269,7 +269,7 @@ match cmd {
         let print_info = args.iter().any(|a| *a == "-P");
         let format_str: Option<String> = args.windows(2).find(|w| w[0] == "-F").map(|w| w[1].trim_matches('"').to_string());
         let start_dir: Option<String> = args.windows(2).find(|w| w[0] == "-c").map(|w| w[1].trim_matches('"').to_string());
-        let size_pct: Option<u16> = args.windows(2).find(|w| w[0] == "-p").and_then(|w| w[1].parse().ok())
+        let size_pct: Option<u16> = args.windows(2).find(|w| w[0] == "-p").and_then(|w| w[1].trim_matches('%').parse().ok())
             .or_else(|| args.windows(2).find(|w| w[0] == "-l").and_then(|w| {
                 let s = w[1].trim_matches('%');
                 s.parse().ok()
@@ -681,11 +681,14 @@ match cmd {
 
         let fmt = parts.join(" ");
         let (rtx, rrx) = mpsc::channel::<String>();
-        let _ = tx.send(CtrlReq::DisplayMessage(rtx, fmt));
-        if print_stdout {
-            if let Ok(text) = rrx.recv() { let _ = writeln!(write_stream, "{}", text); let _ = write_stream.flush(); }
-            if !persistent { break; }
+        let _ = tx.send(CtrlReq::DisplayMessage(rtx, fmt, !print_stdout));
+        if let Ok(text) = rrx.recv() {
+            if print_stdout {
+                let _ = writeln!(write_stream, "{}", text);
+                let _ = write_stream.flush();
+            }
         }
+        if !persistent { break; }
     }
     "last-window" | "last" => { let _ = tx.send(CtrlReq::LastWindow); }
     "last-pane" | "lastp" => { let _ = tx.send(CtrlReq::LastPane); }
@@ -1128,7 +1131,7 @@ match cmd {
         let fmt = args.windows(2).find(|w| w[0] == "-F").map(|w| w[1].to_string());
         if let Some(fmt_str) = fmt {
             let (rtx, rrx) = mpsc::channel::<String>();
-            let _ = tx.send(CtrlReq::DisplayMessage(rtx, fmt_str));
+            let _ = tx.send(CtrlReq::DisplayMessage(rtx, fmt_str, false));
             if let Ok(text) = rrx.recv() { let _ = write!(write_stream, "{}\n", text); let _ = write_stream.flush(); }
         } else {
             let (rtx, rrx) = mpsc::channel::<String>();

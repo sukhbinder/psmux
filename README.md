@@ -19,13 +19,17 @@
 <p align="center">
   <a href="#installation">Install</a> ·
   <a href="#usage">Usage</a> ·
-  <a href="#performance">Performance</a> ·
-  <a href="#tmux-compatibility">Compatibility</a> ·
+  <a href="docs/claude-code.md">Claude Code</a> ·
   <a href="docs/features.md">Features</a> ·
+  <a href="docs/compatibility.md">Compatibility</a> ·
+  <a href="docs/performance.md">Performance</a> ·
+  <a href="docs/plugins.md">Plugins</a> ·
   <a href="docs/keybindings.md">Keys</a> ·
   <a href="docs/scripting.md">Scripting</a> ·
   <a href="docs/configuration.md">Config</a> ·
-  <a href="docs/faq.md">FAQ</a>
+  <a href="docs/mouse-ssh.md">Mouse/SSH</a> ·
+  <a href="docs/faq.md">FAQ</a> ·
+  <a href="#related-projects">Related Projects</a>
 </p>
 
 ---
@@ -113,183 +117,90 @@ See [docker/README.md](docker/README.md) for full details.
 
 ## Why psmux?
 
-If you've used tmux on Linux/macOS and wished you had something like it on Windows, **this is it**.
-
-| | psmux | Windows Terminal tabs | WSL + tmux |
-|---|:---:|:---:|:---:|
-| Session persist (detach/reattach) | ✅ | ❌ | ⚠️ WSL only |
-| Synchronized panes | ✅ | ❌ | ✅ |
-| tmux keybindings | ✅ | ❌ | ✅ |
-| Reads `.tmux.conf` | ✅ | ❌ | ✅ |
-| tmux theme support | ✅ | ❌ | ✅ |
-| Native Windows shells | ✅ | ✅ | ❌ |
-| Full mouse support | ✅ | ✅ | ⚠️ Partial |
-| Zero dependencies | ✅ | ✅ | ❌ (needs WSL) |
-| Scriptable (76 commands) | ✅ | ❌ | ✅ |
-
-Split panes, multiple windows, session persistence, 76 commands, full mouse, tmux themes, 126+ format variables, 53 vim copy-mode keys. Full details: **[docs/features.md](docs/features.md)**
-
-## Performance
-
-psmux is built for speed. The Rust release binary is compiled with **opt-level 3**, **full LTO**, and **single codegen unit**. Every cycle counts.
-
-| Metric | psmux | Notes |
-|--------|-------|-------|
-| **Session creation** | **< 100ms** | Time for `new-session -d` to return |
-| **New window** | **< 80ms** | Overhead on top of shell startup |
-| **New pane (split)** | **< 80ms** | Same as window, cached shell resolution |
-| **Startup to prompt** | **~shell launch time** | psmux adds near-zero overhead; bottleneck is your shell |
-| **15+ windows** | ✅ Stable | Stress-tested with 15+ rapid windows, 18+ panes, 5 concurrent sessions |
-| **Rapid fire creates** | ✅ No hangs | Burst-create windows/panes without delays or orphaned processes |
-
-### How it's fast
-
-- **Lazy pane resize** : only the active window's panes are resized. Background windows resize on-demand when switched to, avoiding O(n) ConPTY syscalls
-- **Cached shell resolution** : `which` PATH lookups are cached with `OnceLock`, not repeated per spawn
-- **10ms polling** : client-server discovery uses tight 10ms polling for sub-100ms session attach
-- **Early port-file write** : server writes its discovery file *before* spawning the first shell, so the client connects instantly
-- **8KB reader buffers** : small buffer size minimizes mutex contention across pane reader threads
-
-> **Note:** The primary startup bottleneck is your shell (PowerShell 7 takes ~400-1000ms to display a prompt). psmux itself adds < 100ms of overhead. For faster shells like `cmd.exe` or `nushell`, total startup is near-instant.
-
-## tmux Compatibility
-
-psmux is the most tmux-compatible terminal multiplexer on Windows:
-
-| Feature | Support |
-|---------|---------|
-| Commands | **76** tmux commands implemented |
-| Format variables | **126+** variables with full modifier support |
-| Config file | Reads `~/.tmux.conf` directly |
-| Key bindings | `bind-key`/`unbind-key` with key tables |
-| Hooks | 15+ event hooks (`after-new-window`, etc.) |
-| Status bar | Full format engine with conditionals and loops |
-| Themes | 14 style options, 24-bit color, text attributes |
-| Layouts | 5 layouts (even-h, even-v, main-h, main-v, tiled) |
-| Copy mode | 53 vim keybindings, search, registers |
-| Targets | `session:window.pane`, `%id`, `@id` syntax |
-| `if-shell` / `run-shell` | ✅ Conditional config logic |
-| Paste buffers | ✅ Full buffer management |
-
-**Your existing `.tmux.conf` works.** psmux reads it automatically. Just install and go.
-
-## Plugins & Themes
-
-psmux has a full plugin ecosystem — ports of the most popular tmux plugins, reimplemented in PowerShell for Windows. Themes, key bindings, session management, clipboard integration, and more.
-
-**Browse available plugins and themes:** [**psmux-plugins**](https://github.com/marlocarlo/psmux-plugins)
-
-**Install & manage plugins with a TUI:** [**Tmux Plugin Panel (tppanel)**](https://github.com/marlocarlo/tppanel) — a terminal UI for browsing, installing, updating, and removing plugins and themes.
-
-| Plugin | Description |
-|--------|-------------|
-| [psmux-sensible](https://github.com/marlocarlo/psmux-plugins/tree/main/psmux-sensible) | Sensible defaults for psmux |
-| [psmux-yank](https://github.com/marlocarlo/psmux-plugins/tree/main/psmux-yank) | Windows clipboard integration |
-| [psmux-resurrect](https://github.com/marlocarlo/psmux-plugins/tree/main/psmux-resurrect) | Save/restore sessions |
-| [psmux-pain-control](https://github.com/marlocarlo/psmux-plugins/tree/main/psmux-pain-control) | Better pane navigation |
-| [psmux-prefix-highlight](https://github.com/marlocarlo/psmux-plugins/tree/main/psmux-prefix-highlight) | Prefix key indicator |
-| [ppm](https://github.com/marlocarlo/psmux-plugins/tree/main/ppm) | Plugin manager (like tpm) |
-
-**Themes:** Catppuccin · Dracula · Nord · Tokyo Night · Gruvbox
-
-Quick start:
-```powershell
-# Install the plugin manager
-git clone https://github.com/marlocarlo/psmux-plugins.git "$env:TEMP\psmux-plugins" ; Copy-Item "$env:TEMP\psmux-plugins\ppm" "$env:USERPROFILE\.psmux\plugins\ppm" -Recurse ; Remove-Item "$env:TEMP\psmux-plugins" -Recurse -Force
-```
-Then add to your `~/.psmux.conf`:
-```
-set -g @plugin 'psmux-plugins/ppm'
-set -g @plugin 'psmux-plugins/psmux-sensible'
-run '~/.psmux/plugins/ppm/ppm.ps1'
-```
-Press `Prefix + I` inside psmux to install the declared plugins.
+If you've used tmux on Linux/macOS and wished you had something like it on Windows, **this is it**. Split panes, multiple windows, session persistence, full mouse support, tmux themes, 76 commands, 126+ format variables, 53 vim copy-mode keys. Your existing `.tmux.conf` works. Full details: **[docs/features.md](docs/features.md)** · **[docs/compatibility.md](docs/compatibility.md)**
 
 ## Usage
 
-Use `psmux`, `pmux`, or `tmux`, they're identical:
+Use `psmux`, `pmux`, or `tmux` — they're identical:
 
 ```powershell
-# Start a new session
-psmux
-pmux
-tmux
-
-# Start a named session
-psmux new-session -s work
-tmux new-session -s work
-
-# List sessions
-psmux ls
-tmux ls
-
-# Attach to a session
-psmux attach -t work
-tmux attach -t work
-
-# Show help
-psmux --help
-tmux --help
+psmux                        # Start a new session
+psmux new-session -s work    # Named session
+psmux ls                     # List sessions
+psmux attach -t work         # Attach to a session
+psmux --help                 # Show help
 ```
 
-## Mouse Over SSH
+## Claude Code Agent Teams
 
-psmux has **first-class mouse support over SSH** when the server runs **Windows 11 build 22523+ (22H2+)**. Click panes, drag-resize borders, scroll, click tabs — everything works, from any SSH client on any OS.
+psmux has first-class support for Claude Code agent teams. When Claude Code runs inside a psmux session, teammate agents automatically spawn in separate tmux panes instead of running in-process.
 
-### Compatibility
+```powershell
+psmux new-session -s work    # Start a psmux session
+claude                       # Run Claude Code — agent teams just work
+```
 
-| Client → Server | Keyboard | Mouse | Notes |
-|---|:---:|:---:|---|
-| Linux → Windows 11 (22523+) | ✅ | ✅ | Full support |
-| macOS → Windows 11 (22523+) | ✅ | ✅ | Full support |
-| Windows 10 → Windows 11 (22523+) | ✅ | ✅ | Full support |
-| Windows 11 → Windows 11 (22523+) | ✅ | ✅ | Full support |
-| WSL → Windows 11 (22523+) | ✅ | ✅ | Full support |
-| Any OS → Windows 10 | ✅ | ❌ | ConPTY limitation (see below) |
-| Any OS → Windows 11 (pre-22523) | ✅ | ❌ | ConPTY limitation (see below) |
+No extra configuration needed. Full guide: **[docs/claude-code.md](docs/claude-code.md)**
 
-### Local use (no SSH)
+## Documentation
 
-| Platform | Keyboard | Mouse |
-|---|:---:|:---:|
-| Windows 11 (local) | ✅ | ✅ |
-| Windows 10 (local) | ✅ | ✅ |
+| Topic | Description |
+|-------|-------------|
+| **[Features](docs/features.md)** | Full feature list — mouse, copy mode, layouts, format engine |
+| **[Compatibility](docs/compatibility.md)** | tmux command/config compatibility matrix |
+| **[Performance](docs/performance.md)** | Benchmarks and optimization details |
+| **[Key Bindings](docs/keybindings.md)** | Default keys and customization |
+| **[Scripting](docs/scripting.md)** | 76 commands, hooks, targets, pipe-pane |
+| **[Configuration](docs/configuration.md)** | Config files, options, environment variables |
+| **[Plugins & Themes](docs/plugins.md)** | Plugin ecosystem — Catppuccin, Dracula, Nord, and more |
+| **[Mouse Over SSH](docs/mouse-ssh.md)** | SSH mouse support and Windows version requirements |
+| **[Claude Code](docs/claude-code.md)** | Agent teams integration guide |
+| **[FAQ](docs/faq.md)** | Common questions and answers |
 
-Mouse works perfectly when running psmux locally on both Windows 10 and 11.
+## Related Projects
 
-### Why no mouse over SSH on Windows 10?
-
-Windows 10's ConPTY consumes mouse-enable escape sequences internally and does not forward them to sshd. The SSH client never receives the signal to start sending mouse data. This is a Windows 10 ConPTY limitation that was fixed in Windows 11 (build 22523+). Keyboard input works fully on both versions — only mouse over SSH is affected.
-
-> **Recommendation:** Use Windows 11 build 22523+ (22H2 or later) as your psmux server for full SSH mouse support.
-
-## Key Bindings
-
-Default prefix: `Ctrl+b` (same as tmux). Full reference: **[docs/keybindings.md](docs/keybindings.md)**
-
-| Key | Action |
-|-----|--------|
-| `Prefix + c` | Create new window |
-| `Prefix + %` / `"` | Split pane horizontally / vertically |
-| `Prefix + Arrow` | Navigate between panes |
-| `Prefix + d` | Detach from session |
-| `Prefix + z` | Toggle pane zoom |
-| `Prefix + [` | Enter copy/scroll mode (53 vim keybindings) |
-| `Ctrl+q` | Quit |
-
-## Scripting & Automation
-
-76 tmux-compatible commands, hooks, targets, `capture-pane`, `pipe-pane`. Full reference: **[docs/scripting.md](docs/scripting.md)**
-
-## Configuration
-
-Reads `~/.psmux.conf`, `~/.tmux.conf`, or `~/.config/psmux/psmux.conf`. Fully tmux-compatible syntax — your existing config works. Full reference: **[docs/configuration.md](docs/configuration.md)**
+<table>
+  <tr>
+    <td align="center" width="50%">
+      <a href="https://github.com/marlocarlo/pstop">
+        <img src="https://raw.githubusercontent.com/marlocarlo/pstop/master/pstop-demo.gif" width="400" alt="pstop demo" /><br/>
+        <b>pstop</b>
+      </a><br/>
+      <sub>htop for Windows — real-time system monitor with per-core CPU bars, tree view, 7 color schemes</sub><br/>
+      <code>cargo install pstop</code>
+    </td>
+    <td align="center" width="50%">
+      <a href="https://github.com/marlocarlo/psnet">
+        <img src="https://raw.githubusercontent.com/marlocarlo/psnet/master/image.png" width="400" alt="psnet screenshot" /><br/>
+        <b>psnet</b>
+      </a><br/>
+      <sub>Real-time TUI network monitor — live speed graphs, connections, traffic log, packet sniffer</sub><br/>
+      <code>cargo install psnet</code>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" width="50%">
+      <a href="https://github.com/marlocarlo/Tmux-Plugin-Panel">
+        <img src="https://raw.githubusercontent.com/marlocarlo/Tmux-Plugin-Panel/master/screenshot.png" width="400" alt="Tmux Plugin Panel screenshot" /><br/>
+        <b>Tmux Plugin Panel</b>
+      </a><br/>
+      <sub>TUI plugin & theme manager for tmux and psmux — browse, install, update from your terminal</sub><br/>
+      <code>cargo install tmuxpanel</code>
+    </td>
+    <td align="center" width="50%">
+      <a href="https://github.com/marlocarlo/omp-manager">
+        <img src="https://raw.githubusercontent.com/marlocarlo/omp-manager/master/screenshot.png" width="400" alt="OMP Manager screenshot" /><br/>
+        <b>OMP Manager</b>
+      </a><br/>
+      <sub>Oh My Posh setup wizard — browse 100+ themes, install fonts, configure shells automatically</sub><br/>
+      <code>cargo install omp-manager</code>
+    </td>
+  </tr>
+</table>
 
 ## License
 
 MIT
-
----
 
 ## Contributing
 
@@ -297,7 +208,9 @@ Contributions welcome — bug reports, PRs, docs, and test scripts via [GitHub I
 
 If psmux helps your Windows workflow, consider giving it a ⭐ on GitHub!
 
-**[docs/faq.md](docs/faq.md)** · **[docs/features.md](docs/features.md)** · **[docs/keybindings.md](docs/keybindings.md)** · **[docs/scripting.md](docs/scripting.md)** · **[docs/configuration.md](docs/configuration.md)**
+## Star History
+
+[![Star History Chart](https://api.star-history.com/image?repos=marlocarlo/psmux&type=date&legend=top-left)](https://www.star-history.com/?repos=marlocarlo%2Fpsmux&type=date&legend=top-left)
 
 ---
 

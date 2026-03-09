@@ -117,7 +117,7 @@ pub fn create_window(pty_system: &dyn portable_pty::PtySystem, app: &mut AppStat
     } else {
         build_command(None, app.env_shim)
     };
-    set_tmux_env(&mut shell_cmd, app.next_pane_id, app.control_port, app.socket_name.as_deref());
+    set_tmux_env(&mut shell_cmd, app.next_pane_id, app.control_port, app.socket_name.as_deref(), &app.session_name, app.claude_code_fix_tty, app.claude_code_force_interactive);
     apply_user_environment(&mut shell_cmd, &app.environment);
     let child = pair
         .slave
@@ -177,7 +177,7 @@ pub fn spawn_warm_pane(pty_system: &dyn portable_pty::PtySystem, app: &mut AppSt
     };
     let pane_id = app.next_pane_id;
     app.next_pane_id += 1;
-    set_tmux_env(&mut shell_cmd, pane_id, app.control_port, app.socket_name.as_deref());
+    set_tmux_env(&mut shell_cmd, pane_id, app.control_port, app.socket_name.as_deref(), &app.session_name, app.claude_code_fix_tty, app.claude_code_force_interactive);
     apply_user_environment(&mut shell_cmd, &app.environment);
     let child = pair.slave
         .spawn_command(shell_cmd)
@@ -216,7 +216,7 @@ pub fn create_window_raw(pty_system: &dyn portable_pty::PtySystem, app: &mut App
         .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("openpty error: {e}")))?;
 
     let mut shell_cmd = build_raw_command(raw_args);
-    set_tmux_env(&mut shell_cmd, app.next_pane_id, app.control_port, app.socket_name.as_deref());
+    set_tmux_env(&mut shell_cmd, app.next_pane_id, app.control_port, app.socket_name.as_deref(), &app.session_name, app.claude_code_fix_tty, app.claude_code_force_interactive);
     apply_user_environment(&mut shell_cmd, &app.environment);
     let child = pair
         .slave
@@ -358,7 +358,7 @@ pub fn split_active_with_command(app: &mut AppState, kind: LayoutKind, command: 
     } else {
         build_command(None, app.env_shim)
     };
-    set_tmux_env(&mut shell_cmd, app.next_pane_id, app.control_port, app.socket_name.as_deref());
+    set_tmux_env(&mut shell_cmd, app.next_pane_id, app.control_port, app.socket_name.as_deref(), &app.session_name, app.claude_code_fix_tty, app.claude_code_force_interactive);
     apply_user_environment(&mut shell_cmd, &app.environment);
     let child = pair.slave.spawn_command(shell_cmd).map_err(|e| io::Error::new(io::ErrorKind::Other, format!("spawn shell error: {e}")))?;
     // Close the slave handle immediately – see create_window() comment.
@@ -409,11 +409,12 @@ pub fn detect_shell() -> CommandBuilder {
     build_command(None, false)
 }
 
-/// Set TMUX and TMUX_PANE environment variables on a CommandBuilder.
+/// Set TMUX, TMUX_PANE, and PSMUX_SESSION environment variables on a CommandBuilder.
 /// TMUX format: /tmp/psmux-{server_pid}/{socket_name},{port},0
 /// TMUX_PANE format: %{pane_id}
+/// PSMUX_SESSION: actual session name (for Claude Code / tool detection)
 /// The socket_name component encodes the -L namespace for child process resolution.
-pub fn set_tmux_env(builder: &mut CommandBuilder, pane_id: usize, control_port: Option<u16>, socket_name: Option<&str>) {
+pub fn set_tmux_env(builder: &mut CommandBuilder, pane_id: usize, control_port: Option<u16>, socket_name: Option<&str>, session_name: &str, fix_tty: bool, _force_interactive: bool) {
     let server_pid = std::process::id();
     let port = control_port.unwrap_or(0);
     let sn = socket_name.unwrap_or("default");
@@ -421,6 +422,32 @@ pub fn set_tmux_env(builder: &mut CommandBuilder, pane_id: usize, control_port: 
     // We encode the socket name in the path component for -L namespace resolution
     builder.env("TMUX", format!("/tmp/psmux-{}/{},{},0", server_pid, sn, port));
     builder.env("TMUX_PANE", format!("%{}", pane_id));
+    // Override the placeholder "1" from build_command/build_default_shell with the
+    // real session name.  Tools like Claude Code can use PSMUX_SESSION for explicit
+    // psmux detection (e.g. `if (process.env.PSMUX_SESSION) return 'psmux'`).
+    builder.env("PSMUX_SESSION", session_name);
+    // Prevent MSYS2/Git-Bash from path-mangling the TMUX value (which starts
+    // with /tmp/ and would be rewritten to a Windows path otherwise).
+    builder.env("MSYS2_ENV_CONV_EXCL", "TMUX");
+    // Enable Claude Code agent teams feature.  The standalone binary gates
+    // the entire teammate tool-set (spawnTeam, spawnTeammate, …) behind
+    //   T8(): LA(process.env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS) || --agent-teams
+    // Without this env var the team tools are never registered and Claude
+    // always falls back to the in-process "Agent" tool.
+    builder.env("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS", "1");
+
+    // ── Claude Code workarounds (removable once upstream fixes land) ──
+    //
+    // claude-code-fix-tty (set -g claude-code-fix-tty on/off):
+    //   Claude Code v2.1.71 standalone binary ignores `teammateMode` from
+    //   settings.json (config schema strips the field).  The `--teammate-mode
+    //   tmux` CLI flag DOES work.  We set PSMUX_CLAUDE_TEAMMATE_MODE=tmux so
+    //   the PowerShell env-shim `claude` wrapper function injects the flag
+    //   automatically.  Disable with: set -g claude-code-fix-tty off
+    if fix_tty {
+        builder.env("PSMUX_CLAUDE_TEAMMATE_MODE", "tmux");
+    }
+
 }
 
 /// Apply user-defined environment variables (from set-environment -g) to a CommandBuilder.
@@ -486,7 +513,18 @@ const ENV_SHIM_PS: &str = concat!(
     "else{& $cmd @rest} ",
     "} elseif($v.Count -gt 0){ ",
     "foreach($e in $v.GetEnumerator()){[Environment]::SetEnvironmentVariable($e.Key,$e.Value,'Process')} ",
-    "} else { Get-ChildItem Env:|ForEach-Object{$_.Name+'='+$_.Value} } } }",
+    "} else { Get-ChildItem Env:|ForEach-Object{$_.Name+'='+$_.Value} } } }; ",
+    // Claude Code teammate-mode wrapper (claude-code#26244):
+    // The standalone (Bun SFE) binary ignores `teammateMode` from settings.json
+    // but honours the `--teammate-mode tmux` CLI flag.  The agent teams tool-set
+    // is separately gated by CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS env var (set
+    // above in set_tmux_env).  This wrapper auto-injects --teammate-mode when
+    // PSMUX_CLAUDE_TEAMMATE_MODE is set (via `set -g claude-code-fix-tty on`).
+    // Disable with: set -g claude-code-fix-tty off
+    "if($env:PSMUX_CLAUDE_TEAMMATE_MODE){ ",
+    "function Global:claude { ",
+    "if($args -contains '--teammate-mode'){ & claude.exe @args } ",
+    "else{ & claude.exe --teammate-mode $env:PSMUX_CLAUDE_TEAMMATE_MODE @args } } }",
 );
 
 pub fn build_command(command: Option<&str>, env_shim: bool) -> CommandBuilder {
