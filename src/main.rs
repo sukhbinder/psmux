@@ -414,7 +414,7 @@ fn run_main() -> io::Result<()> {
                 // Prevent nesting — block new-session inside an existing psmux session
                 if env::var("PSMUX_ALLOW_NESTING").ok().as_deref() != Some("1") {
                     if env::var("PSMUX_ACTIVE").ok().as_deref() == Some("1")
-                        || env::var("PSMUX_SESSION").ok().as_deref() == Some("1")
+                        || env::var("PSMUX_SESSION").ok().filter(|v| !v.is_empty()).is_some()
                     {
                         eprintln!("psmux: sessions should be nested with care, unset PSMUX_SESSION to force");
                         return Ok(());
@@ -2308,7 +2308,7 @@ fn run_main() -> io::Result<()> {
     // Override with PSMUX_ALLOW_NESTING=1 if nesting is intentional.
     if env::var("PSMUX_ALLOW_NESTING").ok().as_deref() != Some("1") {
         if env::var("PSMUX_ACTIVE").ok().as_deref() == Some("1")
-            || env::var("PSMUX_SESSION").ok().as_deref() == Some("1")
+            || env::var("PSMUX_SESSION").ok().filter(|v| !v.is_empty()).is_some()
         {
             eprintln!("psmux: sessions should be nested with care, unset PSMUX_SESSION to force");
             return Ok(());
@@ -2370,6 +2370,7 @@ fn run_main() -> io::Result<()> {
 
     // Terminal cleanup — always runs, even on error, to prevent leaked
     // SGR attributes (invisible text), stuck raw mode, or stale cursor style.
+    crate::platform::caret::destroy();
     let _ = disable_raw_mode();
     let out = terminal.backend_mut();
     // Reset all SGR attributes (fg/bg color, bold, hidden, etc.) BEFORE

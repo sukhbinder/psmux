@@ -358,6 +358,12 @@ pub fn render_node(
 
 /// Compute the rectangle of the active pane by following the active_path through the tree.
 fn compute_active_rect(node: &Node, active_path: &[usize], area: Rect) -> Option<Rect> {
+    compute_active_rect_pub(node, active_path, area)
+}
+
+/// Public version of `compute_active_rect` for use outside the rendering module
+/// (e.g. accessibility caret updates).
+pub fn compute_active_rect_pub(node: &Node, active_path: &[usize], area: Rect) -> Option<Rect> {
     match node {
         Node::Leaf(_) => Some(area),
         Node::Split { kind, sizes, children } => {

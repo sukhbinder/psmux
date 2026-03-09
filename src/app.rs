@@ -955,6 +955,28 @@ pub fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<
             }
         }
 
+        // Update Win32 system caret for accessibility / speech-to-text tools.
+        // Compute the active pane's screen-global cursor position and mirror
+        // it onto the console caret so tools like Wispr Flow can detect the
+        // text insertion point.
+        {
+            let win = &app.windows[app.active_idx];
+            if let Some(pane) = crate::tree::active_pane(&win.root, &win.active_path) {
+                if let Ok(parser) = pane.term.lock() {
+                    if !parser.screen().hide_cursor() {
+                        let (cr, cc) = parser.screen().cursor_position();
+                        if let Some(inner) = crate::rendering::compute_active_rect_pub(
+                            &win.root, &win.active_path, app.last_window_area,
+                        ) {
+                            let cx = inner.x + cc.min(inner.width.saturating_sub(1));
+                            let cy = inner.y + cr.min(inner.height.saturating_sub(1));
+                            crate::platform::caret::update(cx, cy);
+                        }
+                    }
+                }
+            }
+        }
+
         if let Mode::PaneChooser { opened_at } = &app.mode {
             if opened_at.elapsed() > Duration::from_millis(app.display_panes_time_ms) { app.mode = Mode::Passthrough; }
         }

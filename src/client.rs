@@ -2693,6 +2693,15 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                 let _ = out.write_all(buf.as_bytes());
                 let _ = out.flush();
             }
+
+            // Update Win32 system caret for accessibility / speech-to-text
+            // tools (e.g. Wispr Flow).  Skip for SSH sessions — no local
+            // console window.
+            if !is_ssh_mode {
+                if let Some((cx, cy)) = cursor_visible {
+                    crate::platform::caret::update(cx, cy);
+                }
+            }
         }
 
         let _render_us = _t_parse.elapsed().as_micros().saturating_sub(_parse_us as u128);

@@ -1719,3 +1719,114 @@ pub fn create_writer() -> PsmuxWriter {
     #[cfg(not(windows))]
     { std::io::stdout() }
 }
+
+// ---------------------------------------------------------------------------
+// Win32 System Caret — Accessibility / Speech-to-Text support
+// ---------------------------------------------------------------------------
+// Speech-to-text tools like Wispr Flow use GetGUIThreadInfo() to locate the
+// system caret.  When psmux enters raw mode + alternate screen, the default
+// console caret is hidden and accessibility tools lose track of the text
+// insertion point.
+//
+// By creating a Win32 caret on the console window and updating its position
+// every frame, accessibility tools can detect the active text input context
+// and inject transcribed text.
+//
+// These functions are safe to call on all platforms; non-Windows builds are
+// no-ops.  SSH sessions should skip calling these (no local console window).
+// ---------------------------------------------------------------------------
+
+#[cfg(windows)]
+pub mod caret {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    static CARET_CREATED: AtomicBool = AtomicBool::new(false);
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetConsoleWindow() -> isize;
+        fn GetCurrentConsoleFontEx(
+            hConsoleOutput: *mut std::ffi::c_void,
+            bMaximumWindow: i32,
+            lpConsoleCurrentFontEx: *mut CONSOLE_FONT_INFOEX,
+        ) -> i32;
+        fn GetStdHandle(nStdHandle: u32) -> *mut std::ffi::c_void;
+    }
+
+    #[link(name = "user32")]
+    extern "system" {
+        fn CreateCaret(hWnd: isize, hBitmap: isize, nWidth: i32, nHeight: i32) -> i32;
+        fn SetCaretPos(x: i32, y: i32) -> i32;
+        fn ShowCaret(hWnd: isize) -> i32;
+        fn DestroyCaret() -> i32;
+    }
+
+    #[repr(C)]
+    #[allow(non_snake_case)]
+    struct CONSOLE_FONT_INFOEX {
+        cbSize: u32,
+        nFont: u32,
+        dwFontSize_X: i16,
+        dwFontSize_Y: i16,
+        FontFamily: u32,
+        FontWeight: u32,
+        FaceName: [u16; 32],
+    }
+
+    /// Query the current console font cell size in pixels.
+    /// Returns (cell_width, cell_height).  Falls back to (8, 16) on failure.
+    fn console_cell_size() -> (i32, i32) {
+        const STD_OUTPUT_HANDLE: u32 = (-11i32) as u32;
+        unsafe {
+            let handle = GetStdHandle(STD_OUTPUT_HANDLE);
+            if handle.is_null() || handle == (-1isize) as *mut std::ffi::c_void {
+                return (8, 16);
+            }
+            let mut info: CONSOLE_FONT_INFOEX = std::mem::zeroed();
+            info.cbSize = std::mem::size_of::<CONSOLE_FONT_INFOEX>() as u32;
+            if GetCurrentConsoleFontEx(handle, 0, &mut info) != 0 {
+                let w = if info.dwFontSize_X > 0 { info.dwFontSize_X as i32 } else { 8 };
+                let h = if info.dwFontSize_Y > 0 { info.dwFontSize_Y as i32 } else { 16 };
+                (w, h)
+            } else {
+                (8, 16)
+            }
+        }
+    }
+
+    /// Create the system caret on the console window (if not already created)
+    /// and update its position to the given terminal cell coordinates.
+    ///
+    /// `col` and `row` are 0-based terminal cell coordinates (the same values
+    /// used for VT CUP positioning).
+    pub fn update(col: u16, row: u16) {
+        unsafe {
+            let hwnd = GetConsoleWindow();
+            if hwnd == 0 {
+                return;
+            }
+            if !CARET_CREATED.load(Ordering::Relaxed) {
+                let (cw, ch) = console_cell_size();
+                if CreateCaret(hwnd, 0, cw.max(1), ch.max(1)) != 0 {
+                    CARET_CREATED.store(true, Ordering::Relaxed);
+                    ShowCaret(hwnd);
+                }
+            }
+            let (cw, ch) = console_cell_size();
+            SetCaretPos(col as i32 * cw, row as i32 * ch);
+        }
+    }
+
+    /// Hide and destroy the system caret.  Call on exit.
+    pub fn destroy() {
+        if CARET_CREATED.swap(false, Ordering::Relaxed) {
+            unsafe { DestroyCaret(); }
+        }
+    }
+}
+
+#[cfg(not(windows))]
+pub mod caret {
+    pub fn update(_col: u16, _row: u16) {}
+    pub fn destroy() {}
+}
