@@ -230,7 +230,9 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
     let addr = format!("127.0.0.1:{}", port);
     let session_key = read_session_key(&name).unwrap_or_default();
     let last_path = format!("{}\\.psmux\\last_session", home);
-    let _ = std::fs::write(&last_path, &name);
+    if !crate::session::is_warm_session(&name) {
+        let _ = std::fs::write(&last_path, &name);
+    }
 
     // ── Open persistent TCP connection ───────────────────────────────────
     let stream = std::net::TcpStream::connect(&addr)?;
@@ -910,6 +912,8 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                                             if let Some(fname) = e.file_name().to_str().map(|s| s.to_string()) {
                                                 if let Some((base, ext)) = fname.rsplit_once('.') {
                                                     if ext == "port" {
+                                                        // Hide warm (standby) sessions from user
+                                                        if crate::session::is_warm_session(base) { continue; }
                                                         if let Ok(port_str) = std::fs::read_to_string(e.path()) {
                                                             if let Ok(p) = port_str.trim().parse::<u16>() {
                                                                 let sess_addr = format!("127.0.0.1:{}", p);
@@ -1005,6 +1009,7 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                                             if let Some(fname) = e.file_name().to_str() {
                                                 if let Some((base, ext)) = fname.rsplit_once('.') {
                                                     if ext == "port" {
+                                                        if crate::session::is_warm_session(base) { continue; }
                                                         if let Ok(port_str) = std::fs::read_to_string(e.path()) {
                                                             if let Ok(p) = port_str.trim().parse::<u16>() {
                                                                 let sess_addr = format!("127.0.0.1:{}", p);
@@ -1056,6 +1061,7 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                                             if let Some(fname) = e.file_name().to_str() {
                                                 if let Some((base, ext)) = fname.rsplit_once('.') {
                                                     if ext == "port" {
+                                                        if crate::session::is_warm_session(base) { continue; }
                                                         if let Ok(ps) = std::fs::read_to_string(e.path()) {
                                                             if let Ok(p) = ps.trim().parse::<u16>() {
                                                                 let a = format!("127.0.0.1:{}", p);
@@ -2556,7 +2562,7 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
             }
             if renaming {
                 let overlay = Block::default().borders(Borders::ALL).title("rename window");
-                let oa = centered_rect(60, 3, chunks[0]);
+                let oa = centered_rect(60, 3, content_chunk);
                 f.render_widget(Clear, oa);
                 f.render_widget(&overlay, oa);
                 let para = Paragraph::new(format!("name: {}", rename_buf));
@@ -2564,7 +2570,7 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
             }
             if pane_renaming {
                 let overlay = Block::default().borders(Borders::ALL).title("set pane title");
-                let oa = centered_rect(60, 3, chunks[0]);
+                let oa = centered_rect(60, 3, content_chunk);
                 f.render_widget(Clear, oa);
                 f.render_widget(&overlay, oa);
                 let para = Paragraph::new(format!("title: {}", pane_title_buf));
@@ -2572,7 +2578,7 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
             }
             if command_input {
                 let overlay = Block::default().borders(Borders::ALL).title("command");
-                let oa = centered_rect(60, 3, chunks[0]);
+                let oa = centered_rect(60, 3, content_chunk);
                 f.render_widget(Clear, oa);
                 f.render_widget(&overlay, oa);
                 let para = Paragraph::new(format!(": {}", command_buf));
@@ -2580,7 +2586,7 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
             }
             if let Some(ref cmd) = confirm_cmd {
                 let overlay = Block::default().borders(Borders::ALL).title("confirm");
-                let oa = centered_rect(50, 3, chunks[0]);
+                let oa = centered_rect(50, 3, content_chunk);
                 f.render_widget(Clear, oa);
                 f.render_widget(&overlay, oa);
                 let para = Paragraph::new(format!("{}? (y/n)", cmd));
