@@ -2,6 +2,12 @@ use std::io::{self, Write};
 use std::time::Duration;
 use std::env;
 
+/// Returns true if this port-file base name belongs to a warm (standby) server.
+/// Warm sessions should be hidden from user-facing lists and never auto-attached.
+pub fn is_warm_session(base: &str) -> bool {
+    base == "__warm__" || base.ends_with("____warm__")
+}
+
 /// Clean up any stale port files (where server is not actually running)
 pub fn cleanup_stale_port_files() {
     let home = match env::var("USERPROFILE").or_else(|_| env::var("HOME")) {
@@ -158,6 +164,8 @@ pub fn resolve_last_session_name() -> Option<String> {
             }
         }
     }
+    // Exclude warm (standby) sessions — users should never auto-attach to them
+    picks.retain(|(n, _)| !is_warm_session(n));
     picks.sort_by_key(|(_, t)| *t);
     picks.last().map(|(n, _)| n.clone())
 }
@@ -212,6 +220,8 @@ pub fn list_all_sessions_tree(current_session: &str, current_windows: &[(String,
             let path = entry.path();
             if path.extension().map(|e| e == "port").unwrap_or(false) {
                 if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                    // Hide warm (standby) sessions from choose-tree
+                    if is_warm_session(stem) { continue; }
                     if let Ok(port_str) = std::fs::read_to_string(&path) {
                         if let Ok(port) = port_str.trim().parse::<u16>() {
                             let mtime = entry.metadata()

@@ -40,7 +40,7 @@ use crate::platform::enable_virtual_terminal_processing;
 use crate::cli::{print_help, print_version, print_commands};
 use crate::session::{cleanup_stale_port_files, read_session_key, send_control,
     send_control_with_response, resolve_last_session_name, resolve_default_session_name,
-    kill_remaining_server_processes};
+    is_warm_session, kill_remaining_server_processes};
 use crate::rendering::apply_cursor_style;
 use crate::server::run_server;
 use crate::client::run_remote;
@@ -332,6 +332,8 @@ fn run_main() -> io::Result<()> {
                                     } else {
                                         if base.contains("__") { continue; }
                                     }
+                                    // Never show warm (standby) sessions to users
+                                    if is_warm_session(base) { continue; }
                                     if let Ok(port_str) = std::fs::read_to_string(e.path()) {
                                         if let Ok(_p) = port_str.trim().parse::<u16>() {
                                             let addr = format!("127.0.0.1:{}", port_str.trim());

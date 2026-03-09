@@ -651,6 +651,11 @@ pub fn handle_key(app: &mut AppState, key: KeyEvent) -> io::Result<bool> {
                 KeyCode::Char('T') => { app.copy_find_char_pending = Some(3); app.copy_count = Some(copy_repeat); }
                 // D = copy from cursor to end of line
                 KeyCode::Char('D') => { crate::copy_mode::copy_end_of_line(app)?; exit_copy_mode(app); }
+                // Bracket matching: % = jump to matching bracket/paren/brace
+                KeyCode::Char('%') => { crate::copy_mode::move_matching_bracket(app); }
+                // Paragraph jump: { = previous paragraph, } = next paragraph
+                KeyCode::Char('{') => { for _ in 0..copy_repeat { crate::copy_mode::move_prev_paragraph(app); } }
+                KeyCode::Char('}') => { for _ in 0..copy_repeat { crate::copy_mode::move_next_paragraph(app); } }
                 // Line motions: 0 = start, $ = end, ^ = first non-blank
                 KeyCode::Char('0') => { crate::copy_mode::move_to_line_start(app); }
                 KeyCode::Char('$') => { crate::copy_mode::move_to_line_end(app); }

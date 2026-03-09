@@ -82,6 +82,7 @@ pub const PREFIX_DEFAULTS: &[(&str, &str)] = &[
     ("?",       "list-keys"),
     ("i",       "display-message"),
     ("t",       "clock-mode"),
+    ("s",       "choose-session"),
 ];
 
 // ─────────────────────────────────────────────────────────────────────
@@ -146,6 +147,10 @@ const COPY_MODE_VI: &[(&str, &str)] = &[
     ("F{char}",   "jump-backward"),
     ("t{char}",   "jump-to-forward"),
     ("T{char}",   "jump-to-backward"),
+    // Bracket / paragraph
+    ("%",         "next-matching-bracket"),
+    ("{",         "previous-paragraph"),
+    ("}",         "next-paragraph"),
     // Selection
     ("v",         "rectangle-toggle"),
     ("V",         "select-line"),
@@ -399,6 +404,13 @@ const OPTIONS_REF: &[(&str, &str)] = &[
     ("copy-command",               "\"\""),
     ("set-clipboard",              "on"),
     ("set-titles-string",          "\"\""),
+    // psmux extensions
+    ("cursor-style",               "\"\""),
+    ("cursor-blink",               "off"),
+    ("prediction-dimming",         "off"),
+    ("env-shim",                   "on"),
+    ("claude-code-fix-tty",        "on"),
+    ("claude-code-force-interactive", "on"),
 ];
 
 /// Section: format variables quick-reference.

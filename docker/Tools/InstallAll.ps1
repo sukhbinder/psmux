@@ -70,19 +70,24 @@ Remove-Item "C:\BuildTools\Installer" -Recurse -Force -ErrorAction SilentlyConti
 # 3. Install OpenSSH Server
 # ============================================
 Write-Host "=== Installing OpenSSH Server ==="
-Expand-Archive C:\openssh.zip -DestinationPath "C:\" -Force
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+[System.IO.Compression.ZipFile]::ExtractToDirectory("C:\openssh.zip", "C:\sshtmp")
 Remove-Item C:\openssh.zip -Force
 
-$targetDir = "C:\Windows\System32\OpenSSH"
-foreach ($f in @("sshd.exe","sshd_config_default","libcrypto.dll","sftp-server.exe")) {
-    $src = "C:\OpenSSH-Win64\$f"
-    if (Test-Path $src) {
-        Copy-Item $src $targetDir -Force
-        Write-Host "  Copied $f"
-    }
+# Move extracted dir (OpenSSH-Win64) to C:\OpenSSH
+$extracted = Get-ChildItem "C:\sshtmp" -Directory | Select-Object -First 1
+if ($extracted) {
+    Move-Item $extracted.FullName "C:\OpenSSH" -Force
+} else {
+    Move-Item "C:\sshtmp" "C:\OpenSSH" -Force
 }
-Remove-Item "C:\OpenSSH-Win64" -Recurse -Force -ErrorAction SilentlyContinue
-Write-Host "OpenSSH Server installed."
+Remove-Item "C:\sshtmp" -Recurse -Force -ErrorAction SilentlyContinue
+
+if (Test-Path "C:\OpenSSH\sshd.exe") {
+    Write-Host "OpenSSH Server installed to C:\OpenSSH"
+} else {
+    throw "sshd.exe not found after OpenSSH install"
+}
 
 # ============================================
 # 4. Install Git

@@ -1,26 +1,25 @@
 $ErrorActionPreference = "Stop"
 
 $url = "https://github.com/PowerShell/Win32-OpenSSH/releases/download/v9.8.3.0p2-Preview/OpenSSH-Win64.zip"
-$zipPath = "C:\openssh.zip"
-$extractDir = "C:\OpenSSH-Win64"
-$targetDir = "C:\Windows\System32\OpenSSH"
 
 Write-Host "Downloading Win32-OpenSSH..."
-Invoke-WebRequest $url -OutFile $zipPath
+Invoke-WebRequest $url -OutFile C:\openssh.zip -UseBasicParsing
 
 Write-Host "Extracting..."
-Expand-Archive $zipPath -DestinationPath "C:\" -Force
-Remove-Item $zipPath -Force
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+[System.IO.Compression.ZipFile]::ExtractToDirectory("C:\openssh.zip", "C:\sshtmp")
+Remove-Item C:\openssh.zip -Force
 
-# Copy sshd and related files to the existing OpenSSH directory
-$filesToCopy = @("sshd.exe", "sshd_config_default", "libcrypto.dll", "sftp-server.exe")
-foreach ($f in $filesToCopy) {
-    $src = Join-Path $extractDir $f
-    if (Test-Path $src) {
-        Copy-Item $src $targetDir -Force
-        Write-Host "  Copied $f"
-    }
+$extracted = Get-ChildItem "C:\sshtmp" -Directory | Select-Object -First 1
+if ($extracted) {
+    Move-Item $extracted.FullName "C:\OpenSSH" -Force
+} else {
+    Move-Item "C:\sshtmp" "C:\OpenSSH" -Force
 }
+Remove-Item "C:\sshtmp" -Recurse -Force -ErrorAction SilentlyContinue
 
-Remove-Item $extractDir -Recurse -Force -ErrorAction SilentlyContinue
-Write-Host "OpenSSH Server installed."
+if (Test-Path "C:\OpenSSH\sshd.exe") {
+    Write-Host "OpenSSH Server installed to C:\OpenSSH"
+} else {
+    throw "sshd.exe not found after OpenSSH install"
+}

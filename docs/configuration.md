@@ -80,7 +80,8 @@ psmux split-window -- "C:/Program Files/Git/bin/bash.exe"
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `prefix` | Key | `C-b` | Prefix key |
-| `base-index` | Int | `1` | First window number |
+| `prefix2` | Key | `none` | Secondary prefix key (optional) |
+| `base-index` | Int | `0` | First window number |
 | `pane-base-index` | Int | `0` | First pane number |
 | `escape-time` | Int | `500` | Escape delay (ms) |
 | `repeat-time` | Int | `500` | Repeat key timeout (ms) |
@@ -89,38 +90,53 @@ psmux split-window -- "C:/Program Files/Git/bin/bash.exe"
 | `display-panes-time` | Int | `1000` | Pane overlay time (ms) |
 | `status-interval` | Int | `15` | Status refresh (seconds) |
 | `mouse` | Bool | `on` | Mouse support |
-| `status` | Bool | `on` | Show status bar |
+| `status` | Bool/Int | `on` | Show status bar (number = line count) |
 | `status-position` | Str | `bottom` | `top` or `bottom` |
+| `status-justify` | Str | `left` | `left`, `centre`, `right`, `absolute-centre` |
+| `status-left-length` | Int | `10` | Max width of status-left |
+| `status-right-length` | Int | `40` | Max width of status-right |
 | `focus-events` | Bool | `off` | Pass focus events to apps |
 | `mode-keys` | Str | `emacs` | `vi` or `emacs` |
 | `renumber-windows` | Bool | `off` | Auto-renumber windows on close |
 | `automatic-rename` | Bool | `on` | Rename windows from foreground process |
 | `monitor-activity` | Bool | `off` | Flag windows with new output |
 | `monitor-silence` | Int | `0` | Seconds before silence flag (0=off) |
+| `visual-activity` | Bool | `off` | Visual indicator for activity |
 | `synchronize-panes` | Bool | `off` | Send input to all panes |
 | `remain-on-exit` | Bool | `off` | Keep panes after process exits |
 | `aggressive-resize` | Bool | `off` | Resize to smallest client |
+| `window-size` | Str | `latest` | `largest`, `smallest`, `manual`, `latest` |
+| `destroy-unattached` | Bool | `off` | Exit server when no clients attached |
+| `exit-empty` | Bool | `on` | Exit server when all windows closed |
 | `set-titles` | Bool | `off` | Update terminal title |
 | `set-titles-string` | Str | | Terminal title format |
 | `default-shell` | Str | `pwsh` | Shell to launch |
 | `default-command` | Str | | Alias for default-shell |
 | `word-separators` | Str | `" -_@"` | Copy-mode word delimiters |
-| `prediction-dimming` | Bool | `off` | Dim predictive text |
-| `cursor-style` | Str | | `block`, `underline`, or `bar` |
-| `cursor-blink` | Bool | `off` | Cursor blinking |
 | `bell-action` | Str | `any` | `any`, `none`, `current`, `other` |
 | `visual-bell` | Bool | `off` | Visual bell indicator |
+| `allow-passthrough` | Str | `off` | Allow terminal passthrough sequences (`on`/`off`/`all`) |
+| `copy-command` | Str | | Shell command for clipboard pipe |
+| `set-clipboard` | Str | `on` | Clipboard interaction (`on`/`off`/`external`) |
+| `main-pane-width` | Int | `0` | Main pane width in main-vertical layout |
+| `main-pane-height` | Int | `0` | Main pane height in main-horizontal layout |
+
+### Style Options
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
 | `status-left` | Str | `[#S] ` | Left status bar content |
 | `status-right` | Str | | Right status bar content |
 | `status-style` | Str | `bg=green,fg=black` | Status bar style |
 | `status-left-style` | Str | | Left status style |
 | `status-right-style` | Str | | Right status style |
-| `status-justify` | Str | `left` | Tab alignment: `left`, `centre`, `right` |
 | `message-style` | Str | `bg=yellow,fg=black` | Message style |
 | `message-command-style` | Str | `bg=black,fg=yellow` | Command prompt style |
 | `mode-style` | Str | `bg=yellow,fg=black` | Copy-mode highlight |
 | `pane-border-style` | Str | | Inactive border style |
 | `pane-active-border-style` | Str | `fg=green` | Active border style |
+| `pane-border-format` | Str | | Pane border format string |
+| `pane-border-status` | Str | | Pane border status position (`top`/`bottom`) |
 | `window-status-format` | Str | `#I:#W#F` | Inactive tab format |
 | `window-status-current-format` | Str | `#I:#W#F` | Active tab format |
 | `window-status-separator` | Str | `" "` | Tab separator |
@@ -130,7 +146,18 @@ psmux split-window -- "C:/Program Files/Git/bin/bash.exe"
 | `window-status-bell-style` | Str | `reverse` | Bell tab style |
 | `window-status-last-style` | Str | | Last-active tab style |
 
-Style format: `"fg=colour,bg=colour,bold,dim,underscore,italics,reverse"`
+### psmux Extensions (Windows-specific)
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `prediction-dimming` | Bool | `off` | Dim predictive/speculative text |
+| `cursor-style` | Str | | Cursor shape: `block`, `underline`, or `bar` |
+| `cursor-blink` | Bool | `off` | Cursor blinking |
+| `env-shim` | Bool | `on` | Inject Unix-compatible `env` function in PowerShell panes |
+| `claude-code-fix-tty` | Bool | `on` | Patch Node.js process.stdout.isTTY for Claude Code |
+| `claude-code-force-interactive` | Bool | `on` | Set CLAUDE_CODE_FORCE_INTERACTIVE=1 in panes |
+
+Style format: `"fg=colour,bg=colour,bold,dim,underscore,italics,reverse,strikethrough"`
 
 Colours: `default`, `black`, `red`, `green`, `yellow`, `blue`, `magenta`, `cyan`, `white`, `colour0`–`colour255`, `#RRGGBB`
 

@@ -85,7 +85,7 @@ The **worktree system** creates isolated git worktrees and runs agents in-proces
 - Each agent works on a separate branch in an isolated repo copy
 - Runs entirely in-process (no pane, no terminal output visible)
 - Higher-tier models (Opus) tend to prefer this path for git-level isolation
-- **On Windows, worktree tmux integration is hardcoded disabled** (`"--tmux is not supported on Windows"`)
+- **On Windows, worktree tmux integration is hardcoded disabled** (`"--tmux may not have effect on Windows when model chooses worktrees. Opus tends to always choose that."`)
 - There is **no env var or setting** to force worktree agents into tmux panes
 
 ### Why Opus says "Let me launch agents in worktrees"
