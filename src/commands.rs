@@ -148,13 +148,12 @@ pub fn parse_command_line(line: &str) -> Vec<String> {
     let mut current = String::new();
     let mut in_double_quotes = false;
     let mut in_single_quotes = false;
-    let mut escape_next = false;
-    
-    for c in line.chars() {
-        if escape_next {
-            current.push(c);
-            escape_next = false;
-        } else if in_single_quotes {
+    let chars: Vec<char> = line.chars().collect();
+    let mut i = 0;
+
+    while i < chars.len() {
+        let c = chars[i];
+        if in_single_quotes {
             // Inside single quotes: everything is literal (no escape processing)
             if c == '\'' {
                 in_single_quotes = false;
@@ -162,7 +161,16 @@ pub fn parse_command_line(line: &str) -> Vec<String> {
                 current.push(c);
             }
         } else if c == '\\' && in_double_quotes {
-            escape_next = true;
+            // Inside double quotes, only treat \" as an escape (produces a
+            // literal double-quote).  All other backslashes are kept literal
+            // because psmux is a Windows-native tool where backslash is the
+            // normal path separator (e.g. "C:\Program Files\Git\bin\bash.exe").
+            if i + 1 < chars.len() && chars[i + 1] == '"' {
+                current.push('"');
+                i += 1; // skip the quote
+            } else {
+                current.push(c); // literal backslash
+            }
         } else if c == '"' {
             in_double_quotes = !in_double_quotes;
         } else if c == '\'' && !in_double_quotes {
@@ -175,12 +183,13 @@ pub fn parse_command_line(line: &str) -> Vec<String> {
         } else {
             current.push(c);
         }
+        i += 1;
     }
-    
+
     if !current.is_empty() {
         args.push(current);
     }
-    
+
     args
 }
 
