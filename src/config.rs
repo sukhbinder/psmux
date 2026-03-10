@@ -777,6 +777,42 @@ pub fn normalize_key_for_binding(key: (KeyCode, KeyModifiers)) -> (KeyCode, KeyM
     }
 }
 
+/// Map a multi-character key name (case-insensitive) to a KeyCode.
+/// Returns None if the name is not recognized.
+fn named_key(name: &str) -> Option<KeyCode> {
+    match name.to_lowercase().as_str() {
+        "space" => Some(KeyCode::Char(' ')),
+        "enter" | "return" => Some(KeyCode::Enter),
+        "tab" => Some(KeyCode::Tab),
+        "btab" | "backtab" => Some(KeyCode::BackTab),
+        "escape" | "esc" => Some(KeyCode::Esc),
+        "bspace" | "backspace" => Some(KeyCode::Backspace),
+        "up" => Some(KeyCode::Up),
+        "down" => Some(KeyCode::Down),
+        "left" => Some(KeyCode::Left),
+        "right" => Some(KeyCode::Right),
+        "home" => Some(KeyCode::Home),
+        "end" => Some(KeyCode::End),
+        "pageup" | "ppage" | "pgup" => Some(KeyCode::PageUp),
+        "pagedown" | "npage" | "pgdn" => Some(KeyCode::PageDown),
+        "insert" | "ic" => Some(KeyCode::Insert),
+        "delete" | "dc" => Some(KeyCode::Delete),
+        "f1" => Some(KeyCode::F(1)),
+        "f2" => Some(KeyCode::F(2)),
+        "f3" => Some(KeyCode::F(3)),
+        "f4" => Some(KeyCode::F(4)),
+        "f5" => Some(KeyCode::F(5)),
+        "f6" => Some(KeyCode::F(6)),
+        "f7" => Some(KeyCode::F(7)),
+        "f8" => Some(KeyCode::F(8)),
+        "f9" => Some(KeyCode::F(9)),
+        "f10" => Some(KeyCode::F(10)),
+        "f11" => Some(KeyCode::F(11)),
+        "f12" => Some(KeyCode::F(12)),
+        _ => None,
+    }
+}
+
 pub fn parse_key_name(name: &str) -> Option<(KeyCode, KeyModifiers)> {
     let name = name.trim();
     // Strip surrounding quotes (single or double) — plugins often quote special chars
@@ -789,19 +825,27 @@ pub fn parse_key_name(name: &str) -> Option<(KeyCode, KeyModifiers)> {
     };
     
     if name.starts_with("C-") || name.starts_with("^") {
-        let ch = if name.starts_with("C-") {
-            name.chars().nth(2)
-        } else {
-            name.chars().nth(1)
-        };
-        if let Some(c) = ch {
-            return Some((KeyCode::Char(c.to_ascii_lowercase()), KeyModifiers::CONTROL));
+        let rest = if name.starts_with("C-") { &name[2..] } else { &name[1..] };
+        // Check for named keys (Space, Enter, etc.) before single-char fallback
+        if let Some(kc) = named_key(rest) {
+            return Some((kc, KeyModifiers::CONTROL));
+        }
+        if rest.len() == 1 {
+            if let Some(c) = rest.chars().next() {
+                return Some((KeyCode::Char(c.to_ascii_lowercase()), KeyModifiers::CONTROL));
+            }
         }
     }
-    
+
     if name.starts_with("M-") {
-        if let Some(c) = name.chars().nth(2) {
-            return Some((KeyCode::Char(c.to_ascii_lowercase()), KeyModifiers::ALT));
+        let rest = &name[2..];
+        if let Some(kc) = named_key(rest) {
+            return Some((kc, KeyModifiers::ALT));
+        }
+        if rest.len() == 1 {
+            if let Some(c) = rest.chars().next() {
+                return Some((KeyCode::Char(c.to_ascii_lowercase()), KeyModifiers::ALT));
+            }
         }
     }
     
@@ -1031,6 +1075,7 @@ pub fn format_key_binding(key: &(KeyCode, KeyModifiers)) -> String {
     }
     
     let key_str = match keycode {
+        KeyCode::Char(' ') => "Space".to_string(),
         KeyCode::Char(c) => c.to_string(),
         KeyCode::Enter => "Enter".to_string(),
         KeyCode::Tab => "Tab".to_string(),
