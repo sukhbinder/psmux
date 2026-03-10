@@ -40,8 +40,15 @@ function Start-TestSession {
         [string]$Name = $SESSION,
         [string]$ConfigContent = $null
     )
-    try { & $PSMUX kill-session -t $Name 2>&1 | Out-Null } catch {}
-    Start-Sleep -Milliseconds 500
+    # When config content is provided, kill the entire server so the new
+    # session starts a fresh server that reads the config file.
+    if ($ConfigContent) {
+        try { & $PSMUX kill-server 2>&1 | Out-Null } catch {}
+        Start-Sleep -Seconds 2
+    } else {
+        try { & $PSMUX kill-session -t $Name 2>&1 | Out-Null } catch {}
+        Start-Sleep -Milliseconds 500
+    }
 
     $args_ = @("new-session", "-s", $Name, "-d")
     if ($ConfigContent) {
@@ -51,7 +58,7 @@ function Start-TestSession {
     }
 
     $proc = Start-Process -FilePath $PSMUX -ArgumentList $args_ -PassThru -WindowStyle Hidden
-    Start-Sleep -Milliseconds 2000
+    Start-Sleep -Milliseconds 3000
 
     & $PSMUX has-session -t $Name 2>&1 | Out-Null
     if ($LASTEXITCODE -ne 0) {
@@ -62,9 +69,9 @@ function Start-TestSession {
 
 function Stop-TestSession {
     param([string]$Name = $SESSION)
-    try { & $PSMUX kill-session -t $Name 2>&1 | Out-Null } catch {}
+    try { & $PSMUX kill-server 2>&1 | Out-Null } catch {}
     if ($env:PSMUX_CONFIG_FILE) { Remove-Item $env:PSMUX_CONFIG_FILE -ErrorAction SilentlyContinue; $env:PSMUX_CONFIG_FILE = $null }
-    Start-Sleep -Milliseconds 500
+    Start-Sleep -Seconds 1
 }
 
 # ============================================================

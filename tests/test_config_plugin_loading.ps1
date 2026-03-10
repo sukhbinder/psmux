@@ -32,6 +32,38 @@ $HOME_DIR = $env:USERPROFILE
 $PSMUX_DIR = "$HOME_DIR\.psmux"
 $PLUGINS_DIR = "$PSMUX_DIR\plugins"
 
+# ── Create mock plugin.conf files if they don't exist ────────────────
+# Tests 2-5 rely on psmux-sensible and psmux-theme-gruvbox plugin confs.
+# If not installed, create minimal mocks so the tests can exercise the
+# @plugin auto-source codepath.
+$script:createdMockPlugins = @()
+
+$sensibleDir = "$PLUGINS_DIR\psmux-sensible"
+$sensibleConf = "$sensibleDir\plugin.conf"
+if (-not (Test-Path $sensibleConf)) {
+    New-Item -ItemType Directory -Path $sensibleDir -Force | Out-Null
+    @"
+# Mock psmux-sensible plugin.conf for testing
+set -g escape-time 50
+set -g base-index 1
+set -g mouse on
+"@ | Set-Content -Path $sensibleConf -Encoding UTF8
+    $script:createdMockPlugins += $sensibleDir
+}
+
+$gruvboxDir = "$PLUGINS_DIR\psmux-theme-gruvbox"
+$gruvboxConf = "$gruvboxDir\plugin.conf"
+if (-not (Test-Path $gruvboxConf)) {
+    New-Item -ItemType Directory -Path $gruvboxDir -Force | Out-Null
+    @"
+# Mock psmux-theme-gruvbox plugin.conf for testing
+set -g status-style "bg=#282828,fg=#ebdbb2"
+set -g pane-active-border-style "fg=#8ec07c"
+set -g pane-border-style "fg=#504945"
+"@ | Set-Content -Path $gruvboxConf -Encoding UTF8
+    $script:createdMockPlugins += $gruvboxDir
+}
+
 # Helper: kill all psmux, remove stale port files
 function Reset-Psmux {
     Get-Process psmux -ErrorAction SilentlyContinue | Stop-Process -Force
@@ -374,6 +406,10 @@ if (Start-SessionWithConfig $testConf10 "ppmtest") {
 Write-Host ""
 Reset-Psmux
 Remove-Item "$env:TEMP\psmux_test_*.conf" -Force -ErrorAction SilentlyContinue
+# Remove mock plugins we created (leave real user-installed ones alone)
+foreach ($dir in $script:createdMockPlugins) {
+    Remove-Item $dir -Recurse -Force -ErrorAction SilentlyContinue
+}
 
 # ============================================================
 # RESULTS

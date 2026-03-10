@@ -24,7 +24,7 @@ use helpers::{collect_pane_paths_server, serialize_bindings_json, json_escape_st
     list_windows_json_with_tabs, combined_data_version, TMUX_COMMANDS};
 use options::{get_option_value, get_window_option_value, render_window_options, apply_set_option};
 
-use crate::input::{send_text_to_active, send_key_to_active, send_paste_to_active, move_focus};
+use crate::input::{send_text_to_active, send_key_to_active, send_paste_to_active, move_focus, find_best_pane_in_direction};
 use crate::copy_mode::{enter_copy_mode, exit_copy_mode, move_copy_cursor, current_prompt_pos,
     yank_selection, scroll_copy_up, scroll_copy_down, switch_with_copy_save,
     capture_active_pane_text, capture_active_pane_range, capture_active_pane_styled};
@@ -40,6 +40,102 @@ use crate::commands::{parse_command_to_action, format_action, parse_menu_definit
 use crate::util::{list_windows_json, list_tree_json, list_windows_tmux, base64_encode};
 use crate::format::{expand_format, format_list_windows, format_list_panes, set_buffer_idx_override};
 use crate::help;
+
+/// Build a JSON fragment with overlay state (popup, menu, confirm, display_panes).
+/// Returns a string like `,"popup_active":true,"popup_command":"...","popup_lines":[...]`
+/// that can be injected into the dump-state JSON before the closing `}`.
+fn serialize_overlay_json(app: &AppState) -> String {
+    use crate::server::helpers::json_escape_string;
+    let mut out = String::new();
+    match &app.mode {
+        Mode::PopupMode { command, output, width, height, popup_pty, .. } => {
+            out.push_str(",\"popup_active\":true");
+            out.push_str(",\"popup_command\":\"");
+            out.push_str(&json_escape_string(command));
+            out.push('"');
+            let _ = std::fmt::Write::write_fmt(&mut out, format_args!(",\"popup_width\":{},\"popup_height\":{}", width, height));
+            // Serialize popup screen content
+            out.push_str(",\"popup_lines\":[");
+            let inner_h = height.saturating_sub(2);
+            let inner_w = width.saturating_sub(2);
+            if let Some(pty) = popup_pty {
+                if let Ok(parser) = pty.term.lock() {
+                    let screen = parser.screen();
+                    for row in 0..inner_h {
+                        if row > 0 { out.push(','); }
+                        out.push('"');
+                        for col in 0..inner_w {
+                            if let Some(cell) = screen.cell(row, col) {
+                                let ch = cell.contents();
+                                if ch.is_empty() {
+                                    out.push(' ');
+                                } else {
+                                    // JSON-escape the cell content
+                                    for c in ch.chars() {
+                                        match c {
+                                            '"' => out.push_str("\\\""),
+                                            '\\' => out.push_str("\\\\"),
+                                            c if (c as u32) < 0x20 => {
+                                                let _ = std::fmt::Write::write_fmt(&mut out, format_args!("\\u{:04x}", c as u32));
+                                            }
+                                            c => out.push(c),
+                                        }
+                                    }
+                                }
+                            } else {
+                                out.push(' ');
+                            }
+                        }
+                        out.push('"');
+                    }
+                }
+            } else if !output.is_empty() {
+                // Non-PTY popup: serialize the output text as lines
+                for (i, line) in output.lines().take(inner_h as usize).enumerate() {
+                    if i > 0 { out.push(','); }
+                    out.push('"');
+                    out.push_str(&json_escape_string(line));
+                    out.push('"');
+                }
+            }
+            out.push(']');
+        }
+        Mode::ConfirmMode { prompt, .. } => {
+            out.push_str(",\"confirm_active\":true,\"confirm_prompt\":\"");
+            out.push_str(&json_escape_string(prompt));
+            out.push('"');
+        }
+        Mode::MenuMode { menu } => {
+            out.push_str(",\"menu_active\":true,\"menu_title\":\"");
+            out.push_str(&json_escape_string(&menu.title));
+            out.push('"');
+            let _ = std::fmt::Write::write_fmt(&mut out, format_args!(",\"menu_selected\":{}", menu.selected));
+            out.push_str(",\"menu_items\":[");
+            for (i, item) in menu.items.iter().enumerate() {
+                if i > 0 { out.push(','); }
+                if item.is_separator {
+                    out.push_str("{\"sep\":true}");
+                } else {
+                    out.push_str("{\"name\":\"");
+                    out.push_str(&json_escape_string(&item.name));
+                    out.push_str("\",\"key\":");
+                    if let Some(k) = item.key {
+                        let _ = std::fmt::Write::write_fmt(&mut out, format_args!("\"{}\"", k));
+                    } else {
+                        out.push_str("null");
+                    }
+                    out.push('}');
+                }
+            }
+            out.push(']');
+        }
+        Mode::PaneChooser { .. } => {
+            out.push_str(",\"display_panes\":true");
+        }
+        _ => {}
+    }
+    out
+}
 
 fn should_spawn_warm_server(app: &AppState) -> bool {
     app.session_name != "__warm__" && !app.destroy_unattached
@@ -259,8 +355,32 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
     // through to a cold spawn with the correct shell.
     if let Some(wp) = early_warm {
         if app.default_shell.is_empty() {
-            // No custom shell — the pre-spawned default (pwsh) is correct
-            app.warm_pane = Some(wp);
+            // No custom shell — the pre-spawned default (pwsh) is correct.
+            // Inject config-defined environment variables into the running
+            // warm pane shell.  The warm pane was spawned BEFORE config was
+            // loaded, so any `set-environment` vars from the config file are
+            // missing.  We write PowerShell `$env:` assignments silently.
+            if !app.environment.is_empty() {
+                let mut wp = wp;
+                let mut env_cmd = String::new();
+                for (key, value) in &app.environment {
+                    // Skip internal psmux variables that are already set
+                    if key.starts_with("PSMUX_TARGET_SESSION") || key == "TMUX" || key == "TMUX_PANE" { continue; }
+                    let escaped_val = value.replace('\'', "''");
+                    if !env_cmd.is_empty() { env_cmd.push_str("; "); }
+                    env_cmd.push_str(&format!("$env:{}='{}'", key, escaped_val));
+                }
+                if !env_cmd.is_empty() {
+                    // Send silently: write the command, then clear the line so
+                    // the user doesn't see the env setup on the fresh prompt.
+                    let inject = format!("{}\r\n", env_cmd);
+                    use std::io::Write as _;
+                    let _ = wp.writer.write_all(inject.as_bytes());
+                }
+                app.warm_pane = Some(wp);
+            } else {
+                app.warm_pane = Some(wp);
+            }
         } else {
             // Custom shell set by config — wrong warm pane, kill it
             let mut wp = wp;
@@ -350,6 +470,11 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
         // keeping responsiveness high during interaction.
         let data_ready = crate::types::PTY_DATA_READY.swap(false, std::sync::atomic::Ordering::AcqRel);
         if data_ready {
+            state_dirty = true;
+        }
+        // When a popup PTY is active, always push frames so interactive
+        // content (e.g. fzf, shell prompts) updates in real-time.
+        if matches!(app.mode, Mode::PopupMode { .. }) {
             state_dirty = true;
         }
         let echo_active = echo_pending_until.map_or(false, |t| t.elapsed().as_millis() < 50);
@@ -756,6 +881,15 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         mode_style_escaped, status_position_escaped, status_justify_escaped,
                         cursor_style_code, app.status_visible, app.repeat_time_ms,
                     ));
+                    // Inject overlay state (popup, menu, confirm, display_panes)
+                    {
+                        let overlay_json = serialize_overlay_json(&app);
+                        if !overlay_json.is_empty() && combined_buf.ends_with('}') {
+                            combined_buf.pop();
+                            combined_buf.push_str(&overlay_json);
+                            combined_buf.push('}');
+                        }
+                    }
                     cached_dump_state.clear();
                     cached_dump_state.push_str(&combined_buf);
                     // Inject one-shot clipboard data for OSC 52 delivery to
@@ -808,7 +942,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         .map(|p| p.last_rows as usize).unwrap_or(20);
                     scroll_copy_up(&mut app, half);
                 }
-                CtrlReq::ClockMode => { app.mode = Mode::ClockMode; }
+                CtrlReq::ClockMode => { app.mode = Mode::ClockMode; state_dirty = true; }
                 CtrlReq::CopyMove(dx, dy) => { move_copy_cursor(&mut app, dx, dy); }
                 CtrlReq::CopyAnchor => { if let Some((r,c)) = current_prompt_pos(&mut app) { app.copy_anchor = Some((r,c)); app.copy_anchor_scroll_offset = app.copy_scroll_offset; app.copy_pos = Some((r,c)); } }
                 CtrlReq::CopyYank => { let _ = yank_selection(&mut app); exit_copy_mode(&mut app); }
@@ -1232,16 +1366,35 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                                 "L" => FocusDir::Left, _ => FocusDir::Right,
                             };
                             let was_zoomed = unzoom_if_zoomed(&mut app);
-                            let old_path = app.windows[app.active_idx].active_path.clone();
-                            switch_with_copy_save(&mut app, |app| {
-                                move_focus(app, focus_dir);
-                            });
-                            if app.windows[app.active_idx].active_path != old_path {
-                                // Focus changed — stay unzoomed (tmux behavior)
-                                app.last_pane_path = old_path;
-                            } else if was_zoomed {
-                                // No pane in that direction — re-zoom
-                                toggle_zoom(&mut app);
+                            if was_zoomed {
+                                // Zoom-aware: check for direct neighbor (no wrapping).
+                                // Only navigate if there's an actual neighbor in that direction.
+                                let win = &app.windows[app.active_idx];
+                                let mut rects: Vec<(Vec<usize>, ratatui::layout::Rect)> = Vec::new();
+                                crate::tree::compute_rects(&win.root, app.last_window_area, &mut rects);
+                                let active_idx = rects.iter().position(|(path, _)| *path == win.active_path);
+                                let has_neighbor = if let Some(ai) = active_idx {
+                                    let (_, arect) = &rects[ai];
+                                    find_best_pane_in_direction(&rects, ai, arect, focus_dir).is_some()
+                                } else { false };
+                                if has_neighbor {
+                                    let old_path = app.windows[app.active_idx].active_path.clone();
+                                    switch_with_copy_save(&mut app, |app| {
+                                        move_focus(app, focus_dir);
+                                    });
+                                    app.last_pane_path = old_path;
+                                } else {
+                                    // No direct neighbor — re-zoom
+                                    toggle_zoom(&mut app);
+                                }
+                            } else {
+                                let old_path = app.windows[app.active_idx].active_path.clone();
+                                switch_with_copy_save(&mut app, |app| {
+                                    move_focus(app, focus_dir);
+                                });
+                                if app.windows[app.active_idx].active_path != old_path {
+                                    app.last_pane_path = old_path;
+                                }
                             }
                         }
                         "last" => {
@@ -2028,6 +2181,14 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 CtrlReq::SetEnvironment(key, value) => {
                     app.environment.insert(key.clone(), value.clone());
                     env::set_var(&key, &value);
+                    // Also inject into the waiting warm pane so it has the
+                    // latest env when transplanted for split/new-window.
+                    if let Some(ref mut wp) = app.warm_pane {
+                        let escaped = value.replace('\'', "''");
+                        let cmd = format!("$env:{}='{}'\r\n", key, escaped);
+                        use std::io::Write as _;
+                        let _ = wp.writer.write_all(cmd.as_bytes());
+                    }
                 }
                 CtrlReq::ShowEnvironment(resp) => {
                     let mut output = String::new();
@@ -2114,6 +2275,13 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     let menu = parse_menu_definition(&menu_def, x, y);
                     if !menu.items.is_empty() {
                         app.mode = Mode::MenuMode { menu };
+                        state_dirty = true;
+                    }
+                }
+                CtrlReq::DisplayMenuDirect(menu) => {
+                    if !menu.items.is_empty() {
+                        app.mode = Mode::MenuMode { menu };
+                        state_dirty = true;
                     }
                 }
                 CtrlReq::DisplayPopup(command, width, height, close_on_exit) => {
@@ -2156,6 +2324,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                             close_on_exit,
                             popup_pty: pty_result,
                         };
+                        state_dirty = true;
                     } else {
                         app.mode = Mode::PopupMode {
                             command: String::new(),
@@ -2166,6 +2335,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                             close_on_exit: true,
                             popup_pty: None,
                         };
+                        state_dirty = true;
                     }
                 }
                 CtrlReq::ConfirmBefore(prompt, cmd) => {
@@ -2179,6 +2349,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         command: cmd,
                         input: String::new(),
                     };
+                    state_dirty = true;
                 }
                 CtrlReq::ResizePaneAbsolute(axis, size) => {
                     resize_pane_absolute(&mut app, &axis, size);
@@ -2291,6 +2462,73 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     respawn_active_pane(&mut app, Some(&*pty_system))?;
                     state_dirty = true;
                 }
+                CtrlReq::PopupInput(data) => {
+                    if let Mode::PopupMode { ref mut popup_pty, .. } = app.mode {
+                        if let Some(ref mut pty) = popup_pty {
+                            let _ = pty.writer.write_all(&data);
+                            let _ = pty.writer.flush();
+                        }
+                    }
+                    state_dirty = true;
+                }
+                CtrlReq::OverlayClose => {
+                    match app.mode {
+                        Mode::PopupMode { .. } | Mode::MenuMode { .. } | Mode::ConfirmMode { .. } | Mode::PaneChooser { .. } | Mode::ClockMode => {
+                            app.mode = Mode::Passthrough;
+                            state_dirty = true;
+                        }
+                        _ => {}
+                    }
+                }
+                CtrlReq::ConfirmRespond(yes) => {
+                    if let Mode::ConfirmMode { ref command, .. } = app.mode {
+                        let cmd = command.clone();
+                        app.mode = Mode::Passthrough;
+                        if yes {
+                            parse_config_line(&mut app, &cmd);
+                        }
+                        state_dirty = true;
+                    }
+                }
+                CtrlReq::MenuSelect(idx) => {
+                    if let Mode::MenuMode { ref menu } = app.mode {
+                        if let Some(item) = menu.items.get(idx) {
+                            if !item.is_separator && !item.command.is_empty() {
+                                let cmd = item.command.clone();
+                                app.mode = Mode::Passthrough;
+                                parse_config_line(&mut app, &cmd);
+                                state_dirty = true;
+                            }
+                        }
+                    }
+                }
+                CtrlReq::MenuNavigate(delta) => {
+                    if let Mode::MenuMode { ref mut menu } = app.mode {
+                        let len = menu.items.len();
+                        if len > 0 {
+                            if delta > 0 {
+                                // Move down, skipping separators
+                                let mut next = (menu.selected + 1) % len;
+                                let start = next;
+                                while menu.items[next].is_separator {
+                                    next = (next + 1) % len;
+                                    if next == start { break; }
+                                }
+                                menu.selected = next;
+                            } else {
+                                // Move up, skipping separators
+                                let mut next = if menu.selected == 0 { len - 1 } else { menu.selected - 1 };
+                                let start = next;
+                                while menu.items[next].is_separator {
+                                    next = if next == 0 { len - 1 } else { next - 1 };
+                                    if next == start { break; }
+                                }
+                                menu.selected = next;
+                            }
+                            state_dirty = true;
+                        }
+                    }
+                }
             }
             // Log any active_idx change for debugging window-switch issues
             if app.active_idx != _prev_active_idx && crate::debug_log::server_log_enabled() {
@@ -2388,6 +2626,15 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 mode_style_escaped, status_position_escaped, status_justify_escaped,
                 cursor_style_code, app.status_visible, app.repeat_time_ms,
             ));
+            // Inject overlay state (popup, menu, confirm, display_panes)
+            {
+                let overlay_json = serialize_overlay_json(&app);
+                if !overlay_json.is_empty() && combined_buf.ends_with('}') {
+                    combined_buf.pop();
+                    combined_buf.push_str(&overlay_json);
+                    combined_buf.push('}');
+                }
+            }
             // Inject clipboard data if pending
             if let Some(clip_text) = app.clipboard_osc52.take() {
                 let clip_b64 = base64_encode(&clip_text);
@@ -2419,6 +2666,17 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         "active_idx changed {} -> {} by status-interval hook",
                         _pre_status_idx, app.active_idx));
                 }
+            }
+        }
+        // ── Popup child exit detection ──
+        // Check if popup PTY's child process has exited; if so, auto-close.
+        if let Mode::PopupMode { ref mut popup_pty, close_on_exit, .. } = app.mode {
+            let should_close = if let Some(ref mut pty) = popup_pty {
+                matches!(pty.child.try_wait(), Ok(Some(_)))
+            } else { false };
+            if should_close && close_on_exit {
+                app.mode = Mode::Passthrough;
+                state_dirty = true;
             }
         }
         // Check if all windows/panes have exited (throttled to every 250ms)

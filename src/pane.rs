@@ -44,20 +44,20 @@ fn cached_shell() -> Option<&'static str> {
 /// Determine the default shell name for window naming (like tmux shows "bash", "zsh").
 fn default_shell_name(command: Option<&str>, configured_shell: Option<&str>) -> String {
     if let Some(cmd) = command {
-        // Extract the program name from the command string
-        let first = cmd.split_whitespace().next().unwrap_or(cmd);
-        std::path::Path::new(first)
+        // Extract the program name from the command string (space-aware)
+        let (prog, _) = resolve_shell_program(cmd);
+        std::path::Path::new(&prog)
             .file_stem()
             .and_then(|s| s.to_str())
-            .unwrap_or(first)
+            .unwrap_or(cmd)
             .to_string()
     } else if let Some(shell) = configured_shell {
-        // Use configured default-shell name
-        let first = shell.split_whitespace().next().unwrap_or(shell);
-        std::path::Path::new(first)
+        // Use configured default-shell name (space-aware)
+        let (prog, _) = resolve_shell_program(shell);
+        std::path::Path::new(&prog)
             .file_stem()
             .and_then(|s| s.to_str())
-            .unwrap_or(first)
+            .unwrap_or(shell)
             .to_string()
     } else {
         // Default shell — use cached resolved path
@@ -621,17 +621,39 @@ fn cached_which(program: &str) -> String {
     resolved
 }
 
+/// Split a shell config value into (program, extra_args), handling paths
+/// that contain spaces (e.g. `C:/Program Files/Git/bin/bash.exe`).
+///
+/// Resolution order:
+/// 1. If the whole string resolves to an existing executable, use it as-is.
+/// 2. Otherwise, use quote-aware tokenising so that users can write
+///    `"C:/Program Files/Git/bin/bash.exe" --login` with quotes.
+fn resolve_shell_program(shell_path: &str) -> (String, Vec<String>) {
+    // Fast path: whole string is the program (possibly with spaces in path).
+    if std::path::Path::new(shell_path).is_file()
+        || which::which(shell_path).is_ok()
+    {
+        return (shell_path.to_string(), vec![]);
+    }
+
+    // Quote-aware split (handles `"path with spaces" arg1 arg2`).
+    let parsed = crate::commands::parse_command_line(shell_path);
+    if parsed.is_empty() {
+        return (shell_path.to_string(), vec![]);
+    }
+    let program = parsed[0].clone();
+    let extra = parsed[1..].to_vec();
+    (program, extra)
+}
+
 /// Build a CommandBuilder that launches the given shell path interactively.
 /// Used when `default-shell` / `default-command` is configured.
 /// Supports pwsh, powershell, cmd, and any arbitrary executable.
 pub fn build_default_shell(shell_path: &str, env_shim: bool) -> CommandBuilder {
-    // Extract the program (first token) and optional extra arguments.
-    let parts: Vec<&str> = shell_path.split_whitespace().collect();
-    let program = parts.first().copied().unwrap_or(shell_path);
-    let extra_args: Vec<&str> = if parts.len() > 1 { parts[1..].to_vec() } else { vec![] };
+    let (program, extra_args) = resolve_shell_program(shell_path);
 
     // Resolve bare names via cached `which` — avoids repeated PATH scans.
-    let resolved = cached_which(program);
+    let resolved = cached_which(&program);
 
     let lower = resolved.to_lowercase();
     let mut builder = CommandBuilder::new(&resolved);

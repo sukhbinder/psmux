@@ -747,6 +747,7 @@ pub enum CtrlReq {
     KillServer,
     WaitFor(String, WaitForOp),
     DisplayMenu(String, Option<i16>, Option<i16>),
+    DisplayMenuDirect(Menu),
     DisplayPopup(String, u16, u16, bool),
     ConfirmBefore(String, String),
     ClockMode,
@@ -766,6 +767,16 @@ pub enum CtrlReq {
     FocusOut,
     CommandPrompt(String),
     ShowMessages(mpsc::Sender<String>),
+    /// Forward raw bytes to the popup PTY (base64-decoded by connection handler)
+    PopupInput(Vec<u8>),
+    /// Close the current overlay (popup, menu, confirm, etc.)
+    OverlayClose,
+    /// Respond to confirm-before prompt (true = yes, false = no)
+    ConfirmRespond(bool),
+    /// Select a menu item by index
+    MenuSelect(usize),
+    /// Navigate menu up/down (delta: -1 = up, +1 = down)
+    MenuNavigate(i32),
 }
 
 /// Global flag set by PTY reader threads when new output arrives.

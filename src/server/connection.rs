@@ -985,32 +985,57 @@ match cmd {
     "display-menu" | "menu" => {
         let mut x_pos: Option<i16> = None;
         let mut y_pos: Option<i16> = None;
+        let mut title = String::new();
+        let mut skip_indices = std::collections::HashSet::new();
         let mut i = 0;
         while i < args.len() {
             match args[i] {
-                "-x" => { if let Some(v) = args.get(i+1) { x_pos = v.parse().ok(); i += 1; } }
-                "-y" => { if let Some(v) = args.get(i+1) { y_pos = v.parse().ok(); i += 1; } }
+                "-x" => { if let Some(v) = args.get(i+1) { x_pos = v.parse().ok(); skip_indices.insert(i); skip_indices.insert(i+1); i += 1; } }
+                "-y" => { if let Some(v) = args.get(i+1) { y_pos = v.parse().ok(); skip_indices.insert(i); skip_indices.insert(i+1); i += 1; } }
+                "-T" => { if let Some(v) = args.get(i+1) { title = v.to_string(); skip_indices.insert(i); skip_indices.insert(i+1); i += 1; } }
                 _ => {}
             }
             i += 1;
         }
-        let menu = args.iter().filter(|a| !a.starts_with('-') && a.parse::<i16>().is_err()).cloned().collect::<Vec<&str>>().join(" ");
-        let _ = tx.send(CtrlReq::DisplayMenu(menu, x_pos, y_pos));
+        // Collect remaining positional args (name, key, command triplets)
+        let positional: Vec<&str> = args.iter().enumerate()
+            .filter(|(idx, a)| !skip_indices.contains(idx) && !a.starts_with('-'))
+            .map(|(_, a)| *a).collect();
+        // Build menu from triplets
+        let mut menu = crate::types::Menu { title, items: Vec::new(), selected: 0, x: x_pos, y: y_pos };
+        let mut pi = 0;
+        while pi < positional.len() {
+            let name = positional[pi];
+            if name.is_empty() || name == "-" {
+                menu.items.push(crate::types::MenuItem { name: String::new(), key: None, command: String::new(), is_separator: true });
+                pi += 1;
+            } else {
+                let key = positional.get(pi + 1).and_then(|k| k.chars().next());
+                let command = positional.get(pi + 2).map(|c| c.to_string()).unwrap_or_default();
+                menu.items.push(crate::types::MenuItem { name: name.to_string(), key, command, is_separator: false });
+                pi += 3;
+            }
+        }
+        if !menu.items.is_empty() {
+            let _ = tx.send(CtrlReq::DisplayMenuDirect(menu));
+        }
     }
     "display-popup" | "popup" => {
         let close_on_exit = args.iter().any(|a| *a == "-E");
         let mut width: u16 = 80;
         let mut height: u16 = 24;
+        let mut skip_indices = std::collections::HashSet::new();
         let mut i = 0;
         while i < args.len() {
             match args[i] {
-                "-w" => { if let Some(v) = args.get(i+1) { width = v.trim_end_matches('%').parse().unwrap_or(80); i += 1; } }
-                "-h" => { if let Some(v) = args.get(i+1) { height = v.trim_end_matches('%').parse().unwrap_or(24); i += 1; } }
+                "-w" => { if let Some(v) = args.get(i+1) { width = v.trim_end_matches('%').parse().unwrap_or(80); skip_indices.insert(i); skip_indices.insert(i+1); i += 1; } }
+                "-h" => { if let Some(v) = args.get(i+1) { height = v.trim_end_matches('%').parse().unwrap_or(24); skip_indices.insert(i); skip_indices.insert(i+1); i += 1; } }
+                "-E" => { skip_indices.insert(i); }
                 _ => {}
             }
             i += 1;
         }
-        let content = args.iter().filter(|a| !a.starts_with('-')).cloned().collect::<Vec<&str>>().join(" ");
+        let content = args.iter().enumerate().filter(|(idx, a)| !skip_indices.contains(idx) && !a.starts_with('-')).map(|(_, a)| *a).collect::<Vec<&str>>().join(" ");
         let _ = tx.send(CtrlReq::DisplayPopup(content, width, height, close_on_exit));
     }
     "confirm-before" | "confirm" => {
@@ -1055,6 +1080,36 @@ match cmd {
         }
     }
     "clock-mode" => { let _ = tx.send(CtrlReq::ClockMode); }
+    // Overlay interaction commands (sent by client during active overlays)
+    "popup-input" => {
+        if let Some(encoded) = args.get(0) {
+            if let Some(decoded) = base64_decode(encoded) {
+                let _ = tx.send(CtrlReq::PopupInput(decoded.into_bytes()));
+            }
+        }
+    }
+    "popup-input-raw" => {
+        // Raw bytes (not base64) for single-byte key sequences
+        if let Some(encoded) = args.get(0) {
+            if let Some(decoded) = base64_decode(encoded) {
+                let _ = tx.send(CtrlReq::PopupInput(decoded.into_bytes()));
+            }
+        }
+    }
+    "overlay-close" => { let _ = tx.send(CtrlReq::OverlayClose); }
+    "confirm-respond" => {
+        let yes = args.get(0).map(|a| *a == "y" || *a == "yes").unwrap_or(false);
+        let _ = tx.send(CtrlReq::ConfirmRespond(yes));
+    }
+    "menu-select" => {
+        if let Some(idx) = args.get(0).and_then(|s| s.parse::<usize>().ok()) {
+            let _ = tx.send(CtrlReq::MenuSelect(idx));
+        }
+    }
+    "menu-navigate" => {
+        let delta = args.get(0).and_then(|s| s.parse::<i32>().ok()).unwrap_or(0);
+        let _ = tx.send(CtrlReq::MenuNavigate(delta));
+    }
     "show-messages" | "showmsgs" => {
         let (rtx, rrx) = mpsc::channel::<String>();
         let _ = tx.send(CtrlReq::ShowMessages(rtx));
@@ -1094,13 +1149,11 @@ match cmd {
         }
     }
     "if-shell" | "if" => {
-        // Re-parse from the original line to preserve quoted arguments
-        let if_parsed = parse_command_line(line.trim());
-        let format_mode = if_parsed.iter().any(|a| a == "-F" || a == "-bF" || a == "-Fb");
-        // Collect positional args (skip command name and flags)
-        let positional: Vec<&str> = if_parsed.iter().skip(1)
+        let format_mode = args.iter().any(|a| *a == "-F" || *a == "-bF" || *a == "-Fb");
+        // Collect positional args (skip flags like -b, -F, -bF)
+        let positional: Vec<&str> = args.iter()
             .filter(|a| !a.starts_with('-'))
-            .map(|s| s.as_str())
+            .copied()
             .collect();
         if positional.len() >= 2 {
             let condition = positional[0];
@@ -1108,13 +1161,26 @@ match cmd {
             let false_cmd = positional.get(2).copied();
             let success = if format_mode {
                 !condition.is_empty() && condition != "0"
+            } else if condition == "true" || condition == "1" {
+                true
+            } else if condition == "false" || condition == "0" {
+                false
             } else {
+                // Try pwsh first, fall back to cmd /c
                 std::process::Command::new("pwsh")
                     .args(["-NoProfile", "-Command", condition])
                     .stdout(std::process::Stdio::null())
                     .stderr(std::process::Stdio::null())
                     .status()
-                    .map(|s| s.success()).unwrap_or(false)
+                    .map(|s| s.success())
+                    .unwrap_or_else(|_| {
+                        std::process::Command::new("cmd")
+                            .args(["/c", condition])
+                            .stdout(std::process::Stdio::null())
+                            .stderr(std::process::Stdio::null())
+                            .status()
+                            .map(|s| s.success()).unwrap_or(false)
+                    })
             };
             let cmd_to_run = if success { Some(true_cmd) } else { false_cmd };
             if let Some(chosen) = cmd_to_run {

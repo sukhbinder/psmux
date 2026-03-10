@@ -1,7 +1,7 @@
 use std::io;
 use std::time::Instant;
 
-use crate::types::{AppState, Mode, Action, FocusDir, LayoutKind, MenuItem, Menu, PopupPty};
+use crate::types::{AppState, Mode, Action, FocusDir, LayoutKind, MenuItem, Menu, PopupPty, Node};
 use crate::tree::{compute_rects, kill_all_children};
 use crate::pane::{create_window, split_active, kill_active_pane};
 use crate::copy_mode::{enter_copy_mode, switch_with_copy_save, paste_latest,
@@ -475,11 +475,54 @@ pub fn execute_command_string(app: &mut AppState, cmd: &str) -> io::Result<()> {
                 else if parts.iter().any(|p| *p == "-L") { FocusDir::Left }
                 else if parts.iter().any(|p| *p == "-R") { FocusDir::Right }
                 else { return Ok(()); };
-            switch_with_copy_save(app, |app| {
+            // Zoom-aware directional navigation (tmux parity):
+            // If zoomed, check if there's a *direct* neighbor (no wrapping).
+            // If yes: cancel zoom and navigate to it.
+            // If no: no-op — stay zoomed on the current pane.
+            if app.zoom_saved.is_some() {
+                // Temporarily unzoom to compute real geometry
+                let saved = app.zoom_saved.take();
+                if let Some(ref s) = saved {
+                    let win = &mut app.windows[app.active_idx];
+                    for (p, sz) in s.iter() {
+                        if let Some(Node::Split { sizes, .. }) = crate::tree::get_split_mut(&mut win.root, p) { *sizes = sz.clone(); }
+                    }
+                }
+                crate::tree::resize_all_panes(app);
+                // Find direct neighbor (no wrapping)
                 let win = &app.windows[app.active_idx];
-                app.last_pane_path = win.active_path.clone();
-                crate::input::move_focus(app, dir);
-            });
+                let mut rects: Vec<(Vec<usize>, ratatui::layout::Rect)> = Vec::new();
+                crate::tree::compute_rects(&win.root, app.last_window_area, &mut rects);
+                let active_idx = rects.iter().position(|(path, _)| *path == win.active_path);
+                let has_neighbor = if let Some(ai) = active_idx {
+                    let (_, arect) = &rects[ai];
+                    crate::input::find_best_pane_in_direction(&rects, ai, arect, dir).is_some()
+                } else { false };
+                if has_neighbor {
+                    // Cancel zoom (already unzoomed) and navigate
+                    switch_with_copy_save(app, |app| {
+                        let win = &app.windows[app.active_idx];
+                        app.last_pane_path = win.active_path.clone();
+                        crate::input::move_focus(app, dir);
+                    });
+                } else {
+                    // No neighbor — re-zoom (restore saved zoom state)
+                    if let Some(s) = saved {
+                        let win = &mut app.windows[app.active_idx];
+                        for (p, sz) in s.iter() {
+                            if let Some(Node::Split { sizes, .. }) = crate::tree::get_split_mut(&mut win.root, p) { *sizes = sz.clone(); }
+                        }
+                        app.zoom_saved = Some(s);
+                    }
+                    crate::tree::resize_all_panes(app);
+                }
+            } else {
+                switch_with_copy_save(app, |app| {
+                    let win = &app.windows[app.active_idx];
+                    app.last_pane_path = win.active_path.clone();
+                    crate::input::move_focus(app, dir);
+                });
+            }
         }
         "last-pane" | "lastp" => {
             switch_with_copy_save(app, |app| {

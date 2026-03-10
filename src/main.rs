@@ -1586,7 +1586,11 @@ fn run_main() -> io::Result<()> {
                         // and dispatch the result command asynchronously (like tmux)
                         let cmd_false_bg = cmd_false.clone();
                         std::thread::spawn(move || {
-                            let success = {
+                            let success = if cond == "true" || cond == "1" {
+                                true
+                            } else if cond == "false" || cond == "0" {
+                                false
+                            } else {
                                 #[cfg(windows)]
                                 {
                                     std::process::Command::new("pwsh")
@@ -1595,7 +1599,14 @@ fn run_main() -> io::Result<()> {
                                         .stderr(std::process::Stdio::null())
                                         .status()
                                         .map(|s| s.success())
-                                        .unwrap_or(false)
+                                        .unwrap_or_else(|_| {
+                                            std::process::Command::new("cmd")
+                                                .args(["/c", &cond])
+                                                .stdout(std::process::Stdio::null())
+                                                .stderr(std::process::Stdio::null())
+                                                .status()
+                                                .map(|s| s.success()).unwrap_or(false)
+                                        })
                                 }
                                 #[cfg(not(windows))]
                                 {
@@ -1621,6 +1632,10 @@ fn run_main() -> io::Result<()> {
                     let success = if format_mode {
                         // Treat condition as format string - non-empty and non-zero is true
                         !cond.is_empty() && cond != "0"
+                    } else if cond == "true" || cond == "1" {
+                        true
+                    } else if cond == "false" || cond == "0" {
+                        false
                     } else {
                         // Run shell command - suppress stdout/stderr so it doesn't leak to terminal
                         #[cfg(windows)]
@@ -1631,7 +1646,14 @@ fn run_main() -> io::Result<()> {
                                 .stderr(std::process::Stdio::null())
                                 .status()
                                 .map(|s| s.success())
-                                .unwrap_or(false)
+                                .unwrap_or_else(|_| {
+                                    std::process::Command::new("cmd")
+                                        .args(["/c", &cond])
+                                        .stdout(std::process::Stdio::null())
+                                        .stderr(std::process::Stdio::null())
+                                        .status()
+                                        .map(|s| s.success()).unwrap_or(false)
+                                })
                         }
                         #[cfg(not(windows))]
                         {
@@ -2136,13 +2158,17 @@ fn run_main() -> io::Result<()> {
             }
             // display-menu - Display a menu
             "display-menu" | "menu" => {
-                let joined: String = cmd_args.iter().map(|s| s.as_str()).collect::<Vec<&str>>().join(" ");
+                let joined: String = cmd_args.iter().map(|s| {
+                    if s.contains(' ') || s.contains('"') { format!("\"{}\"" , s.replace('"', "\\\"")) } else { s.to_string() }
+                }).collect::<Vec<String>>().join(" ");
                 send_control(format!("{}\n", joined))?;
                 return Ok(());
             }
             // display-popup - Display a popup window
             "display-popup" | "popup" => {
-                let joined: String = cmd_args.iter().map(|s| s.as_str()).collect::<Vec<&str>>().join(" ");
+                let joined: String = cmd_args.iter().map(|s| {
+                    if s.contains(' ') || s.contains('"') { format!("\"{}\"" , s.replace('"', "\\\"")) } else { s.to_string() }
+                }).collect::<Vec<String>>().join(" ");
                 send_control(format!("{}\n", joined))?;
                 return Ok(());
             }
@@ -2160,7 +2186,9 @@ fn run_main() -> io::Result<()> {
             }
             // confirm-before - Ask for confirmation before running a command
             "confirm-before" | "confirm" => {
-                let joined: String = cmd_args.iter().map(|s| s.as_str()).collect::<Vec<&str>>().join(" ");
+                let joined: String = cmd_args.iter().map(|s| {
+                    if s.contains(' ') || s.contains('"') { format!("\"{}\"", s.replace('"', "\\\"")) } else { s.to_string() }
+                }).collect::<Vec<String>>().join(" ");
                 send_control(format!("{}\n", joined))?;
                 return Ok(());
             }

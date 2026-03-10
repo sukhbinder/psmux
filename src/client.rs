@@ -369,6 +369,20 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
     let mut keys_viewer_lines: Vec<String> = Vec::new();
     let mut keys_viewer_scroll: usize = 0;
 
+    // ── Server-side overlay state (updated each frame) ──
+    let mut srv_popup_active = false;
+    let mut srv_popup_command = String::new();
+    let mut srv_popup_width: u16 = 80;
+    let mut srv_popup_height: u16 = 24;
+    let mut srv_popup_lines: Vec<String> = Vec::new();
+    let mut srv_confirm_active = false;
+    let mut srv_confirm_prompt = String::new();
+    let mut srv_menu_active = false;
+    let mut srv_menu_title = String::new();
+    let mut srv_menu_selected: usize = 0;
+    let mut srv_menu_items: Vec<ServerMenuItem> = Vec::new();
+    let mut srv_display_panes = false;
+
     #[derive(serde::Deserialize, Default)]
     struct WinStatus { id: usize, name: String, active: bool, #[serde(default)] activity: bool, #[serde(default)] tab_text: String }
     
@@ -392,6 +406,17 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
         /// Whether the binding is repeatable
         #[serde(default)]
         r: bool,
+    }
+
+    /// A menu item from server-side MenuMode
+    #[derive(serde::Deserialize, Clone, Debug, Default)]
+    struct ServerMenuItem {
+        #[serde(default)]
+        name: Option<String>,
+        #[serde(default)]
+        key: Option<String>,
+        #[serde(default)]
+        sep: bool,
     }
 
     #[derive(serde::Deserialize)]
@@ -474,6 +499,35 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
         /// Repeat key timeout in ms (default: 500, synced from server)
         #[serde(default = "default_repeat_time")]
         repeat_time: u64,
+        // ── Server-side overlay state ──
+        /// Popup overlay active
+        #[serde(default)]
+        popup_active: bool,
+        #[serde(default)]
+        popup_command: Option<String>,
+        #[serde(default)]
+        popup_width: Option<u16>,
+        #[serde(default)]
+        popup_height: Option<u16>,
+        #[serde(default)]
+        popup_lines: Vec<String>,
+        /// Confirm overlay active
+        #[serde(default)]
+        confirm_active: bool,
+        #[serde(default)]
+        confirm_prompt: Option<String>,
+        /// Menu overlay active
+        #[serde(default)]
+        menu_active: bool,
+        #[serde(default)]
+        menu_title: Option<String>,
+        #[serde(default)]
+        menu_selected: usize,
+        #[serde(default)]
+        menu_items: Vec<ServerMenuItem>,
+        /// Display-panes overlay active
+        #[serde(default)]
+        display_panes: bool,
     }
 
     let mut cmd_batch: Vec<String> = Vec::new();
@@ -783,7 +837,108 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
 
                         // Overlay Esc must be checked BEFORE selection-Esc so that
                         // pressing Esc always closes the active overlay first.
-                        if matches!(key.code, KeyCode::Esc) && (command_input || renaming || pane_renaming || chooser || tree_chooser || session_chooser || confirm_cmd.is_some() || keys_viewer) {
+                        // ── Server-side overlay key handling ─────────────────
+                        // When a server overlay is active, intercept ALL keys and
+                        // forward them to the server via overlay-specific commands.
+                        if srv_popup_active {
+                            match key.code {
+                                KeyCode::Esc => { cmd_batch.push("overlay-close\n".into()); }
+                                KeyCode::Char(c) => {
+                                    let bytes = if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) {
+                                        vec![(c as u8) & 0x1F]
+                                    } else {
+                                        let mut buf = [0u8; 4];
+                                        let s = c.encode_utf8(&mut buf);
+                                        s.as_bytes().to_vec()
+                                    };
+                                    let encoded = crate::util::base64_encode(std::str::from_utf8(&bytes).unwrap_or(""));
+                                    cmd_batch.push(format!("popup-input {}\n", encoded));
+                                }
+                                KeyCode::Enter => {
+                                    let encoded = crate::util::base64_encode("\r");
+                                    cmd_batch.push(format!("popup-input {}\n", encoded));
+                                }
+                                KeyCode::Backspace => {
+                                    let encoded = crate::util::base64_encode("\x7f");
+                                    cmd_batch.push(format!("popup-input {}\n", encoded));
+                                }
+                                KeyCode::Tab => {
+                                    let encoded = crate::util::base64_encode("\t");
+                                    cmd_batch.push(format!("popup-input {}\n", encoded));
+                                }
+                                KeyCode::Up => {
+                                    let encoded = crate::util::base64_encode("\x1b[A");
+                                    cmd_batch.push(format!("popup-input {}\n", encoded));
+                                }
+                                KeyCode::Down => {
+                                    let encoded = crate::util::base64_encode("\x1b[B");
+                                    cmd_batch.push(format!("popup-input {}\n", encoded));
+                                }
+                                KeyCode::Right => {
+                                    let encoded = crate::util::base64_encode("\x1b[C");
+                                    cmd_batch.push(format!("popup-input {}\n", encoded));
+                                }
+                                KeyCode::Left => {
+                                    let encoded = crate::util::base64_encode("\x1b[D");
+                                    cmd_batch.push(format!("popup-input {}\n", encoded));
+                                }
+                                KeyCode::Home => {
+                                    let encoded = crate::util::base64_encode("\x1b[H");
+                                    cmd_batch.push(format!("popup-input {}\n", encoded));
+                                }
+                                KeyCode::End => {
+                                    let encoded = crate::util::base64_encode("\x1b[F");
+                                    cmd_batch.push(format!("popup-input {}\n", encoded));
+                                }
+                                KeyCode::PageUp => {
+                                    let encoded = crate::util::base64_encode("\x1b[5~");
+                                    cmd_batch.push(format!("popup-input {}\n", encoded));
+                                }
+                                KeyCode::PageDown => {
+                                    let encoded = crate::util::base64_encode("\x1b[6~");
+                                    cmd_batch.push(format!("popup-input {}\n", encoded));
+                                }
+                                KeyCode::Delete => {
+                                    let encoded = crate::util::base64_encode("\x1b[3~");
+                                    cmd_batch.push(format!("popup-input {}\n", encoded));
+                                }
+                                _ => {}
+                            }
+                        }
+                        else if srv_confirm_active {
+                            match key.code {
+                                KeyCode::Char('y') | KeyCode::Char('Y') => {
+                                    cmd_batch.push("confirm-respond y\n".into());
+                                }
+                                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                                    cmd_batch.push("confirm-respond n\n".into());
+                                }
+                                _ => {} // Ignore other keys during confirm
+                            }
+                        }
+                        else if srv_menu_active {
+                            match key.code {
+                                KeyCode::Up | KeyCode::Char('k') => { cmd_batch.push("menu-navigate -1\n".into()); }
+                                KeyCode::Down | KeyCode::Char('j') => { cmd_batch.push("menu-navigate 1\n".into()); }
+                                KeyCode::Enter => {
+                                    cmd_batch.push(format!("menu-select {}\n", srv_menu_selected));
+                                }
+                                KeyCode::Esc | KeyCode::Char('q') => { cmd_batch.push("overlay-close\n".into()); }
+                                _ => {}
+                            }
+                        }
+                        else if srv_display_panes {
+                            match key.code {
+                                KeyCode::Char(d) if d.is_ascii_digit() => {
+                                    let idx = d.to_digit(10).unwrap() as usize;
+                                    cmd_batch.push(format!("select-pane -t {}\n", idx));
+                                    cmd_batch.push("overlay-close\n".into());
+                                }
+                                KeyCode::Esc => { cmd_batch.push("overlay-close\n".into()); }
+                                _ => {}
+                            }
+                        }
+                        else if matches!(key.code, KeyCode::Esc) && (command_input || renaming || pane_renaming || chooser || tree_chooser || session_chooser || confirm_cmd.is_some() || keys_viewer) {
                             command_input = false;
                             renaming = false;
                             pane_renaming = false;
@@ -1639,7 +1794,7 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
         // Rate-limit dump-state requests to avoid flooding the server.
         // dump_in_flight prevents >1 concurrent request; the interval check
         // ensures we don't re-request faster than ~100fps when typing.
-        let overlays_active = command_input || renaming || pane_renaming || chooser || tree_chooser || session_chooser || keys_viewer || confirm_cmd.is_some();
+        let overlays_active = command_input || renaming || pane_renaming || chooser || tree_chooser || session_chooser || keys_viewer || confirm_cmd.is_some() || srv_popup_active || srv_confirm_active || srv_menu_active || srv_display_panes;
         let should_dump = if force_dump || size_changed {
             true
         } else if typing_active {
@@ -1696,6 +1851,19 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
         let dim_preds = state.prediction_dimming;
         let clock_active = state.clock_mode;
         let state_cursor_style_code = state.cursor_style_code;
+        // Server-side overlay state (update persistent variables)
+        srv_popup_active = state.popup_active;
+        srv_popup_command = state.popup_command.unwrap_or_default();
+        srv_popup_width = state.popup_width.unwrap_or(80);
+        srv_popup_height = state.popup_height.unwrap_or(24);
+        srv_popup_lines = state.popup_lines;
+        srv_confirm_active = state.confirm_active;
+        srv_confirm_prompt = state.confirm_prompt.unwrap_or_default();
+        srv_menu_active = state.menu_active;
+        srv_menu_title = state.menu_title.unwrap_or_default();
+        srv_menu_selected = state.menu_selected;
+        srv_menu_items = state.menu_items;
+        srv_display_panes = state.display_panes;
 
         // ── Extract active pane's cursor state ──────────────────────
         // We collect cursor info here but DON'T use
@@ -2593,10 +2761,113 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                 f.render_widget(para, overlay.inner(oa));
             }
 
+            // ── Server-side overlay rendering ────────────────────────
+            if srv_popup_active {
+                let w = srv_popup_width.min(content_chunk.width.saturating_sub(2));
+                let h = srv_popup_height.min(content_chunk.height.saturating_sub(2));
+                let popup_area = Rect {
+                    x: content_chunk.x + (content_chunk.width.saturating_sub(w)) / 2,
+                    y: content_chunk.y + (content_chunk.height.saturating_sub(h)) / 2,
+                    width: w,
+                    height: h,
+                };
+                let title = if srv_popup_command.is_empty() { "Popup" } else { &srv_popup_command };
+                let block = Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(Color::Yellow))
+                    .title(title);
+                let mut lines: Vec<Line<'static>> = Vec::new();
+                for line_str in &srv_popup_lines {
+                    lines.push(Line::from(line_str.clone()));
+                }
+                let para = Paragraph::new(Text::from(lines)).block(block);
+                f.render_widget(Clear, popup_area);
+                f.render_widget(para, popup_area);
+            }
+            if srv_confirm_active {
+                let overlay = Block::default().borders(Borders::ALL).title("confirm");
+                let oa = centered_rect(60, 3, content_chunk);
+                f.render_widget(Clear, oa);
+                f.render_widget(&overlay, oa);
+                let para = Paragraph::new(srv_confirm_prompt.clone());
+                f.render_widget(para, overlay.inner(oa));
+            }
+            if srv_menu_active {
+                let sel_style = crate::rendering::parse_tmux_style(&mode_style_str);
+                let title_str = if srv_menu_title.is_empty() { "Menu".to_string() } else { srv_menu_title.clone() };
+                let overlay = Block::default().borders(Borders::ALL).title(title_str).border_style(sel_style);
+                let item_count = srv_menu_items.len();
+                let menu_h = ((item_count as u16).saturating_add(2)).max(3).min(content_chunk.height.saturating_sub(2));
+                let oa = centered_rect(50, menu_h, content_chunk);
+                f.render_widget(Clear, oa);
+                f.render_widget(&overlay, oa);
+                let inner = overlay.inner(oa);
+                let mut lines: Vec<Line<'static>> = Vec::new();
+                for (i, item) in srv_menu_items.iter().enumerate() {
+                    if item.sep {
+                        lines.push(Line::from("─".repeat(inner.width as usize)));
+                    } else {
+                        let name = item.name.clone().unwrap_or_default();
+                        let key_str = item.key.clone().unwrap_or_default();
+                        let label = if key_str.is_empty() { name } else { format!("{} ({})", name, key_str) };
+                        if i == srv_menu_selected {
+                            lines.push(Line::from(Span::styled(label, sel_style)));
+                        } else {
+                            lines.push(Line::from(label));
+                        }
+                    }
+                }
+                let para = Paragraph::new(Text::from(lines));
+                f.render_widget(para, inner);
+            }
+            if srv_display_panes {
+                // Render pane numbers overlay (like tmux display-panes)
+                fn collect_leaf_rects(node: &LayoutJson, area: Rect, out: &mut Vec<Rect>) {
+                    match node {
+                        LayoutJson::Leaf { .. } => { out.push(area); }
+                        LayoutJson::Split { kind, sizes, children } => {
+                            let effective_sizes: Vec<u16> = if sizes.len() == children.len() {
+                                sizes.clone()
+                            } else {
+                                vec![(100 / children.len().max(1)) as u16; children.len()]
+                            };
+                            let is_horizontal = kind == "Horizontal";
+                            let rects = crate::tree::split_with_gaps(is_horizontal, &effective_sizes, area);
+                            for (i, child) in children.iter().enumerate() {
+                                if i < rects.len() { collect_leaf_rects(child, rects[i], out); }
+                            }
+                        }
+                    }
+                }
+                let mut leaf_rects = Vec::new();
+                collect_leaf_rects(&root, content_chunk, &mut leaf_rects);
+                for (idx, prect) in leaf_rects.iter().enumerate() {
+                    if prect.width >= 7 && prect.height >= 3 {
+                        let bw = 7u16; let bh = 3u16;
+                        let bx = prect.x + prect.width.saturating_sub(bw) / 2;
+                        let by = prect.y + prect.height.saturating_sub(bh) / 2;
+                        let b = Rect { x: bx, y: by, width: bw, height: bh };
+                        let pane_sel_style = Style::default().fg(Color::Yellow).bg(Color::Black).add_modifier(Modifier::BOLD);
+                        let block = Block::default().borders(Borders::ALL).style(pane_sel_style);
+                        let inner = block.inner(b);
+                        let disp = idx.to_string();
+                        let para = Paragraph::new(Line::from(Span::styled(
+                            format!(" {} ", disp),
+                            pane_sel_style,
+                        ))).alignment(Alignment::Center);
+                        f.render_widget(Clear, b);
+                        f.render_widget(block, b);
+                        f.render_widget(para, inner);
+                    }
+                }
+            }
+
         })?;
         if client_log_enabled() {
-            client_log("draw", &format!("draw OK, render={}us",
-                _t_parse.elapsed().as_micros().saturating_sub(_parse_us as u128)));
+            client_log("draw", &format!("draw OK, render={}us overlays: popup={} confirm={} menu={} display_panes={}",
+                _t_parse.elapsed().as_micros().saturating_sub(_parse_us as u128),
+                srv_popup_active, srv_confirm_active, srv_menu_active, srv_display_panes
+            ));
         }
 
         // ── Post-draw: emit buffered OSC 52 clipboard ────────────────

@@ -1284,9 +1284,22 @@ fn parse_if_shell(app: &mut AppState, line: &str) {
 
     let success = if format_mode {
         !condition.is_empty() && condition != "0"
+    } else if condition == "true" || condition == "1" {
+        true
+    } else if condition == "false" || condition == "0" {
+        false
     } else {
         #[cfg(windows)]
-        { std::process::Command::new("pwsh").args(["-NoProfile", "-Command", condition]).status().map(|s| s.success()).unwrap_or(false) }
+        {
+            std::process::Command::new("pwsh")
+                .args(["-NoProfile", "-Command", condition])
+                .status().map(|s| s.success())
+                .unwrap_or_else(|_| {
+                    std::process::Command::new("cmd")
+                        .args(["/c", condition])
+                        .status().map(|s| s.success()).unwrap_or(false)
+                })
+        }
         #[cfg(not(windows))]
         { std::process::Command::new("sh").args(["-c", condition]).status().map(|s| s.success()).unwrap_or(false) }
     };

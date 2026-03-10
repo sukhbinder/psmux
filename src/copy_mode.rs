@@ -902,17 +902,16 @@ pub fn capture_active_pane_range(app: &mut AppState, s: Option<i32>, e: Option<i
     let p = match active_pane_mut(&mut win.root, &win.active_path) { Some(p) => p, None => return Ok(None) };
     let parser = match p.term.lock() { Ok(g) => g, Err(_) => return Ok(None) };
     let screen = parser.screen();
-    // Negative values are relative to the cursor row (tmux behavior):
-    // -S -5 means "5 lines above the cursor", -E -1 means "1 line above cursor"
-    let (cursor_row, _) = screen.cursor_position();
-    let cursor = cursor_row as i32;
+    // Negative values are relative to the bottom of the visible area (tmux behavior):
+    // -S -3 means "start 3 lines from the bottom", -E -1 means "1 line from bottom"
+    let bottom = p.last_rows.saturating_sub(1) as i32;
     let start = match s {
-        Some(v) if v < 0 => (cursor + v + 1).max(0) as u16,
+        Some(v) if v < 0 => (bottom + v + 1).max(0) as u16,
         Some(v) => (v as u16).min(p.last_rows.saturating_sub(1)),
         None => 0,
     };
     let end = match e {
-        Some(v) if v < 0 => (cursor + v + 1).max(0) as u16,
+        Some(v) if v < 0 => (bottom + v + 1).max(0) as u16,
         Some(v) => (v as u16).min(p.last_rows.saturating_sub(1)),
         None => p.last_rows.saturating_sub(1),
     };
@@ -933,15 +932,14 @@ pub fn capture_active_pane_styled(app: &mut AppState, s: Option<i32>, e: Option<
     let p = match active_pane_mut(&mut win.root, &win.active_path) { Some(p) => p, None => return Ok(None) };
     let parser = match p.term.lock() { Ok(g) => g, Err(_) => return Ok(None) };
     let screen = parser.screen();
-    let (cursor_row, _) = screen.cursor_position();
-    let cursor = cursor_row as i32;
+    let bottom = p.last_rows.saturating_sub(1) as i32;
     let start_row = match s {
-        Some(v) if v < 0 => (cursor + v + 1).max(0) as u16,
+        Some(v) if v < 0 => (bottom + v + 1).max(0) as u16,
         Some(v) => (v as u16).min(p.last_rows.saturating_sub(1)),
         None => 0,
     };
     let end_row = match e {
-        Some(v) if v < 0 => (cursor + v + 1).max(0) as u16,
+        Some(v) if v < 0 => (bottom + v + 1).max(0) as u16,
         Some(v) => (v as u16).min(p.last_rows.saturating_sub(1)),
         None => p.last_rows.saturating_sub(1),
     };
