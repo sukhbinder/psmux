@@ -404,10 +404,19 @@ pub fn parse_option_value(app: &mut AppState, rest: &str, _is_global: bool) {
     if parts.is_empty() { return; }
     
     let key = parts[0].trim();
-    let value = if parts.len() > 1 { 
-        parts[1].trim().trim_matches('"').trim_matches('\'')
-    } else { 
-        "" 
+    let value = if parts.len() > 1 {
+        let v = parts[1].trim();
+        // Only strip quotes when the entire value is wrapped in matching
+        // quotes.  Preserves values like `"path with spaces" --login`.
+        if (v.starts_with('"') && v.ends_with('"'))
+            || (v.starts_with('\'') && v.ends_with('\''))
+        {
+            &v[1..v.len() - 1]
+        } else {
+            v
+        }
+    } else {
+        ""
     };
     
     match key {

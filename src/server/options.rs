@@ -245,10 +245,18 @@ pub(crate) fn apply_set_option(app: &mut AppState, option: &str, value: &str, qu
         "set-titles" => { app.set_titles = matches!(value, "on" | "true" | "1"); }
         "set-titles-string" => { app.set_titles_string = value.to_string(); }
         "default-command" | "default-shell" => {
-            // Strip surrounding quotes: users may write "C:/Program Files/..."
-            // in the config or at the command prompt; the path itself should not
-            // contain literal quote characters.
-            app.default_shell = value.trim_matches('"').trim_matches('\'').to_string();
+            // Strip surrounding quotes only when the entire value is wrapped
+            // in matching quotes.  This handles `"C:/Program Files/..."` but
+            // preserves `"C:/Program Files/..." --login` (quoted path + args).
+            let v = value.trim();
+            let stripped = if (v.starts_with('"') && v.ends_with('"'))
+                || (v.starts_with('\'') && v.ends_with('\''))
+            {
+                &v[1..v.len() - 1]
+            } else {
+                v
+            };
+            app.default_shell = stripped.to_string();
         }
         "word-separators" => { app.word_separators = value.to_string(); }
         "aggressive-resize" => { app.aggressive_resize = matches!(value, "on" | "true" | "1"); }
