@@ -244,7 +244,12 @@ pub(crate) fn apply_set_option(app: &mut AppState, option: &str, value: &str, qu
         "exit-empty" => { app.exit_empty = matches!(value, "on" | "true" | "1"); }
         "set-titles" => { app.set_titles = matches!(value, "on" | "true" | "1"); }
         "set-titles-string" => { app.set_titles_string = value.to_string(); }
-        "default-command" | "default-shell" => { app.default_shell = value.to_string(); }
+        "default-command" | "default-shell" => {
+            // Strip surrounding quotes: users may write "C:/Program Files/..."
+            // in the config or at the command prompt; the path itself should not
+            // contain literal quote characters.
+            app.default_shell = value.trim_matches('"').trim_matches('\'').to_string();
+        }
         "word-separators" => { app.word_separators = value.to_string(); }
         "aggressive-resize" => { app.aggressive_resize = matches!(value, "on" | "true" | "1"); }
         "monitor-activity" => { app.monitor_activity = matches!(value, "on" | "true" | "1"); }
