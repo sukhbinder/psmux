@@ -279,6 +279,98 @@ if ($null -eq $json) {
 Start-Sleep -Milliseconds 500
 
 # ============================================================
+# Test 9: send-keys dismisses confirm-before overlay
+# ============================================================
+Write-Test "send-keys 'n' dismisses confirm-before overlay"
+& $PSMUX confirm-before -t $SESSION -p "Dismiss test?" "echo yes" 2>$null
+Start-Sleep -Milliseconds 500
+$json = Get-DumpState -Session $SESSION
+$state = $json | ConvertFrom-Json -ErrorAction SilentlyContinue
+if ($state.confirm_active -eq $true) {
+    Write-Info "  confirm overlay is active, sending 'n' via send-keys..."
+    & $PSMUX send-keys -t $SESSION n 2>$null
+    Start-Sleep -Milliseconds 500
+    $json2 = Get-DumpState -Session $SESSION
+    $state2 = $json2 | ConvertFrom-Json -ErrorAction SilentlyContinue
+    if ($state2.confirm_active -ne $true) {
+        Write-Pass "send-keys 'n' dismissed confirm overlay"
+    } else {
+        Write-Fail "confirm overlay still active after send-keys 'n'"
+    }
+} else {
+    Write-Fail "confirm overlay not active (cannot test dismissal)"
+}
+
+# ============================================================
+# Test 10: send-keys Escape dismisses popup overlay
+# ============================================================
+Write-Test "send-keys Escape dismisses popup overlay"
+& $PSMUX display-popup -t $SESSION -w 30 -h 8 "pwsh -NoProfile -Command Start-Sleep 30" 2>$null
+Start-Sleep -Seconds 1
+$json = Get-DumpState -Session $SESSION
+$state = $json | ConvertFrom-Json -ErrorAction SilentlyContinue
+if ($state.popup_active -eq $true) {
+    Write-Info "  popup overlay is active, sending Escape via send-keys..."
+    & $PSMUX send-keys -t $SESSION Escape 2>$null
+    Start-Sleep -Milliseconds 500
+    $json2 = Get-DumpState -Session $SESSION
+    $state2 = $json2 | ConvertFrom-Json -ErrorAction SilentlyContinue
+    if ($state2.popup_active -ne $true) {
+        Write-Pass "send-keys Escape dismissed popup overlay"
+    } else {
+        Write-Fail "popup overlay still active after send-keys Escape"
+    }
+} else {
+    Write-Fail "popup overlay not active (cannot test dismissal)"
+}
+
+# ============================================================
+# Test 11: send-keys Escape dismisses menu overlay
+# ============================================================
+Write-Test "send-keys Escape dismisses menu overlay"
+& $PSMUX display-menu -t $SESSION -T "DismissTest" "Item1" a "echo a" 2>$null
+Start-Sleep -Milliseconds 500
+$json = Get-DumpState -Session $SESSION
+$state = $json | ConvertFrom-Json -ErrorAction SilentlyContinue
+if ($state.menu_active -eq $true) {
+    Write-Info "  menu overlay is active, sending Escape via send-keys..."
+    & $PSMUX send-keys -t $SESSION Escape 2>$null
+    Start-Sleep -Milliseconds 500
+    $json2 = Get-DumpState -Session $SESSION
+    $state2 = $json2 | ConvertFrom-Json -ErrorAction SilentlyContinue
+    if ($state2.menu_active -ne $true) {
+        Write-Pass "send-keys Escape dismissed menu overlay"
+    } else {
+        Write-Fail "menu overlay still active after send-keys Escape"
+    }
+} else {
+    Write-Fail "menu overlay not active (cannot test dismissal)"
+}
+
+# ============================================================
+# Test 12: send-keys dismisses clock-mode overlay
+# ============================================================
+Write-Test "send-keys 'q' dismisses clock-mode overlay"
+& $PSMUX clock-mode -t $SESSION 2>$null
+Start-Sleep -Milliseconds 500
+$json = Get-DumpState -Session $SESSION
+$state = $json | ConvertFrom-Json -ErrorAction SilentlyContinue
+if ($state.clock_mode -eq $true) {
+    Write-Info "  clock overlay is active, sending 'q' via send-keys..."
+    & $PSMUX send-keys -t $SESSION q 2>$null
+    Start-Sleep -Milliseconds 500
+    $json2 = Get-DumpState -Session $SESSION
+    $state2 = $json2 | ConvertFrom-Json -ErrorAction SilentlyContinue
+    if ($state2.clock_mode -ne $true) {
+        Write-Pass "send-keys 'q' dismissed clock-mode overlay"
+    } else {
+        Write-Fail "clock-mode overlay still active after send-keys 'q'"
+    }
+} else {
+    Write-Fail "clock-mode overlay not active (cannot test dismissal)"
+}
+
+# ============================================================
 # CLEANUP
 # ============================================================
 Write-Host ""
@@ -306,9 +398,13 @@ Write-Host "  5. display-panes: display_panes=true in JSON"
 Write-Host "  6. clock-mode: clock_mode=true in JSON"
 Write-Host "  7. Overlay dismiss: all overlay fields cleared"
 Write-Host "  8. Popup content: PTY output present in popup_lines"
+Write-Host "  9. send-keys n dismisses confirm-before"
+Write-Host " 10. send-keys Escape dismisses popup"
+Write-Host " 11. send-keys Escape dismisses menu"
+Write-Host " 12. send-keys q dismisses clock-mode"
 Write-Host ""
-Write-Host "These tests verify overlay state reaches the wire protocol."
-Write-Host "If these pass, the client WILL render the overlays."
+Write-Host "Tests 1-8 verify overlay state reaches the wire protocol."
+Write-Host "Tests 9-12 verify send-keys interacts with active overlays."
 Write-Host ("=" * 70)
 
 if ($script:TestsFailed -gt 0) { exit 1 }

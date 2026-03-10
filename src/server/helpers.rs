@@ -91,6 +91,24 @@ pub(crate) fn combined_data_version(app: &AppState) -> u64 {
     if let Some(win) = app.windows.get(app.active_idx) {
         walk(&win.root, &mut v);
     }
+    // Include mode discriminant so overlay state changes (PopupMode, MenuMode,
+    // ConfirmMode, PaneChooser, ClockMode) always invalidate the cached version.
+    // Without this, the NC optimization could return stale frames that lack
+    // overlay fields, causing overlays to not render on the client.
+    let mode_tag: u64 = match &app.mode {
+        crate::types::Mode::Passthrough => 0,
+        crate::types::Mode::Prefix { .. } => 1,
+        crate::types::Mode::CopyMode => 2,
+        crate::types::Mode::CopySearch { .. } => 3,
+        crate::types::Mode::ClockMode => 4,
+        crate::types::Mode::PopupMode { .. } => 5,
+        crate::types::Mode::ConfirmMode { .. } => 6,
+        crate::types::Mode::MenuMode { .. } => 7,
+        crate::types::Mode::PaneChooser { .. } => 8,
+        crate::types::Mode::BufferChooser { .. } => 9,
+        _ => 10,
+    };
+    v = v.wrapping_add(mode_tag.wrapping_mul(0x1_0000_0000));
     v
 }
 

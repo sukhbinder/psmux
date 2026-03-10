@@ -382,6 +382,7 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
     let mut srv_menu_selected: usize = 0;
     let mut srv_menu_items: Vec<ServerMenuItem> = Vec::new();
     let mut srv_display_panes = false;
+    let mut clock_active = false;
 
     #[derive(serde::Deserialize, Default)]
     struct WinStatus { id: usize, name: String, active: bool, #[serde(default)] activity: bool, #[serde(default)] tab_text: String }
@@ -1794,7 +1795,7 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
         // Rate-limit dump-state requests to avoid flooding the server.
         // dump_in_flight prevents >1 concurrent request; the interval check
         // ensures we don't re-request faster than ~100fps when typing.
-        let overlays_active = command_input || renaming || pane_renaming || chooser || tree_chooser || session_chooser || keys_viewer || confirm_cmd.is_some() || srv_popup_active || srv_confirm_active || srv_menu_active || srv_display_panes;
+        let overlays_active = command_input || renaming || pane_renaming || chooser || tree_chooser || session_chooser || keys_viewer || confirm_cmd.is_some() || srv_popup_active || srv_confirm_active || srv_menu_active || srv_display_panes || clock_active;
         let should_dump = if force_dump || size_changed {
             true
         } else if typing_active {
@@ -1849,7 +1850,7 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
         last_tree = state.tree;
         let base_index = state.base_index;
         let dim_preds = state.prediction_dimming;
-        let clock_active = state.clock_mode;
+        clock_active = state.clock_mode;
         let state_cursor_style_code = state.cursor_style_code;
         // Server-side overlay state (update persistent variables)
         srv_popup_active = state.popup_active;

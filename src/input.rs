@@ -2017,6 +2017,70 @@ pub fn send_text_to_active(app: &mut AppState, text: &str) -> io::Result<()> {
         app.mode = Mode::Passthrough;
         return Ok(());
     }
+    // Route input to active overlay (so CLI send-keys can interact with overlays)
+    if matches!(app.mode, Mode::PopupMode { .. }) {
+        // Escape (\x1b alone) closes popup; other text goes to popup PTY
+        if text == "\x1b" {
+            app.mode = Mode::Passthrough;
+            return Ok(());
+        }
+        if let Mode::PopupMode { ref mut popup_pty, .. } = app.mode {
+            if let Some(ref mut pty) = popup_pty {
+                let _ = pty.writer.write_all(text.as_bytes());
+                let _ = pty.writer.flush();
+            }
+        }
+        return Ok(());
+    }
+    if matches!(app.mode, Mode::ConfirmMode { .. }) {
+        for c in text.chars() {
+            match c {
+                'y' | 'Y' => {
+                    if let Mode::ConfirmMode { ref command, .. } = app.mode {
+                        let cmd = command.clone();
+                        app.mode = Mode::Passthrough;
+                        crate::config::parse_config_line(app, &cmd);
+                    }
+                    return Ok(());
+                }
+                'n' | 'N' => {
+                    app.mode = Mode::Passthrough;
+                    return Ok(());
+                }
+                _ => {} // Ignore other chars during confirm
+            }
+        }
+        return Ok(());
+    }
+    if matches!(app.mode, Mode::MenuMode { .. }) {
+        // Escape closes menu; other text is ignored (menu is navigated via send-key)
+        if text == "\x1b" {
+            app.mode = Mode::Passthrough;
+        }
+        return Ok(());
+    }
+    if matches!(app.mode, Mode::PaneChooser { .. }) {
+        // Escape closes display-panes
+        if text == "\x1b" {
+            app.mode = Mode::Passthrough;
+            return Ok(());
+        }
+        // In display-panes mode, handle digit selection
+        for c in text.chars() {
+            if c.is_ascii_digit() {
+                let idx = c.to_digit(10).unwrap() as usize;
+                if let Some((_, path)) = app.display_map.iter().find(|(d, _)| *d == idx) {
+                    let path = path.clone();
+                    if let Some(win) = app.windows.get_mut(app.active_idx) {
+                        win.active_path = path;
+                    }
+                }
+                app.mode = Mode::Passthrough;
+                return Ok(());
+            }
+        }
+        return Ok(());
+    }
     // In copy mode, interpret characters as copy-mode actions (never send to PTY)
     if matches!(app.mode, Mode::CopyMode) {
         for c in text.chars() {
@@ -2163,6 +2227,90 @@ pub fn send_key_to_active(app: &mut AppState, k: &str) -> io::Result<()> {
     // In clock mode, any key exits back to passthrough
     if matches!(app.mode, Mode::ClockMode) {
         app.mode = Mode::Passthrough;
+        return Ok(());
+    }
+    // Route named keys to active overlay (so CLI send-keys can interact with overlays)
+    if matches!(app.mode, Mode::PopupMode { .. }) {
+        // Map named keys to VT sequences for the popup PTY
+        let seq = match k {
+            "enter" => Some("\r"),
+            "esc" | "escape" => {
+                app.mode = Mode::Passthrough;
+                return Ok(());
+            }
+            "tab" => Some("\t"),
+            "backspace" | "bspace" => Some("\x7f"),
+            "up" => Some("\x1b[A"),
+            "down" => Some("\x1b[B"),
+            "right" => Some("\x1b[C"),
+            "left" => Some("\x1b[D"),
+            "home" => Some("\x1b[H"),
+            "end" => Some("\x1b[F"),
+            "pageup" | "ppage" => Some("\x1b[5~"),
+            "pagedown" | "npage" => Some("\x1b[6~"),
+            "delete" | "dc" => Some("\x1b[3~"),
+            "space" => Some(" "),
+            _ => None,
+        };
+        if let Some(seq) = seq {
+            if let Mode::PopupMode { ref mut popup_pty, .. } = app.mode {
+                if let Some(ref mut pty) = popup_pty {
+                    let _ = pty.writer.write_all(seq.as_bytes());
+                    let _ = pty.writer.flush();
+                }
+            }
+        }
+        return Ok(());
+    }
+    if matches!(app.mode, Mode::ConfirmMode { .. }) {
+        match k {
+            "esc" | "escape" => {
+                app.mode = Mode::Passthrough;
+            }
+            _ => {} // y/n handled via send_text_to_active
+        }
+        return Ok(());
+    }
+    if matches!(app.mode, Mode::MenuMode { .. }) {
+        match k {
+            "up" => {
+                if let Mode::MenuMode { ref mut menu } = app.mode {
+                    if menu.selected > 0 { menu.selected -= 1; }
+                }
+            }
+            "down" => {
+                if let Mode::MenuMode { ref mut menu } = app.mode {
+                    let len = menu.items.len();
+                    if menu.selected + 1 < len { menu.selected += 1; }
+                }
+            }
+            "enter" => {
+                if let Mode::MenuMode { ref menu } = app.mode {
+                    if let Some(item) = menu.items.get(menu.selected) {
+                        if !item.is_separator && !item.command.is_empty() {
+                            let cmd = item.command.clone();
+                            app.mode = Mode::Passthrough;
+                            crate::config::parse_config_line(app, &cmd);
+                            return Ok(());
+                        }
+                    }
+                }
+                app.mode = Mode::Passthrough;
+            }
+            "esc" | "escape" | "q" => {
+                app.mode = Mode::Passthrough;
+            }
+            _ => {}
+        }
+        return Ok(());
+    }
+    if matches!(app.mode, Mode::PaneChooser { .. }) {
+        match k {
+            "esc" | "escape" => {
+                app.mode = Mode::Passthrough;
+            }
+            _ => {}
+        }
         return Ok(());
     }
     // --- Copy-search mode: handle esc/enter/backspace ---
