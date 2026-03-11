@@ -632,6 +632,7 @@ pub enum CtrlReq {
     SplitWindow(LayoutKind, Option<String>, bool, Option<String>, Option<u16>, mpsc::Sender<String>),  // kind, cmd, detached, start_dir, size_percent, error_resp
     SplitWindowPrint(LayoutKind, Option<String>, bool, Option<String>, Option<u16>, Option<String>, mpsc::Sender<String>),  // kind, cmd, detached, start_dir, size_percent, format, resp
     KillPane,
+    KillPaneById(usize),
     CapturePane(mpsc::Sender<String>),
     CapturePaneStyled(mpsc::Sender<String>, Option<i32>, Option<i32>),
     FocusWindow(usize),

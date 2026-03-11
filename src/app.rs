@@ -17,7 +17,7 @@ use chrono::Local;
 use crate::types::{AppState, CtrlReq, LayoutKind, Mode};
 use crate::tree::{active_pane_mut, compute_rects, resize_all_panes, kill_all_children,
     find_window_index_by_id, focus_pane_by_id, focus_pane_by_index, reap_children};
-use crate::pane::{create_window, split_active_with_command, kill_active_pane};
+use crate::pane::{create_window, split_active_with_command, kill_active_pane, kill_pane_by_id};
 use crate::input::{handle_key, handle_mouse, send_text_to_active, send_key_to_active, send_paste_to_active};
 use crate::rendering::{render_window, parse_status, centered_rect};
 use crate::style::{parse_tmux_style, parse_inline_styles, spans_visual_width};
@@ -423,18 +423,25 @@ pub fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<
                         let _ = tx.send(CtrlReq::FocusWindowTemp(wid));
                     }
                 }
-                if let Some(pid) = target_pane {
-                    if is_focus_cmd {
-                        if pane_is_id {
-                            let _ = tx.send(CtrlReq::FocusPane(pid));
+                let targeted_kill_pane_id = if matches!(cmd, "kill-pane") && pane_is_id {
+                    target_pane
+                } else {
+                    None
+                };
+                if targeted_kill_pane_id.is_none() {
+                    if let Some(pid) = target_pane {
+                        if is_focus_cmd {
+                            if pane_is_id {
+                                let _ = tx.send(CtrlReq::FocusPane(pid));
+                            } else {
+                                let _ = tx.send(CtrlReq::FocusPaneByIndex(pid));
+                            }
                         } else {
-                            let _ = tx.send(CtrlReq::FocusPaneByIndex(pid));
-                        }
-                    } else {
-                        if pane_is_id {
-                            let _ = tx.send(CtrlReq::FocusPaneTemp(pid));
-                        } else {
-                            let _ = tx.send(CtrlReq::FocusPaneByIndexTemp(pid));
+                            if pane_is_id {
+                                let _ = tx.send(CtrlReq::FocusPaneTemp(pid));
+                            } else {
+                                let _ = tx.send(CtrlReq::FocusPaneByIndexTemp(pid));
+                            }
                         }
                     }
                 }
@@ -461,7 +468,15 @@ pub fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<
                         let _ = write!(stream, "OK\n");
                         let _ = stream.flush();
                     }
-                    "kill-pane" => { let _ = tx.send(CtrlReq::KillPane); let _ = write!(stream, "OK\n"); let _ = stream.flush(); }
+                    "kill-pane" => {
+                        if let Some(pid) = targeted_kill_pane_id {
+                            let _ = tx.send(CtrlReq::KillPaneById(pid));
+                        } else {
+                            let _ = tx.send(CtrlReq::KillPane);
+                        }
+                        let _ = write!(stream, "OK\n");
+                        let _ = stream.flush();
+                    }
                     "capture-pane" => {
                         let escape_seqs = args.iter().any(|a| *a == "-e");
                         let (rtx, rrx) = mpsc::channel::<String>();
@@ -1096,6 +1111,7 @@ pub fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<
                 }
                 CtrlReq::SplitWindow(k, cmd, _detached, _start_dir, _size_pct, resp) => { let _ = resp.send(if let Err(e) = split_active_with_command(&mut app, k, cmd.as_deref(), Some(&*pty_system)) { format!("{e}") } else { String::new() }); resize_all_panes(&mut app); }
                 CtrlReq::KillPane => { let _ = kill_active_pane(&mut app); resize_all_panes(&mut app); }
+                CtrlReq::KillPaneById(pid) => { let _ = kill_pane_by_id(&mut app, pid); resize_all_panes(&mut app); }
                 CtrlReq::CapturePane(resp) => {
                     if let Some(text) = capture_active_pane_text(&mut app)? { let _ = resp.send(text); } else { let _ = resp.send(String::new()); }
                 }

@@ -226,18 +226,25 @@ if let Some(wid) = target_win {
         let _ = tx.send(CtrlReq::FocusWindowTemp(wid));
     }
 }
-if let Some(pid) = target_pane {
-    if is_focus_cmd {
-        if pane_is_id {
-            let _ = tx.send(CtrlReq::FocusPane(pid));
+let targeted_kill_pane_id = if matches!(cmd, "kill-pane" | "killp") && pane_is_id {
+    target_pane
+} else {
+    None
+};
+if targeted_kill_pane_id.is_none() {
+    if let Some(pid) = target_pane {
+        if is_focus_cmd {
+            if pane_is_id {
+                let _ = tx.send(CtrlReq::FocusPane(pid));
+            } else {
+                let _ = tx.send(CtrlReq::FocusPaneByIndex(pid));
+            }
         } else {
-            let _ = tx.send(CtrlReq::FocusPaneByIndex(pid));
-        }
-    } else {
-        if pane_is_id {
-            let _ = tx.send(CtrlReq::FocusPaneTemp(pid));
-        } else {
-            let _ = tx.send(CtrlReq::FocusPaneByIndexTemp(pid));
+            if pane_is_id {
+                let _ = tx.send(CtrlReq::FocusPaneTemp(pid));
+            } else {
+                let _ = tx.send(CtrlReq::FocusPaneByIndexTemp(pid));
+            }
         }
     }
 }
@@ -296,7 +303,13 @@ match cmd {
             }
         }
     }
-    "kill-pane" | "killp" => { let _ = tx.send(CtrlReq::KillPane); }
+    "kill-pane" | "killp" => {
+        if let Some(pid) = targeted_kill_pane_id {
+            let _ = tx.send(CtrlReq::KillPaneById(pid));
+        } else {
+            let _ = tx.send(CtrlReq::KillPane);
+        }
+    }
     "capture-pane" | "capturep" => {
         let print_stdout = args.iter().any(|a| *a == "-p");
         let join_lines = args.iter().any(|a| *a == "-J");
@@ -517,7 +530,9 @@ match cmd {
         if let Some(style) = pane_style {
             let _ = tx.send(CtrlReq::SetPaneStyle(style));
         }
-        let _ = tx.send(CtrlReq::SelectPane(dir.to_string()));
+        if !dir.is_empty() {
+            let _ = tx.send(CtrlReq::SelectPane(dir.to_string()));
+        }
     }
     "select-window" | "selectw" => {
         let idx = args.iter().find(|a| !a.starts_with('-')).and_then(|s| s.parse::<usize>().ok())

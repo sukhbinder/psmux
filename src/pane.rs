@@ -386,22 +386,57 @@ pub fn split_active_with_command(app: &mut AppState, kind: LayoutKind, command: 
     Ok(())
 }
 
-pub fn kill_active_pane(app: &mut AppState) -> io::Result<()> {
-    let win = &mut app.windows[app.active_idx];
-    // Find the neighbor pane's ID BEFORE removing the active one.
-    let neighbor_id = crate::tree::next_leaf_path(&win.root, &win.active_path)
+fn kill_pane_at_path(win: &mut Window, path: &Vec<usize>) {
+    let neighbor_id = crate::tree::next_leaf_path(&win.root, path)
         .and_then(|p| crate::tree::get_active_pane_id(&win.root, &p));
-    // Explicitly kill the active pane's process tree FIRST.
+    // Explicitly kill the target pane's process tree FIRST.
     // remove_node() doesn't call kill_node() when the root is a single Leaf,
     // so we must do it here to ensure no orphaned processes.
-    if let Some(p) = active_pane_mut(&mut win.root, &win.active_path) {
+    if let Some(p) = active_pane_mut(&mut win.root, path) {
         crate::platform::process_kill::kill_process_tree(&mut p.child);
     }
-    kill_leaf(&mut win.root, &win.active_path);
+    kill_leaf(&mut win.root, path);
     // Focus the neighbor by ID (tree structure may have shifted).
     win.active_path = neighbor_id
         .and_then(|id| crate::tree::find_path_by_id(&win.root, id))
         .unwrap_or_else(|| crate::tree::first_leaf_path(&win.root));
+}
+
+pub fn kill_active_pane(app: &mut AppState) -> io::Result<()> {
+    let win = &mut app.windows[app.active_idx];
+    let active_path = win.active_path.clone();
+    kill_pane_at_path(win, &active_path);
+    Ok(())
+}
+
+pub fn kill_pane_by_id(app: &mut AppState, pane_id: usize) -> io::Result<()> {
+    let restore_idx = app.active_idx;
+    let restore_path = app.windows[restore_idx].active_path.clone();
+    let restore_pane_id = crate::tree::get_active_pane_id(&app.windows[restore_idx].root, &restore_path);
+
+    let target = app.windows.iter().enumerate().find_map(|(wi, win)| {
+        crate::tree::find_path_by_id(&win.root, pane_id).map(|path| (wi, path))
+    });
+
+    let Some((target_idx, target_path)) = target else {
+        return Ok(());
+    };
+
+    {
+        let win = &mut app.windows[target_idx];
+        kill_pane_at_path(win, &target_path);
+    }
+
+    if restore_idx < app.windows.len() {
+        app.active_idx = restore_idx;
+        let restore_win = &mut app.windows[restore_idx];
+        let resolved_restore_path = restore_pane_id
+            .and_then(|id| crate::tree::find_path_by_id(&restore_win.root, id))
+            .or_else(|| crate::tree::path_exists(&restore_win.root, &restore_path).then_some(restore_path.clone()))
+            .unwrap_or_else(|| crate::tree::first_leaf_path(&restore_win.root));
+        restore_win.active_path = resolved_restore_path;
+    }
+
     Ok(())
 }
 
