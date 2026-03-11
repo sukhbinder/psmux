@@ -382,7 +382,7 @@ fn run_main() -> io::Result<()> {
                     .map(|s| s.clone())
                     .or_else(resolve_default_session_name)
                     .or_else(resolve_last_session_name)
-                    .unwrap_or_else(|| "default".to_string());
+                    .unwrap_or_else(|| "0".to_string());
                 env::set_var("PSMUX_SESSION_NAME", name);
                 env::set_var("PSMUX_REMOTE_ATTACH", "1");
             }
@@ -450,33 +450,54 @@ fn run_main() -> io::Result<()> {
                             raw_cmd_after_dd = Some(cmd_args[i+1..].iter().map(|s| s.to_string()).collect());
                             break;
                         }
-                        match a {
-                            // Flags that consume the next argument (strict getopt:
-                            // always consume, even if it looks like a flag)
-                            "-s" => { i += 1; if i < cmd_args.len() { session_name = Some(cmd_args[i].to_string()); } }
-                            "-n" => { i += 1; if i < cmd_args.len() { window_name = Some(cmd_args[i].to_string()); } }
-                            "-F" => { i += 1; if i < cmd_args.len() { format_str = Some(cmd_args[i].trim_matches('"').to_string()); } }
-                            "-c" => { i += 1; if i < cmd_args.len() { start_dir = Some(cmd_args[i].trim_matches('"').to_string()); } }
-                            "-x" => { i += 1; if i < cmd_args.len() { init_width = cmd_args[i].parse::<u16>().ok(); } }
-                            "-y" => { i += 1; if i < cmd_args.len() { init_height = cmd_args[i].parse::<u16>().ok(); } }
-                            "-e" | "-f" | "-t" => { i += 1; /* skip value, not used yet */ }
+                        // tmux uses getopt, which allows combined short flags
+                        // like `-As main` (= `-A -s main`) or `-dP` (= `-d -P`).
+                        // We expand combined flags inline.
+                        if !a.starts_with('-') {
+                            // Positional argument — collect it and everything after
+                            positional_args.extend(cmd_args[i..].iter().map(|s| s.to_string()));
+                            break;
+                        }
+
+                        let chars: Vec<char> = if a.len() > 2 && !a.starts_with("--") {
+                            a[1..].chars().collect()
+                        } else if a.len() == 2 {
+                            vec![a.chars().nth(1).unwrap()]
+                        } else {
+                            // Unknown long flag, skip
+                            i += 1; continue;
+                        };
+
+                        let mut k = 0;
+                        while k < chars.len() {
+                            let c = chars[k];
+                            // Value-consuming flags: when in a combined group,
+                            // the value is the next cmd_args element (getopt style).
+                            match c {
+                            's' => { i += 1; if i < cmd_args.len() { session_name = Some(cmd_args[i].to_string()); } break; }
+                            'n' => { i += 1; if i < cmd_args.len() { window_name = Some(cmd_args[i].to_string()); } break; }
+                            'F' => { i += 1; if i < cmd_args.len() { format_str = Some(cmd_args[i].trim_matches('"').to_string()); } break; }
+                            'c' => { i += 1; if i < cmd_args.len() { start_dir = Some(cmd_args[i].trim_matches('"').to_string()); } break; }
+                            'x' => { i += 1; if i < cmd_args.len() { init_width = cmd_args[i].parse::<u16>().ok(); } break; }
+                            'y' => { i += 1; if i < cmd_args.len() { init_height = cmd_args[i].parse::<u16>().ok(); } break; }
+                            'e' | 'f' | 't' => { i += 1; break; /* skip value */ }
                             // Boolean flags
-                            "-d" => { detached = true; }
-                            "-P" => { print_info = true; }
-                            "-A" => { attach_if_exists = true; }
-                            "-D" | "-E" | "-X" => { /* ignored for compatibility */ }
-                            _ if a.starts_with('-') => { /* unknown flag, skip */ }
-                            _ => {
-                                // Positional argument — collect it and everything after
-                                positional_args.extend(cmd_args[i..].iter().map(|s| s.to_string()));
-                                break;
+                            'd' => { detached = true; }
+                            'P' => { print_info = true; }
+                            'A' => { attach_if_exists = true; }
+                            'D' | 'E' | 'X' => { /* ignored for compatibility */ }
+                            _ => { /* unknown flag, skip */ }
                             }
+                            k += 1;
                         }
                         i += 1;
                     }
                 }
 
-                let name = session_name.unwrap_or_else(|| "default".to_string());
+                let name = session_name.unwrap_or_else(|| {
+                    // tmux-compatible: auto-generate numeric name (0, 1, 2, ...)
+                    crate::session::next_session_name(l_socket_name.as_deref())
+                });
                 // Compute port file base name: with -L namespace prefix if specified
                 let port_file_base = if let Some(ref l) = l_socket_name {
                     format!("{}__{}", l, name)
@@ -2288,37 +2309,62 @@ fn run_main() -> io::Result<()> {
             }
         }
     
-    // Default behavior: If no PSMUX_REMOTE_ATTACH is set and no specific command matched,
-    // we need to either attach to an existing session or create a new one.
-    // This ensures sessions persist after detach.
+    // Default behavior (bare `psmux` with no command):
+    // tmux-compatible: always create a new session with the next available
+    // numeric name (0, 1, 2, ...) and attach to it.
     if env::var("PSMUX_REMOTE_ATTACH").ok().as_deref() != Some("1") {
         let home = env::var("USERPROFILE").or_else(|_| env::var("HOME")).unwrap_or_default();
-        let session_name = env::var("PSMUX_SESSION_NAME").unwrap_or_else(|_| "default".to_string());
-        let port_path = format!("{}\\.psmux\\{}.port", home, session_name);
-        
-        // Check if port file exists AND server is actually alive
-        let server_alive = if std::path::Path::new(&port_path).exists() {
-            if let Ok(port_str) = std::fs::read_to_string(&port_path) {
+        let session_name = env::var("PSMUX_SESSION_NAME").unwrap_or_else(|_| {
+            crate::session::next_session_name(l_socket_name.as_deref())
+        });
+        let port_file_base = if let Some(ref l) = l_socket_name {
+            format!("{}__{}", l, session_name)
+        } else {
+            session_name.clone()
+        };
+        let port_path = format!("{}\\.psmux\\{}.port", home, port_file_base);
+
+        // Try warm server claim first (fast path)
+        let warm_base = if let Some(ref l) = l_socket_name {
+            format!("{}____warm__", l)
+        } else {
+            "__warm__".to_string()
+        };
+        let warm_port_path = format!("{}\\.psmux\\{}.port", home, warm_base);
+        let mut warm_claimed = false;
+        if std::path::Path::new(&warm_port_path).exists() {
+            let warm_key = crate::session::read_session_key(&warm_base).unwrap_or_default();
+            if let Ok(port_str) = std::fs::read_to_string(&warm_port_path) {
                 if let Ok(port) = port_str.trim().parse::<u16>() {
                     let addr = format!("127.0.0.1:{}", port);
-                    std::net::TcpStream::connect_timeout(
+                    if let Ok(mut stream) = std::net::TcpStream::connect_timeout(
                         &addr.parse().unwrap(),
-                        Duration::from_millis(50)
-                    ).is_ok()
-                } else {
-                    false
+                        Duration::from_millis(500),
+                    ) {
+                        let _ = stream.set_nodelay(true);
+                        let _ = stream.set_read_timeout(Some(Duration::from_millis(3000)));
+                        let _ = write!(stream, "AUTH {}\n", warm_key);
+                        let _ = write!(stream, "claim-session {}\n", session_name);
+                        let _ = stream.flush();
+                        let mut buf = Vec::new();
+                        let mut temp = [0u8; 256];
+                        loop {
+                            match std::io::Read::read(&mut stream, &mut temp) {
+                                Ok(0) => break,
+                                Ok(n) => { buf.extend_from_slice(&temp[..n]); break; }
+                                Err(_) => break,
+                            }
+                        }
+                        if String::from_utf8_lossy(&buf).contains("OK") {
+                            warm_claimed = true;
+                        }
+                    }
                 }
-            } else {
-                false
             }
-        } else {
-            false
-        };
-        
-        if !server_alive {
-            // Clean up stale port file if it exists
-            let _ = std::fs::remove_file(&port_path);
-            // No existing session - create one in background
+        }
+
+        if !warm_claimed {
+            // Cold path: spawn a new background server
             let exe = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("psmux"));
             let server_args: Vec<String> = vec!["server".into(), "-s".into(), session_name.clone()];
             #[cfg(windows)]
@@ -2332,7 +2378,7 @@ fn run_main() -> io::Result<()> {
                 cmd.stderr(std::process::Stdio::null());
                 let _child = cmd.spawn().map_err(|e| io::Error::new(io::ErrorKind::Other, format!("failed to spawn server: {e}")))?;
             }
-            
+
             // Wait for server to start (fast polling — port file is written early)
             for _ in 0..500 {
                 if std::path::Path::new(&port_path).exists() {
@@ -2341,9 +2387,9 @@ fn run_main() -> io::Result<()> {
                 std::thread::sleep(Duration::from_millis(10));
             }
         }
-        
+
         // Now attach to the session
-        env::set_var("PSMUX_SESSION_NAME", &session_name);
+        env::set_var("PSMUX_SESSION_NAME", &port_file_base);
         env::set_var("PSMUX_REMOTE_ATTACH", "1");
     }
     

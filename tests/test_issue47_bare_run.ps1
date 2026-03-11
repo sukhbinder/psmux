@@ -52,22 +52,17 @@ Write-Host ""
 Write-Test "1. Bare psmux invocation - should not error with 'no session'"
 
 # We can't run a fully interactive attach in a test script, but we CAN test
-# the server-spawn path. The bare invocation is supposed to:
-#   1. Spawn a background server for "default" session
-#   2. Attach to it (interactive — we can't test this, but we can verify step 1)
-#
-# To test step 1: replicate what main.rs does when cmd=="" —
-# spawn server, check port file creation.
+# the server-spawn path. Bare `psmux` creates an auto-numbered session (0, 1, 2...)
+# like tmux, then attaches to it. We test the server-spawn + naming.
 
-# Spawn the server manually as the bare path would
-$env:PSMUX_SESSION_NAME = "default"
-Start-Process -FilePath $PSMUX -ArgumentList "server -s default" -WindowStyle Hidden
+# Use new-session -d to replicate bare behavior (creates auto-numbered session)
+& $PSMUX new-session -d 2>&1 | Out-Null
 Start-Sleep -Seconds 3
 
-# Check if the port file was created
-$portPath = "$env:USERPROFILE\.psmux\default.port"
+# Check if the port file was created (should be "0" for first session)
+$portPath = "$env:USERPROFILE\.psmux\0.port"
 if (Test-Path $portPath) {
-    Write-Pass "Port file created for 'default' session"
+    Write-Pass "Port file created for auto-numbered session '0'"
     $port = (Get-Content $portPath).Trim()
     Write-Info "  Server port: $port"
 } else {
@@ -75,22 +70,22 @@ if (Test-Path $portPath) {
 }
 
 # Check if session is queryable
-$hasSession = & $PSMUX has-session -t default 2>&1 | Out-String
+$hasSession = & $PSMUX has-session -t 0 2>&1 | Out-String
 $hasExitCode = $LASTEXITCODE
 Write-Info "  has-session exit code: $hasExitCode"
 if ($hasExitCode -eq 0) {
-    Write-Pass "has-session -t default succeeds"
+    Write-Pass "has-session -t 0 succeeds"
 } else {
-    Write-Fail "has-session -t default failed (exit code $hasExitCode)"
+    Write-Fail "has-session -t 0 failed (exit code $hasExitCode)"
 }
 
-# List sessions — should show "default"
+# List sessions — should show auto-numbered session
 $lsAfter = & $PSMUX list-sessions 2>&1 | Out-String
 Write-Info "  list-sessions: $($lsAfter.Trim())"
-if ($lsAfter -match "default") {
-    Write-Pass "Default session listed in list-sessions"
+if ($lsAfter -match "^0:") {
+    Write-Pass "Auto-numbered session '0' listed in list-sessions"
 } else {
-    Write-Fail "Default session NOT found in list-sessions"
+    Write-Fail "Session '0' NOT found in list-sessions"
 }
 
 # -----------------------------------------------------------------
@@ -150,35 +145,41 @@ Write-Host ("=" * 60)
 Write-Host "  TEST 4: SIMULATE BARE INVOCATION (tmux -> psmux)"
 Write-Host ("=" * 60)
 
-Write-Test "4. Running psmux with no args when session already exists — detect 'no session' error"
+Write-Test "4. Running psmux with no args — should create auto-numbered session (tmux-compatible)"
 
-# Kill the default session first
-& $PSMUX kill-session -t default 2>$null | Out-Null
+# Kill all sessions first
+& $PSMUX kill-server 2>$null | Out-Null
 Start-Sleep -Seconds 2
-Remove-Item "$env:USERPROFILE\.psmux\default.port" -Force -ErrorAction SilentlyContinue
-Remove-Item "$env:USERPROFILE\.psmux\default.key" -Force -ErrorAction SilentlyContinue
+Remove-Item "$env:USERPROFILE\.psmux\*.port" -Force -ErrorAction SilentlyContinue
+Remove-Item "$env:USERPROFILE\.psmux\*.key" -Force -ErrorAction SilentlyContinue
 
 # Now run psmux with no arguments in a subprocess with a timeout
-# This will try to attach interactively, but we'll kill it after a few seconds
-# and check if the port file was created (server started)
+# This will try to create + attach interactively; we kill it after a few seconds
+# and check if a port file was created (server started)
 $proc = Start-Process -FilePath $PSMUX -PassThru -WindowStyle Hidden
 Start-Sleep -Seconds 5
 
-# Check if a default session was created
-$portExists = Test-Path "$env:USERPROFILE\.psmux\default.port"
+# Check if an auto-numbered session was created (should be "0")
+$portExists = Test-Path "$env:USERPROFILE\.psmux\0.port"
 Write-Info "  Port file exists after bare invocation: $portExists"
 
 if ($portExists) {
-    Write-Pass "Bare invocation created default session — no 'no session' error"
+    Write-Pass "Bare invocation created auto-numbered session '0' — no 'no session' error"
     # Verify session is live
-    $check = & $PSMUX has-session -t default 2>&1 | Out-String
+    $check = & $PSMUX has-session -t 0 2>&1 | Out-String
     if ($LASTEXITCODE -eq 0) {
-        Write-Pass "Default session is alive after bare invocation"
+        Write-Pass "Session '0' is alive after bare invocation"
     } else {
-        Write-Fail "Default session port file exists but session not responding"
+        Write-Fail "Session '0' port file exists but session not responding"
     }
 } else {
-    Write-Fail "Bare invocation did NOT create default session — may error with 'no session' (issue #47)"
+    # Check if any numeric port file exists (warm server might have been claimed with a different number)
+    $anyPort = Get-ChildItem "$env:USERPROFILE\.psmux\*.port" -ErrorAction SilentlyContinue | Where-Object { $_.BaseName -match '^\d+$' -and $_.BaseName -ne '__warm__' }
+    if ($anyPort) {
+        Write-Pass "Bare invocation created auto-numbered session '$($anyPort[0].BaseName)'"
+    } else {
+        Write-Fail "Bare invocation did NOT create a session — may error with 'no session' (issue #47)"
+    }
 }
 
 # Kill the process if still running

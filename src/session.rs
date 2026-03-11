@@ -8,6 +8,50 @@ pub fn is_warm_session(base: &str) -> bool {
     base == "__warm__" || base.ends_with("____warm__")
 }
 
+/// Find the next available numeric session name (tmux-compatible).
+/// tmux uses a monotonically incrementing counter, but since psmux has
+/// no persistent server state, we scan existing port files and pick
+/// the lowest non-negative integer not already in use.
+/// When `ns_prefix` is Some("foo"), names are checked as "foo__0", "foo__1", etc.
+pub fn next_session_name(ns_prefix: Option<&str>) -> String {
+    let home = match env::var("USERPROFILE").or_else(|_| env::var("HOME")) {
+        Ok(h) => h,
+        Err(_) => return "0".to_string(),
+    };
+    let psmux_dir = format!("{}\\.psmux", home);
+    let mut used: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    if let Ok(entries) = std::fs::read_dir(&psmux_dir) {
+        for entry in entries.flatten() {
+            if let Some(fname) = entry.file_name().to_str() {
+                if let Some((base, ext)) = fname.rsplit_once('.') {
+                    if ext != "port" { continue; }
+                    if is_warm_session(base) { continue; }
+                    // Extract the session name part (after namespace prefix if any)
+                    let session_part = if let Some(pfx) = ns_prefix {
+                        let full_pfx = format!("{}__", pfx);
+                        if base.starts_with(&full_pfx) {
+                            &base[full_pfx.len()..]
+                        } else {
+                            continue; // different namespace
+                        }
+                    } else {
+                        if base.contains("__") { continue; } // namespaced session
+                        base
+                    };
+                    if let Ok(n) = session_part.parse::<u32>() {
+                        used.insert(n);
+                    }
+                }
+            }
+        }
+    }
+    let mut id = 0u32;
+    while used.contains(&id) {
+        id += 1;
+    }
+    id.to_string()
+}
+
 /// Clean up any stale port files (where server is not actually running)
 pub fn cleanup_stale_port_files() {
     let home = match env::var("USERPROFILE").or_else(|_| env::var("HOME")) {
