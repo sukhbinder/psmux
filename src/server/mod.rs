@@ -233,10 +233,6 @@ fn compute_effective_client_size(app: &AppState) -> Option<(u16, u16)> {
 }
 
 pub fn run_server(session_name: String, socket_name: Option<String>, initial_command: Option<String>, raw_command: Option<Vec<String>>, start_dir: Option<String>, window_name: Option<String>, init_size: Option<(u16, u16)>) -> io::Result<()> {
-    // DEBUG: absolute first thing in run_server
-    let home_dbg = std::env::var("USERPROFILE").unwrap_or_default();
-    let _ = std::fs::write(format!("{}\\.psmux\\debug_server.log", home_dbg), format!("run_server called for '{}'\n", session_name));
-    
     // Write crash info to a log file when stderr is unavailable (detached server)
     std::panic::set_hook(Box::new(|info| {
         let home = std::env::var("USERPROFILE").or_else(|_| std::env::var("HOME")).unwrap_or_default();
@@ -762,19 +758,17 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     }
                     hook_event = Some("client-detached");
                     if app.attached_clients == 0 && app.destroy_unattached {
-                        for win in app.windows.iter_mut() {
-                            kill_all_children(&mut win.root);
-                        }
-                        if let Some(mut wp) = app.warm_pane.take() {
-                            wp.child.kill().ok();
-                        }
-                        std::thread::sleep(std::time::Duration::from_millis(100));
                         let home = env::var("USERPROFILE").or_else(|_| env::var("HOME")).unwrap_or_default();
                         let regpath = format!("{}\\.psmux\\{}.port", home, app.port_file_base());
                         let keypath = format!("{}\\.psmux\\{}.key", home, app.port_file_base());
                         let _ = std::fs::remove_file(&regpath);
                         let _ = std::fs::remove_file(&keypath);
                         crate::types::shutdown_persistent_streams();
+                        tree::kill_all_children_batch(&mut app.windows);
+                        if let Some(mut wp) = app.warm_pane.take() {
+                            wp.child.kill().ok();
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(10));
                         std::process::exit(0);
                     }
                 }
@@ -1574,20 +1568,21 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     hook_event = Some("window-closed");
                 }
                 CtrlReq::KillSession => {
-                    // Kill all child processes in all windows before exiting
-                    for win in app.windows.iter_mut() {
-                        kill_all_children(&mut win.root);
-                    }
-                    // Kill warm pane's child (process::exit skips Drop)
-                    if let Some(mut wp) = app.warm_pane.take() { wp.child.kill().ok(); }
-                    // Brief delay to let child processes fully terminate
-                    std::thread::sleep(std::time::Duration::from_millis(100));
+                    // Remove port/key files FIRST so clients see the session
+                    // as gone immediately, then kill processes.
                     let home = env::var("USERPROFILE").or_else(|_| env::var("HOME")).unwrap_or_default();
                     let regpath = format!("{}\\.psmux\\{}.port", home, app.port_file_base());
                     let keypath = format!("{}\\.psmux\\{}.key", home, app.port_file_base());
                     let _ = std::fs::remove_file(&regpath);
                     let _ = std::fs::remove_file(&keypath);
                     crate::types::shutdown_persistent_streams();
+                    // Kill all child processes using a single process snapshot
+                    tree::kill_all_children_batch(&mut app.windows);
+                    // Kill warm pane's child (process::exit skips Drop)
+                    if let Some(mut wp) = app.warm_pane.take() { wp.child.kill().ok(); }
+                    // TerminateProcess is synchronous on Windows — processes
+                    // are already dead.  Minimal delay for OS handle cleanup.
+                    std::thread::sleep(std::time::Duration::from_millis(10));
                     std::process::exit(0);
                 }
                 CtrlReq::HasSession(resp) => {
@@ -2262,20 +2257,21 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     app.hooks.remove(&hook);
                 }
                 CtrlReq::KillServer => {
-                    // Kill all child processes in all windows before exiting
-                    for win in app.windows.iter_mut() {
-                        kill_all_children(&mut win.root);
-                    }
-                    // Kill warm pane's child (process::exit skips Drop)
-                    if let Some(mut wp) = app.warm_pane.take() { wp.child.kill().ok(); }
-                    // Brief delay to let child processes fully terminate
-                    std::thread::sleep(std::time::Duration::from_millis(100));
+                    // Remove port/key files FIRST so clients see the session
+                    // as gone immediately, then kill processes.
                     let home = env::var("USERPROFILE").or_else(|_| env::var("HOME")).unwrap_or_default();
                     let regpath = format!("{}\\.psmux\\{}.port", home, app.port_file_base());
                     let keypath = format!("{}\\.psmux\\{}.key", home, app.port_file_base());
                     let _ = std::fs::remove_file(&regpath);
                     let _ = std::fs::remove_file(&keypath);
                     crate::types::shutdown_persistent_streams();
+                    // Kill all child processes using a single process snapshot
+                    tree::kill_all_children_batch(&mut app.windows);
+                    // Kill warm pane's child (process::exit skips Drop)
+                    if let Some(mut wp) = app.warm_pane.take() { wp.child.kill().ok(); }
+                    // TerminateProcess is synchronous on Windows — processes
+                    // are already dead.  Minimal delay for OS handle cleanup.
+                    std::thread::sleep(std::time::Duration::from_millis(10));
                     std::process::exit(0);
                 }
                 CtrlReq::WaitFor(channel, op) => {
@@ -2719,7 +2715,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
             }
         }
         // Check if all windows/panes have exited (throttled to every 250ms)
-        if last_reap.elapsed() >= Duration::from_millis(250) {
+        if last_reap.elapsed() >= Duration::from_millis(100) {
             last_reap = Instant::now();
             let (all_empty, any_pruned) = tree::reap_children(&mut app)?;
             if any_pruned {
@@ -2729,14 +2725,15 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 meta_dirty = true;
             }
             if app.exit_empty && all_empty {
-                // Kill warm pane's child (process::exit skips Drop)
-                if let Some(mut wp) = app.warm_pane.take() { wp.child.kill().ok(); }
                 let home = env::var("USERPROFILE").or_else(|_| env::var("HOME")).unwrap_or_default();
                 let regpath = format!("{}\\.psmux\\{}.port", home, app.port_file_base());
                 let keypath = format!("{}\\.psmux\\{}.key", home, app.port_file_base());
                 let _ = std::fs::remove_file(&regpath);
                 let _ = std::fs::remove_file(&keypath);
                 crate::types::shutdown_persistent_streams();
+                // Kill warm pane's child (process::exit skips Drop)
+                if let Some(mut wp) = app.warm_pane.take() { wp.child.kill().ok(); }
+                std::thread::sleep(std::time::Duration::from_millis(10));
                 std::process::exit(0);
             }
         }

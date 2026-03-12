@@ -1138,6 +1138,71 @@ pub mod process_kill {
         // try_wait() to detect the dead process and remove the tree node.
         let _ = child.kill();
     }
+
+    /// Kill multiple process trees using a SINGLE process snapshot.
+    /// Much faster than calling `kill_process_tree` N times when
+    /// killing an entire session (avoids N separate system snapshots).
+    pub fn kill_process_trees_batch(children: &mut [&mut Box<dyn portable_pty::Child>]) {
+        // Collect all root PIDs
+        let root_pids: Vec<Option<u32>> = children.iter()
+            .map(|c| super::mouse_inject::get_child_pid(c.as_ref()))
+            .collect();
+
+        // Take ONE process snapshot for all trees
+        let entries = snapshot_process_table();
+
+        // For each root PID, find descendants using the shared snapshot
+        for (i, root_pid_opt) in root_pids.iter().enumerate() {
+            if let Some(root_pid) = root_pid_opt {
+                let mut descs = collect_descendants_from_table(&entries, *root_pid);
+                descs.reverse();
+                for &dpid in &descs {
+                    terminate_pid(dpid);
+                }
+                terminate_pid(*root_pid);
+            }
+            let _ = children[i].kill();
+        }
+    }
+
+    /// Take a system-wide process snapshot and return the process table.
+    fn snapshot_process_table() -> Vec<(u32, u32)> {
+        let mut entries: Vec<(u32, u32)> = Vec::with_capacity(256);
+        unsafe {
+            let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+            if snap == INVALID_HANDLE || snap == 0 { return entries; }
+
+            let mut pe: PROCESSENTRY32W = std::mem::zeroed();
+            pe.dw_size = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+
+            if Process32FirstW(snap, &mut pe) != 0 {
+                entries.push((pe.th32_process_id, pe.th32_parent_process_id));
+                while Process32NextW(snap, &mut pe) != 0 {
+                    entries.push((pe.th32_process_id, pe.th32_parent_process_id));
+                }
+            }
+            CloseHandle(snap);
+        }
+        entries
+    }
+
+    /// BFS from root_pid using a pre-built process table.
+    fn collect_descendants_from_table(entries: &[(u32, u32)], root_pid: u32) -> Vec<u32> {
+        let mut descendants = Vec::new();
+        let mut queue: Vec<u32> = vec![root_pid];
+        let mut head = 0;
+        while head < queue.len() {
+            let parent = queue[head];
+            head += 1;
+            for &(pid, ppid) in entries {
+                if ppid == parent && pid != root_pid && !queue.contains(&pid) {
+                    queue.push(pid);
+                    descendants.push(pid);
+                }
+            }
+        }
+        descendants
+    }
 }
 
 #[cfg(not(windows))]
@@ -1145,6 +1210,13 @@ pub mod process_kill {
     /// On non-Windows, fall back to simple kill (no wait — let the reaper handle it).
     pub fn kill_process_tree(child: &mut Box<dyn portable_pty::Child>) {
         let _ = child.kill();
+    }
+
+    /// Batch kill — on non-Windows, just kill each child individually.
+    pub fn kill_process_trees_batch(children: &mut [&mut Box<dyn portable_pty::Child>]) {
+        for child in children.iter_mut() {
+            let _ = child.kill();
+        }
     }
 }
 

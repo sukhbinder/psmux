@@ -275,6 +275,26 @@ pub fn kill_all_children(node: &mut Node) {
     }
 }
 
+/// Collect mutable references to all child processes in a tree node.
+fn collect_child_refs<'a>(node: &'a mut Node, out: &mut Vec<&'a mut Box<dyn portable_pty::Child>>) {
+    match node {
+        Node::Leaf(p) => { out.push(&mut p.child); }
+        Node::Split { children, .. } => { for child in children.iter_mut() { collect_child_refs(child, out); } }
+    }
+}
+
+/// Kill all children across multiple windows using a single process snapshot.
+/// Much faster than per-window `kill_all_children` when killing an entire session.
+pub fn kill_all_children_batch(windows: &mut [crate::types::Window]) {
+    let mut all_children: Vec<&mut Box<dyn portable_pty::Child>> = Vec::new();
+    for win in windows.iter_mut() {
+        collect_child_refs(&mut win.root, &mut all_children);
+    }
+    if !all_children.is_empty() {
+        process_kill::kill_process_trees_batch(&mut all_children);
+    }
+}
+
 /// Returns borders as (path, kind, idx, pixel_pos, total_pixels_along_axis).
 pub fn compute_split_borders(node: &Node, area: Rect, out: &mut Vec<(Vec<usize>, LayoutKind, usize, u16, u16)>) {
     fn rec(node: &Node, area: Rect, path: &mut Vec<usize>, out: &mut Vec<(Vec<usize>, LayoutKind, usize, u16, u16)>) {
