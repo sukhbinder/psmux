@@ -947,9 +947,12 @@ pub fn capture_active_pane_styled(app: &mut AppState, s: Option<i32>, e: Option<
     let mut prev_fg: Option<vt100::Color> = None;
     let mut prev_bg: Option<vt100::Color> = None;
     let mut prev_bold = false;
+    let mut prev_dim = false;
     let mut prev_italic = false;
     let mut prev_underline = false;
+    let mut prev_blink = false;
     let mut prev_inverse = false;
+    let mut prev_hidden = false;
 
     for r in start_row..=end_row {
         // Build the row content, then trim trailing whitespace
@@ -961,22 +964,30 @@ pub fn capture_active_pane_styled(app: &mut AppState, s: Option<i32>, e: Option<
                 let fg = cell.fgcolor();
                 let bg = cell.bgcolor();
                 let bold = cell.bold();
+                let dim = cell.dim();
                 let italic = cell.italic();
                 let underline = cell.underline();
+                let blink = cell.blink();
                 let inverse = cell.inverse();
+                let hidden = cell.hidden();
 
                 // Emit SGR if attributes changed
                 let style_changed = Some(fg) != prev_fg || Some(bg) != prev_bg
-                    || bold != prev_bold || italic != prev_italic
-                    || underline != prev_underline || inverse != prev_inverse;
+                    || bold != prev_bold || dim != prev_dim
+                    || italic != prev_italic
+                    || underline != prev_underline || blink != prev_blink
+                    || inverse != prev_inverse || hidden != prev_hidden;
 
                 let sgr = if style_changed {
                     let mut params = Vec::new();
                     params.push("0".to_string()); // reset first
                     if bold { params.push("1".to_string()); }
+                    if dim { params.push("2".to_string()); }
                     if italic { params.push("3".to_string()); }
                     if underline { params.push("4".to_string()); }
+                    if blink { params.push("5".to_string()); }
                     if inverse { params.push("7".to_string()); }
+                    if hidden { params.push("8".to_string()); }
                     // Foreground
                     match fg {
                         vt100::Color::Default => {}
@@ -1000,9 +1011,12 @@ pub fn capture_active_pane_styled(app: &mut AppState, s: Option<i32>, e: Option<
                     prev_fg = Some(fg);
                     prev_bg = Some(bg);
                     prev_bold = bold;
+                    prev_dim = dim;
                     prev_italic = italic;
                     prev_underline = underline;
+                    prev_blink = blink;
                     prev_inverse = inverse;
+                    prev_hidden = hidden;
                     any_style_active = true;
                     Some(format!("\x1b[{}m", params.join(";")))
                 } else {
@@ -1030,9 +1044,12 @@ pub fn capture_active_pane_styled(app: &mut AppState, s: Option<i32>, e: Option<
             prev_fg = None;
             prev_bg = None;
             prev_bold = false;
+            prev_dim = false;
             prev_italic = false;
             prev_underline = false;
+            prev_blink = false;
             prev_inverse = false;
+            prev_hidden = false;
         }
         text.push('\n');
     }

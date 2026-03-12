@@ -17,11 +17,11 @@ function Kill-Psmux {
 }
 
 function Wait-For-Psmux {
-    param([int]$TimeoutSec = 10)
+    param([string]$SessionName, [int]$TimeoutSec = 10)
     $end = (Get-Date).AddSeconds($TimeoutSec)
     while ((Get-Date) -lt $end) {
         try {
-            $r = psmux list-sessions 2>$null
+            psmux has-session -t $SessionName 2>$null
             if ($LASTEXITCODE -eq 0) { return $true }
         } catch {}
         Start-Sleep -Milliseconds 300
@@ -31,14 +31,14 @@ function Wait-For-Psmux {
 
 function Send-Keys {
     param([string]$Keys, [int]$DelayMs = 200)
-    psmux send-keys $Keys 2>$null
+    psmux send-keys -t $script:SESSION $Keys 2>$null
     Start-Sleep -Milliseconds $DelayMs
 }
 
 function Capture-Pane {
     param([int]$DelayMs = 500)
     Start-Sleep -Milliseconds $DelayMs
-    $out = psmux capture-pane -p 2>$null
+    $out = psmux capture-pane -t $script:SESSION -p 2>$null
     return $out
 }
 
@@ -57,12 +57,15 @@ function Report {
 Write-Host "`n=== Issue #49: Control Sequences Support ===" -ForegroundColor Cyan
 Kill-Psmux
 
-# Start psmux in detached mode
-Write-Host "Starting psmux session..." -ForegroundColor Yellow
-$proc = Start-Process psmux -ArgumentList "new-session","-d" -PassThru -WindowStyle Hidden
+# Start psmux in detached mode with explicit session name
+# (psmux auto-numbers sessions when no -s is given, so bare commands
+# without -t would look for 'default' which wouldn't exist)
+$SESSION = "ctlseq_test"
+Write-Host "Starting psmux session '$SESSION'..." -ForegroundColor Yellow
+$proc = Start-Process psmux -ArgumentList "new-session","-d","-s",$SESSION -PassThru -WindowStyle Hidden
 Start-Sleep -Seconds 2
 
-if (-not (Wait-For-Psmux)) {
+if (-not (Wait-For-Psmux -SessionName $SESSION)) {
     Write-Host "FATAL: psmux session did not start" -ForegroundColor Red
     exit 1
 }
@@ -177,6 +180,7 @@ Report "Issue test: Inverse text renders" ($captureText3 -match "I am Inverse")
 Report "Issue test: Output intact"        ($captureText3 -match "Blink Text:" -and $captureText3 -match "Inverse Text:" -and $captureText3 -match "Hidden Text:")
 
 # ── Cleanup ──────────────────────────────────────────────────────────────────
+psmux kill-session -t $SESSION 2>$null
 Kill-Psmux
 $env:PSMUX_DEBUG_CURSOR = $null
 

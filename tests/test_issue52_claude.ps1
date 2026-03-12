@@ -28,17 +28,19 @@ Start-Sleep 2
 Log ""
 Log "=== Test A: CSI s/u cursor save/restore in live pane ==="
 
-psmux new-session -d 2>$null
+$testA_session = "csisu_test"
+psmux new-session -d -s $testA_session 2>$null
 Start-Sleep 2
 
 # Send escape sequences that use CSI s/u (the exact pattern Claude uses)
 # Move to row 10, col 20, save, move to row 1 col 1, write text, restore
-$seq = "printf '\x1b[10;20H\x1b[s\x1b[1;1HSTATUS_TEXT\x1b[u'"
-psmux send-keys "$seq" Enter 2>$null
+# Use PowerShell Write-Host with `e escape (PowerShell 7+ ESC literal)
+$seq = 'Write-Host -NoNewline "`e[10;20H`e[s`e[1;1HSTATUS_TEXT`e[u"'
+psmux send-keys -t $testA_session "$seq" Enter 2>$null
 Start-Sleep 1
 
 # Capture pane
-$capA = psmux capture-pane -p 2>&1 | Out-String
+$capA = psmux capture-pane -t $testA_session -p 2>&1 | Out-String
 $capA | Out-File (Join-Path $tmpDir "test_a_capture.txt") -Encoding UTF8
 
 # Check if STATUS_TEXT appears at row 1 (it should, since we wrote there)
@@ -48,7 +50,7 @@ if ($capA -match "STATUS_TEXT") {
     Fail "CSI s/u: STATUS_TEXT not visible" "output may be truncated"
 }
 
-psmux kill-server 2>$null
+psmux kill-session -t $testA_session 2>$null
 Start-Sleep 1
 
 # ─── Test B: Claude CLI inside psmux ─────────────────────────────────────────
@@ -71,11 +73,12 @@ if (-not $hasClaudeDir) {
     Push-Location $claudeDir
 
     Log "  Starting psmux session with 'claude --help' (safe, no API needed)..."
-    psmux new-session -d "claude --help" 2>$null
+    $testB_session = "claude_help_test"
+    psmux new-session -d -s $testB_session "claude --help" 2>$null
     Start-Sleep 4
 
     # Capture the pane output
-    $capB = psmux capture-pane -p 2>&1 | Out-String
+    $capB = psmux capture-pane -t $testB_session -p 2>&1 | Out-String
     $capB | Out-File (Join-Path $tmpDir "test_b_claude_help.txt") -Encoding UTF8
     Log "  Captured pane: $($capB.Length) chars"
 
@@ -86,7 +89,7 @@ if (-not $hasClaudeDir) {
         Fail "Claude --help not rendered" "capture: $($capB.Substring(0, [Math]::Min(200, $capB.Length)))"
     }
 
-    psmux kill-server 2>$null
+    psmux kill-session -t $testB_session 2>$null
     Start-Sleep 1
     Pop-Location
 }
@@ -100,14 +103,15 @@ if (-not $hasClaude) {
     Pass "Claude TUI rendered content [SKIP: claude CLI not installed]"
 } else {
     Log "  Starting interactive Claude session..."
-    psmux new-session -d "claude" 2>$null
+    $testC_session = "claude_tui_test"
+    psmux new-session -d -s $testC_session "claude" 2>$null
     Start-Sleep 8  # Give Claude time to fully render its TUI
 
     # Capture pane multiple times to check stability
     $caps = @()
     for ($i = 0; $i -lt 3; $i++) {
         Start-Sleep 1
-        $cap = psmux capture-pane -p 2>&1 | Out-String
+        $cap = psmux capture-pane -t $testC_session -p 2>&1 | Out-String
         $caps += $cap
         $cap | Out-File (Join-Path $tmpDir "test_c_claude_interactive_$i.txt") -Encoding UTF8
     }
@@ -121,21 +125,21 @@ if (-not $hasClaude) {
     }
 
     # Get layout JSON to check cursor position
-    $layoutJson = psmux list-panes -F "#{pane_id} cursor_y=#{cursor_y} cursor_x=#{cursor_x}" 2>&1 | Out-String
+    $layoutJson = psmux list-panes -t $testC_session -F "#{pane_id} cursor_y=#{cursor_y} cursor_x=#{cursor_x}" 2>&1 | Out-String
     $layoutJson | Out-File (Join-Path $tmpDir "test_c_layout.txt") -Encoding UTF8
     Log "  Layout info: $layoutJson"
 
     # Also try send-keys and check cursor doesn't jump
-    psmux send-keys "h" 2>$null  # Type a single character
+    psmux send-keys -t $testC_session "h" 2>$null  # Type a single character
     Start-Sleep 2
-    $capAfterType = psmux capture-pane -p 2>&1 | Out-String
+    $capAfterType = psmux capture-pane -t $testC_session -p 2>&1 | Out-String
     $capAfterType | Out-File (Join-Path $tmpDir "test_c_after_type.txt") -Encoding UTF8
 
     # Send Ctrl-C to exit Claude cleanly
-    psmux send-keys C-c 2>$null
+    psmux send-keys -t $testC_session C-c 2>$null
     Start-Sleep 2
 
-    psmux kill-server 2>$null
+    psmux kill-session -t $testC_session 2>$null
     Start-Sleep 1
 }
 

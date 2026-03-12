@@ -126,6 +126,10 @@ function Wait-PaneContent {
 function Kill-TestSession {
     param([string]$SessionName)
     try { & $PSMUX kill-session -t $SessionName 2>&1 | Out-Null } catch {}
+    Start-Sleep -Milliseconds 500
+    # Clean up port/key files in case the server exits slowly
+    Remove-Item "$env:USERPROFILE\.psmux\$SessionName.port" -Force -ErrorAction SilentlyContinue
+    Remove-Item "$env:USERPROFILE\.psmux\$SessionName.key" -Force -ErrorAction SilentlyContinue
     Start-Sleep -Milliseconds 300
 }
 

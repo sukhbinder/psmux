@@ -55,6 +55,10 @@ function Start-Session {
     param([string]$Name = $SESSION)
     try { & $PSMUX kill-session -t $Name 2>&1 | Out-Null } catch {}
     Start-Sleep -Milliseconds 500
+    # Remove stale port/key files to avoid conflicts with dying servers
+    Remove-Item "$env:USERPROFILE\.psmux\$Name.port" -Force -ErrorAction SilentlyContinue
+    Remove-Item "$env:USERPROFILE\.psmux\$Name.key" -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Milliseconds 300
     & $PSMUX new-session -s $Name -d 2>&1 | Out-Null
     Start-Sleep -Milliseconds 2500
     & $PSMUX has-session -t $Name 2>&1 | Out-Null
@@ -64,7 +68,10 @@ function Start-Session {
 function Stop-Session {
     param([string]$Name = $SESSION)
     try { & $PSMUX kill-session -t $Name 2>&1 | Out-Null } catch {}
-    Start-Sleep -Milliseconds 500
+    Start-Sleep -Milliseconds 800
+    # Clean up port/key files in case server didn't exit cleanly
+    Remove-Item "$env:USERPROFILE\.psmux\$Name.port" -Force -ErrorAction SilentlyContinue
+    Remove-Item "$env:USERPROFILE\.psmux\$Name.key" -Force -ErrorAction SilentlyContinue
 }
 
 function Capture-Pane {
