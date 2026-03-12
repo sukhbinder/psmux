@@ -287,7 +287,7 @@ pub fn execute_action(app: &mut AppState, action: &Action) -> io::Result<bool> {
         }
         Action::NewWindow => {
             let pty_system = portable_pty::native_pty_system();
-            create_window(&*pty_system, app, None)?;
+            create_window(&*pty_system, app, None, None)?;
         }
         Action::SplitHorizontal => {
             split_active(app, LayoutKind::Horizontal)?;
@@ -357,7 +357,7 @@ pub fn execute_command_prompt(app: &mut AppState) -> io::Result<()> {
     match parts[0] {
         "new-window" => {
             let pty_system = portable_pty::native_pty_system();
-            create_window(&*pty_system, app, None)?;
+            create_window(&*pty_system, app, None, None)?;
         }
         "split-window" => {
             let kind = if parts.iter().any(|p| *p == "-h") { LayoutKind::Horizontal } else { LayoutKind::Vertical };

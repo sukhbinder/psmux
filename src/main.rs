@@ -242,7 +242,7 @@ fn run_main() -> io::Result<()> {
             let psmux_dir = format!("{}\\.psmux", home);
             // Compute namespace prefix for -L filtering (matches list-sessions behavior)
             let ns_prefix = l_socket_name.as_ref().map(|l| format!("{l}__"));
-            let mut streams: Vec<std::net::TcpStream> = Vec::new();
+            let mut targets: Vec<(std::path::PathBuf, u16, String)> = Vec::new();
             let mut stale_ports: Vec<std::path::PathBuf> = Vec::new();
             if let Ok(entries) = std::fs::read_dir(&psmux_dir) {
                 for entry in entries.flatten() {
@@ -257,25 +257,8 @@ fn run_main() -> io::Result<()> {
                             }
                             if let Ok(port_str) = std::fs::read_to_string(&path) {
                                 if let Ok(port) = port_str.trim().parse::<u16>() {
-                                    let addr = format!("127.0.0.1:{}", port);
                                     let sess_key = read_session_key(session_name).unwrap_or_default();
-                                    if let Ok(mut stream) = std::net::TcpStream::connect_timeout(
-                                        &addr.parse().unwrap(),
-                                        Duration::from_millis(1000),
-                                    ) {
-                                        let _ = stream.set_nodelay(true);
-                                        let _ = write!(stream, "AUTH {}\n", sess_key);
-                                        let _ = stream.flush();
-                                        let _ = std::io::Write::write_all(&mut stream, b"kill-server\n");
-                                        let _ = stream.flush();
-                                        // Shutdown write half to signal we're done sending.
-                                        // Keep read half open to detect server exit.
-                                        let _ = stream.shutdown(std::net::Shutdown::Write);
-                                        streams.push(stream);
-                                    } else {
-                                        // Server not reachable — stale port file
-                                        stale_ports.push(path.clone());
-                                    }
+                                    targets.push((path.clone(), port, sess_key));
                                 }
                             } else {
                                 stale_ports.push(path.clone());
@@ -284,30 +267,48 @@ fn run_main() -> io::Result<()> {
                     }
                 }
             }
-            // Wait for each server to exit (connection close = server exited)
-            for mut stream in streams {
-                let _ = stream.set_read_timeout(Some(Duration::from_millis(3000)));
-                let mut buf = [0u8; 64];
-                // Read until EOF or error — server closing connection means it processed kill-server
-                loop {
-                    match std::io::Read::read(&mut stream, &mut buf) {
-                        Ok(0) => break,  // EOF — server closed connection
-                        Err(_) => break, // timeout or error
-                        Ok(_) => continue, // drain any response
+            // Send kill-server to all sessions in parallel via threads
+            let handles: Vec<std::thread::JoinHandle<()>> = targets.into_iter().map(|(path, port, sess_key)| {
+                std::thread::spawn(move || {
+                    let addr = format!("127.0.0.1:{}", port);
+                    if let Ok(mut stream) = std::net::TcpStream::connect_timeout(
+                        &addr.parse().unwrap(),
+                        Duration::from_millis(500),
+                    ) {
+                        let _ = stream.set_nodelay(true);
+                        let _ = write!(stream, "AUTH {}\n", sess_key);
+                        let _ = stream.flush();
+                        let _ = std::io::Write::write_all(&mut stream, b"kill-server\n");
+                        let _ = stream.flush();
+                        let _ = stream.shutdown(std::net::Shutdown::Write);
+                        // Wait for server to exit (EOF = done)
+                        let _ = stream.set_read_timeout(Some(Duration::from_millis(2000)));
+                        let mut buf = [0u8; 64];
+                        loop {
+                            match std::io::Read::read(&mut stream, &mut buf) {
+                                Ok(0) => break,
+                                Err(_) => break,
+                                Ok(_) => continue,
+                            }
+                        }
                     }
-                }
-            }
+                    // Remove port/key files regardless
+                    let _ = std::fs::remove_file(&path);
+                    let key_path = path.with_extension("key");
+                    let _ = std::fs::remove_file(&key_path);
+                })
+            }).collect();
+            // Wait for all threads to complete
+            for h in handles { let _ = h.join(); }
             // Clean up stale port/key files
             for path in &stale_ports {
                 let _ = std::fs::remove_file(path);
-                // Also remove the corresponding .key file
                 let key_path = path.with_extension("key");
                 let _ = std::fs::remove_file(&key_path);
             }
-            // Brief sleep then verify no processes remain; if any do, force-kill them.
-            // Only do the nuclear fallback when not using -L namespace filtering,
-            // because with -L we should only kill sessions in that namespace.
-            std::thread::sleep(Duration::from_millis(300));
+            // Brief wait then verify no processes remain; if any do, force-kill them.
+            // Only do the nuclear fallback when not using -L namespace filtering.
+            std::thread::sleep(Duration::from_millis(50));
             if ns_prefix.is_none() {
                 kill_remaining_server_processes();
             }

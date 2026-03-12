@@ -67,7 +67,7 @@ fn default_shell_name(command: Option<&str>, configured_shell: Option<&str>) -> 
     }
 }
 
-pub fn create_window(pty_system: &dyn portable_pty::PtySystem, app: &mut AppState, command: Option<&str>) -> io::Result<()> {
+pub fn create_window(pty_system: &dyn portable_pty::PtySystem, app: &mut AppState, command: Option<&str>, start_dir: Option<&str>) -> io::Result<()> {
     // ── Fast path: use pre-spawned warm pane when creating a default shell ──
     // The warm pane has its shell already loaded (~470ms for pwsh), so the
     // prompt appears instantly — matching wezterm's "instant tab" feel.
@@ -118,6 +118,10 @@ pub fn create_window(pty_system: &dyn portable_pty::PtySystem, app: &mut AppStat
     } else {
         build_command(None, app.env_shim)
     };
+    // Override CWD if -c start_dir was specified
+    if let Some(dir) = start_dir {
+        shell_cmd.cwd(std::path::Path::new(dir));
+    }
     set_tmux_env(&mut shell_cmd, app.next_pane_id, app.control_port, app.socket_name.as_deref(), &app.session_name, app.claude_code_fix_tty, app.claude_code_force_interactive);
     apply_user_environment(&mut shell_cmd, &app.environment);
     let child = pair
@@ -204,7 +208,7 @@ pub fn spawn_warm_pane(pty_system: &dyn portable_pty::PtySystem, app: &mut AppSt
 }
 
 pub fn split_active(app: &mut AppState, kind: LayoutKind) -> io::Result<()> {
-    split_active_with_command(app, kind, None, None)
+    split_active_with_command(app, kind, None, None, None)
 }
 
 /// Create a new window with a raw command (program + args, no shell wrapping)
@@ -266,7 +270,7 @@ const MIN_SPLIT_ROWS: u16 = 4;
 /// Minimum cols for a split to be allowed.
 const MIN_SPLIT_COLS: u16 = 10;
 
-pub fn split_active_with_command(app: &mut AppState, kind: LayoutKind, command: Option<&str>, pty_system_ref: Option<&dyn portable_pty::PtySystem>) -> io::Result<()> {
+pub fn split_active_with_command(app: &mut AppState, kind: LayoutKind, command: Option<&str>, pty_system_ref: Option<&dyn portable_pty::PtySystem>, start_dir: Option<&str>) -> io::Result<()> {
     // ── Guard: refuse split if the active pane is too small ──────────
     // After splitting, each half gets roughly (dim / 2) - 1 (for the divider).
     // If that would be below MIN_PANE_DIM, deny the split to avoid crashing
@@ -364,6 +368,10 @@ pub fn split_active_with_command(app: &mut AppState, kind: LayoutKind, command: 
     } else {
         build_command(None, app.env_shim)
     };
+    // Override CWD if -c start_dir was specified
+    if let Some(dir) = start_dir {
+        shell_cmd.cwd(std::path::Path::new(dir));
+    }
     set_tmux_env(&mut shell_cmd, app.next_pane_id, app.control_port, app.socket_name.as_deref(), &app.session_name, app.claude_code_fix_tty, app.claude_code_force_interactive);
     apply_user_environment(&mut shell_cmd, &app.environment);
     let child = pair.slave.spawn_command(shell_cmd).map_err(|e| io::Error::new(io::ErrorKind::Other, format!("spawn shell error: {e}")))?;
@@ -593,8 +601,12 @@ pub fn build_command(command: Option<&str>, env_shim: bool) -> CommandBuilder {
                 builder.env("COLORTERM", "truecolor");
                 builder.env("PSMUX_SESSION", "1");
                 
-                if path.to_lowercase().contains("pwsh") {
+                let stem = std::path::Path::new(&path).file_stem()
+                    .and_then(|s| s.to_str()).unwrap_or("").to_lowercase();
+                if stem == "pwsh" || stem == "powershell" {
                     builder.args(["-NoLogo", "-Command", cmd]);
+                } else if matches!(stem.as_str(), "bash" | "sh" | "zsh" | "fish" | "dash" | "ash") {
+                    builder.args(["-c", cmd]);
                 } else {
                     builder.args(["/C", cmd]);
                 }

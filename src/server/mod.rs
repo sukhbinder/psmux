@@ -396,7 +396,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
     if let Some(ref raw_args) = raw_command {
         create_window_raw(&*pty_system, &mut app, raw_args)?;
     } else {
-        create_window(&*pty_system, &mut app, initial_command.as_deref())?;
+        create_window(&*pty_system, &mut app, initial_command.as_deref(), None)?;
     }
     if let Some(prev) = saved_dir { env::set_current_dir(prev).ok(); }
     // Apply window name if specified via -n
@@ -554,7 +554,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     // Hide the warm pane when an explicit start dir is requested
                     // so create_window spawns a fresh shell in the correct CWD.
                     let stashed_warm = if start_dir.is_some() { app.warm_pane.take() } else { None };
-                    if let Err(e) = create_window(&*pty_system, &mut app, cmd.as_deref()) {
+                    if let Err(e) = create_window(&*pty_system, &mut app, cmd.as_deref(), start_dir.as_deref()) {
                         eprintln!("psmux: new-window error: {e}");
                     }
                     if let Some(wp) = stashed_warm { app.warm_pane = Some(wp); }
@@ -575,7 +575,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     let saved_dir = if start_dir.is_some() { env::current_dir().ok() } else { None };
                     if let Some(dir) = &start_dir { env::set_current_dir(dir).ok(); }
                     let stashed_warm = if start_dir.is_some() { app.warm_pane.take() } else { None };
-                    if let Err(e) = create_window(&*pty_system, &mut app, cmd.as_deref()) {
+                    if let Err(e) = create_window(&*pty_system, &mut app, cmd.as_deref(), start_dir.as_deref()) {
                         eprintln!("psmux: new-window error: {e}");
                     }
                     if let Some(wp) = stashed_warm { app.warm_pane = Some(wp); }
@@ -602,7 +602,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     let prev_path = app.windows[app.active_idx].active_path.clone();
                     // Hide warm pane when explicit start_dir is given (wrong CWD)
                     let stashed_warm = if start_dir.is_some() { app.warm_pane.take() } else { None };
-                    if let Err(e) = split_active_with_command(&mut app, k, cmd.as_deref(), Some(&*pty_system)) {
+                    if let Err(e) = split_active_with_command(&mut app, k, cmd.as_deref(), Some(&*pty_system), start_dir.as_deref()) {
                         let _ = resp.send(format!("psmux: split-window: {e}"));
                     } else {
                         let _ = resp.send(String::new());
@@ -640,7 +640,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     if let Some(dir) = &start_dir { env::set_current_dir(dir).ok(); }
                     let prev_path = app.windows[app.active_idx].active_path.clone();
                     let stashed_warm = if start_dir.is_some() { app.warm_pane.take() } else { None };
-                    if let Err(e) = split_active_with_command(&mut app, k, cmd.as_deref(), Some(&*pty_system)) {
+                    if let Err(e) = split_active_with_command(&mut app, k, cmd.as_deref(), Some(&*pty_system), start_dir.as_deref()) {
                         eprintln!("psmux: split-window error: {e}");
                     }
                     if let Some(wp) = stashed_warm { app.warm_pane = Some(wp); }

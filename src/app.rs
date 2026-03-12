@@ -344,7 +344,7 @@ pub fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<
 
     load_config(&mut app);
 
-    create_window(&*pty_system, &mut app, None)?;
+    create_window(&*pty_system, &mut app, None, None)?;
 
     let (tx, rx) = mpsc::channel::<CtrlReq>();
     app.control_rx = Some(rx);
@@ -1104,12 +1104,12 @@ pub fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<
             let req = if let Some(rx) = app.control_rx.as_ref() { rx.try_recv().ok() } else { None };
             let Some(req) = req else { break; };
             match req {
-                CtrlReq::NewWindow(cmd, name, _detached, _start_dir) => {
-                    create_window(&*pty_system, &mut app, cmd.as_deref())?;
+                CtrlReq::NewWindow(cmd, name, _detached, start_dir) => {
+                    create_window(&*pty_system, &mut app, cmd.as_deref(), start_dir.as_deref())?;
                     if let Some(n) = name { app.windows.last_mut().map(|w| w.name = n); }
                     resize_all_panes(&mut app);
                 }
-                CtrlReq::SplitWindow(k, cmd, _detached, _start_dir, _size_pct, resp) => { let _ = resp.send(if let Err(e) = split_active_with_command(&mut app, k, cmd.as_deref(), Some(&*pty_system)) { format!("{e}") } else { String::new() }); resize_all_panes(&mut app); }
+                CtrlReq::SplitWindow(k, cmd, _detached, start_dir, _size_pct, resp) => { let _ = resp.send(if let Err(e) = split_active_with_command(&mut app, k, cmd.as_deref(), Some(&*pty_system), start_dir.as_deref()) { format!("{e}") } else { String::new() }); resize_all_panes(&mut app); }
                 CtrlReq::KillPane => { let _ = kill_active_pane(&mut app); resize_all_panes(&mut app); }
                 CtrlReq::KillPaneById(pid) => { let _ = kill_pane_by_id(&mut app, pid); resize_all_panes(&mut app); }
                 CtrlReq::CapturePane(resp) => {
