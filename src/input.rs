@@ -1258,6 +1258,12 @@ pub fn parse_modified_special_key(s: &str) -> Option<String> {
     if m <= 1 { return None; } // no modifiers found
     // Match the base key name
     match rest {
+        "TAB" => Some(format!("\x1b[9;{}~", m)),
+        "BTAB" | "BACKTAB" => {
+            // Shift is implicit in BackTab; ensure Shift bit is set
+            let sm = m | 1; // set Shift bit
+            Some(format!("\x1b[9;{}~", sm))
+        }
         "LEFT" => Some(format!("\x1b[1;{}D", m)),
         "RIGHT" => Some(format!("\x1b[1;{}C", m)),
         "UP" => Some(format!("\x1b[1;{}A", m)),
@@ -1346,8 +1352,25 @@ pub fn encode_key_event(key: &KeyEvent) -> Option<Vec<u8>> {
             format!("{}", c).into_bytes()
         }
         KeyCode::Enter => b"\r".to_vec(),
-        KeyCode::Tab => b"\t".to_vec(),
-        KeyCode::BackTab => b"\x1b[Z".to_vec(),
+        KeyCode::Tab => {
+            let m = modifier_param(key.modifiers);
+            if m > 1 {
+                // xterm modified-Tab: CSI 9 ; mod ~
+                format!("\x1b[9;{}~", m).into_bytes()
+            } else {
+                b"\t".to_vec()
+            }
+        }
+        KeyCode::BackTab => {
+            let m = modifier_param(key.modifiers);
+            if m > 1 {
+                // Shift is implicit in BackTab; add it back for the modifier param
+                let sm = m | 1; // ensure Shift bit is set
+                format!("\x1b[9;{}~", sm).into_bytes()
+            } else {
+                b"\x1b[Z".to_vec()
+            }
+        }
         KeyCode::Backspace => b"\x08".to_vec(),
         KeyCode::Esc => b"\x1b".to_vec(),
         // Arrow keys and special keys with xterm modifier encoding.

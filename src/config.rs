@@ -854,54 +854,36 @@ pub fn parse_key_name(name: &str) -> Option<(KeyCode, KeyModifiers)> {
     } else {
         name
     };
-    
-    if name.starts_with("C-") || name.starts_with("^") {
-        let rest = if name.starts_with("C-") { &name[2..] } else { &name[1..] };
-        // Check for named keys (Space, Enter, etc.) before single-char fallback
-        if let Some(kc) = named_key(rest) {
-            return Some((kc, KeyModifiers::CONTROL));
-        }
-        if rest.len() == 1 {
-            if let Some(c) = rest.chars().next() {
-                return Some((KeyCode::Char(c.to_ascii_lowercase()), KeyModifiers::CONTROL));
-            }
-        }
+
+    // ── Extract all modifier prefixes (C-, M-, S-) then resolve the base key ──
+    // This supports arbitrary combinations: C-Tab, C-S-Tab, C-M-S-Up, etc.
+    let mut rest = name;
+    let mut mods = KeyModifiers::NONE;
+    loop {
+        if rest.starts_with("C-") { mods |= KeyModifiers::CONTROL; rest = &rest[2..]; }
+        else if rest.starts_with("M-") { mods |= KeyModifiers::ALT; rest = &rest[2..]; }
+        else if rest.starts_with("S-") { mods |= KeyModifiers::SHIFT; rest = &rest[2..]; }
+        else if rest.starts_with("^") && rest.len() > 1 { mods |= KeyModifiers::CONTROL; rest = &rest[1..]; }
+        else { break; }
     }
 
-    if name.starts_with("M-") {
-        let rest = &name[2..];
+    if mods != KeyModifiers::NONE {
+        // S-Tab (with or without other modifiers) → BackTab + remaining mods
+        if rest.eq_ignore_ascii_case("Tab") && mods.contains(KeyModifiers::SHIFT) {
+            return Some((KeyCode::BackTab, mods.difference(KeyModifiers::SHIFT)));
+        }
         if let Some(kc) = named_key(rest) {
-            return Some((kc, KeyModifiers::ALT));
+            return Some((kc, mods));
         }
         if rest.len() == 1 {
             if let Some(c) = rest.chars().next() {
-                return Some((KeyCode::Char(c.to_ascii_lowercase()), KeyModifiers::ALT));
+                if mods.contains(KeyModifiers::SHIFT) {
+                    return Some((KeyCode::Char(c.to_ascii_uppercase()), mods.difference(KeyModifiers::SHIFT)));
+                }
+                return Some((KeyCode::Char(c.to_ascii_lowercase()), mods));
             }
         }
-    }
-    
-    if name.starts_with("S-") {
-        let rest = &name[2..];
-        if rest.eq_ignore_ascii_case("Tab") {
-            return Some((KeyCode::BackTab, KeyModifiers::NONE));
-        }
-        // Handle S-Left, S-Right, S-Up, S-Down (Shift+Arrow)
-        match rest.to_lowercase().as_str() {
-            "left" => return Some((KeyCode::Left, KeyModifiers::SHIFT)),
-            "right" => return Some((KeyCode::Right, KeyModifiers::SHIFT)),
-            "up" => return Some((KeyCode::Up, KeyModifiers::SHIFT)),
-            "down" => return Some((KeyCode::Down, KeyModifiers::SHIFT)),
-            "home" => return Some((KeyCode::Home, KeyModifiers::SHIFT)),
-            "end" => return Some((KeyCode::End, KeyModifiers::SHIFT)),
-            "pageup" | "ppage" => return Some((KeyCode::PageUp, KeyModifiers::SHIFT)),
-            "pagedown" | "npage" => return Some((KeyCode::PageDown, KeyModifiers::SHIFT)),
-            _ => {}
-        }
-        if let Some(c) = rest.chars().next() {
-            if rest.len() == 1 {
-                return Some((KeyCode::Char(c.to_ascii_uppercase()), KeyModifiers::SHIFT));
-            }
-        }
+        // Unrecognized key after modifiers — fall through
     }
     
     match name.to_uppercase().as_str() {
