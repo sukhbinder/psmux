@@ -447,6 +447,9 @@ pub struct AppState {
     pub status_message: Option<(String, std::time::Instant)>,
     /// Pre-spawned warm pane: shell already loaded, ready for instant new-window.
     pub warm_pane: Option<WarmPane>,
+    /// Plugin .ps1 scripts queued during config loading for post-startup execution.
+    /// These need the server to be running (TCP listener) before they can apply.
+    pub pending_plugin_scripts: Vec<String>,
 }
 
 impl AppState {
@@ -576,6 +579,7 @@ impl AppState {
             last_hover_pos: None,
             status_message: None,
             warm_pane: None,
+            pending_plugin_scripts: Vec::new(),
         }
     }
 

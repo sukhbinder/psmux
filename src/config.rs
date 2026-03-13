@@ -638,6 +638,7 @@ pub fn parse_option_value(app: &mut AppState, rest: &str, _is_global: bool) {
                         // Common layout: plugins installed under psmux-plugins/ subdirectory
                         format!("{}\\.psmux\\plugins\\psmux-plugins\\{}\\plugin.conf", home, plugin_name),
                     ];
+                    let mut found = false;
                     for conf in &candidates {
                         if std::path::Path::new(conf).exists() {
                             let prev_file = current_config_file();
@@ -646,7 +647,35 @@ pub fn parse_option_value(app: &mut AppState, rest: &str, _is_global: bool) {
                                 parse_config_content(app, &content);
                             }
                             set_current_config_file(&prev_file);
+                            found = true;
                             break;
+                        }
+                    }
+                    // If no plugin.conf, try .ps1 entry scripts
+                    if !found {
+                        let ps1_candidates = [
+                            format!("{}\\.psmux\\plugins\\{}\\{}.ps1", home, value.replace('/', "\\"), plugin_name),
+                            format!("{}\\.psmux\\plugins\\{}\\{}.ps1", home, plugin_name, plugin_name),
+                            format!("{}\\.psmux\\plugins\\psmux-plugins\\{}\\{}.ps1", home, plugin_name, plugin_name),
+                        ];
+                        for ps1 in &ps1_candidates {
+                            if std::path::Path::new(ps1).exists() {
+                                // First try static extraction of set/bind commands
+                                if let Ok(content) = std::fs::read_to_string(ps1) {
+                                    let prev_file = current_config_file();
+                                    set_current_config_file(ps1);
+                                    let applied = parse_ps1_plugin_script(app, &content);
+                                    set_current_config_file(&prev_file);
+                                    // If the script uses PS variables (theme plugins),
+                                    // static extraction yields unresolved $vars.
+                                    // Queue for post-startup execution when the
+                                    // server is listening.
+                                    if !applied {
+                                        app.pending_plugin_scripts.push(ps1.clone());
+                                    }
+                                }
+                                break;
+                            }
                         }
                     }
                 }
@@ -1176,6 +1205,73 @@ fn parse_run_shell(app: &mut AppState, line: &str) {
 /// tmux CLI calls into psmux config lines.
 ///
 /// Supported patterns:
+/// Parse a .ps1 plugin entry script and extract psmux set/bind commands.
+///
+/// Plugin .ps1 scripts use patterns like:
+///   & $PSMUX set -g key value 2>&1 | Out-Null
+///   & $PSMUX bind-key ...
+///
+/// We extract the psmux command portion and apply it as config.
+/// Returns true if all extracted values are literal (no unresolved PS variables).
+/// Returns false if the script uses PowerShell variables that need runtime eval.
+fn parse_ps1_plugin_script(app: &mut AppState, content: &str) -> bool {
+    let mut has_ps_vars = false;
+    let mut applied_any = false;
+
+    for line in content.lines() {
+        let l = line.trim();
+        if l.is_empty() || l.starts_with('#') { continue; }
+
+        // Match patterns like: & $PSMUX set -g ... 2>&1 | Out-Null
+        // Also: & $PSMUX bind-key ... 2>&1 | Out-Null
+        let cmd_start = if let Some(pos) = l.find("$PSMUX ") {
+            // Ensure it's preceded by "& " (PowerShell call operator)
+            let prefix = &l[..pos];
+            if prefix.trim_end().ends_with('&') {
+                Some(pos + 7) // skip "$PSMUX "
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        let cmd = match cmd_start {
+            Some(start) => &l[start..],
+            None => continue,
+        };
+
+        // Strip trailing PowerShell noise: 2>&1 | Out-Null, 2>$null
+        let cmd = cmd.split(" 2>&1").next().unwrap_or(cmd);
+        let cmd = cmd.split(" 2>$null").next().unwrap_or(cmd);
+        let cmd = cmd.trim();
+
+        // Check for unresolved PowerShell variables (e.g., $bg1, $fg)
+        // but not $PSMUX or $TMUX which are expected patterns
+        if cmd.contains('$') {
+            // Check if it's a PS variable reference (not env var pattern)
+            let has_var = cmd.split('$').skip(1).any(|part| {
+                let first_word: String = part.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
+                !first_word.is_empty() && first_word != "PSMUX" && first_word != "TMUX"
+                    && first_word != "env" && first_word != "null"
+            });
+            if has_var { has_ps_vars = true; }
+        }
+
+        if cmd.starts_with("set ") || cmd.starts_with("set-option ")
+            || cmd.starts_with("bind-key ") || cmd.starts_with("bind ")
+            || cmd.starts_with("setw ") || cmd.starts_with("set-window-option ") {
+            if !has_ps_vars {
+                parse_config_line(app, cmd);
+                applied_any = true;
+            }
+        }
+    }
+
+    // Return true if we applied commands and they were all literal
+    applied_any && !has_ps_vars
+}
+
 ///   tmux source[-file] "path"       → source-file "path"
 ///   tmux set[-option] [-g] key val  → set [-g] key val
 ///   tmux setw key val               → setw key val

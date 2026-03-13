@@ -156,14 +156,14 @@ $autorename = (& $PSMUX show-options -g -v automatic-rename -t $sess 2>&1 | Out-
 $escape = (& $PSMUX show-options -g -v escape-time -t $sess 2>&1 | Out-String).Trim()
 $sw.Stop()
 
-if ($style -match "#282828") { Write-Pass "Gruvbox theme loaded synchronously (status-style='$style')" }
-else { Write-Info "[SKIP] Theme not applied — gruvbox plugin likely not installed (status-style='$style')" }
+if ($style -match "#3c3836|#ebdbb2") { Write-Pass "Gruvbox theme loaded synchronously (status-style='$style')" }
+else { Write-Fail "Theme not sync: status-style='$style'" }
 
 if ($autorename -eq "off") { Write-Pass "User override preserved (automatic-rename=off)" }
 else { Write-Fail "User override lost (automatic-rename='$autorename')" }
 
 if ($escape -eq "50") { Write-Pass "Sensible default applied (escape-time=50)" }
-else { Write-Info "[SKIP] Sensible default not applied — plugin likely not installed (escape-time='$escape')" }
+else { Write-Fail "Sensible not applied: escape-time='$escape'" }
 
 Write-Perf "3 option queries: $($sw.ElapsedMilliseconds)ms"
 

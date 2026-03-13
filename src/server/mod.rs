@@ -232,6 +232,88 @@ fn compute_effective_client_size(app: &AppState) -> Option<(u16, u16)> {
     }
 }
 
+/// Process a single CtrlReq during the post-config plugin drain loop.
+/// Handles the subset of requests that plugin scripts send (set, show, bind,
+/// source-file) and silently drops others.
+fn drain_plugin_req(
+    app: &mut AppState,
+    req: CtrlReq,
+    shared_aliases: &std::sync::Arc<std::sync::RwLock<std::collections::HashMap<String, String>>>,
+) {
+    match req {
+        CtrlReq::SetOption(option, value) => {
+            apply_set_option(app, &option, &value, false);
+            if option == "command-alias" {
+                if let Ok(mut map) = shared_aliases.write() {
+                    *map = app.command_aliases.clone();
+                }
+            }
+        }
+        CtrlReq::SetOptionQuiet(option, value, quiet) => {
+            apply_set_option(app, &option, &value, quiet);
+            if option == "command-alias" {
+                if let Ok(mut map) = shared_aliases.write() {
+                    *map = app.command_aliases.clone();
+                }
+            }
+        }
+        CtrlReq::SetOptionAppend(option, value) => {
+            if option.starts_with('@') {
+                let existing = app.environment.get(&option).cloned().unwrap_or_default();
+                app.environment.insert(option, format!("{}{}", existing, value));
+            } else {
+                match option.as_str() {
+                    "status-left" => app.status_left.push_str(&value),
+                    "status-right" => app.status_right.push_str(&value),
+                    "status-style" => app.status_style.push_str(&value),
+                    _ => {}
+                }
+            }
+        }
+        CtrlReq::SetOptionUnset(option) => {
+            if option.starts_with('@') {
+                app.environment.remove(&option);
+            }
+        }
+        CtrlReq::ShowOptionValue(resp, name) => {
+            let val = get_option_value(app, &name);
+            let _ = resp.send(val);
+        }
+        CtrlReq::ShowWindowOptionValue(resp, name) => {
+            let val = get_window_option_value(app, &name);
+            let _ = resp.send(val);
+        }
+        CtrlReq::ShowOptions(resp) => {
+            // Minimal: just send empty to unblock the caller
+            let _ = resp.send(String::new());
+        }
+        CtrlReq::ShowWindowOptions(resp) => {
+            let _ = resp.send(render_window_options(app));
+        }
+        CtrlReq::BindKey(table_name, key, command, repeat) => {
+            if let Some(kc) = parse_key_string(&key) {
+                let kc = normalize_key_for_binding(kc);
+                let sub_cmds = crate::config::split_chained_commands_pub(&command);
+                let action = if sub_cmds.len() > 1 {
+                    Some(Action::CommandChain(sub_cmds))
+                } else {
+                    parse_command_to_action(&command)
+                };
+                if let Some(act) = action {
+                    let table = app.key_tables.entry(table_name).or_default();
+                    table.retain(|b| b.key != kc);
+                    table.push(Bind { key: kc, action: act, repeat });
+                }
+            }
+        }
+        CtrlReq::SourceFile(path) => {
+            crate::config::source_file(app, &path);
+        }
+        // Ignore other request types during plugin drain
+        _ => {}
+    }
+}
+
 pub fn run_server(session_name: String, socket_name: Option<String>, initial_command: Option<String>, raw_command: Option<Vec<String>>, start_dir: Option<String>, window_name: Option<String>, init_size: Option<(u16, u16)>) -> io::Result<()> {
     // Write crash info to a log file when stderr is unavailable (detached server)
     std::panic::set_hook(Box::new(|info| {
@@ -345,6 +427,55 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
     } else { None };
 
     load_config(&mut app);
+
+    // Execute queued plugin .ps1 scripts (e.g. theme plugins that use
+    // PowerShell variables and call back to psmux via CLI).  We spawn
+    // them async and then drain the CtrlReq channel in a mini-loop so
+    // show-options / set requests from the scripts are handled before
+    // the main UI starts.
+    if !app.pending_plugin_scripts.is_empty() {
+        let scripts: Vec<String> = app.pending_plugin_scripts.drain(..).collect();
+        let target_session = app.port_file_base();
+        let mut children: Vec<std::process::Child> = Vec::new();
+        for ps1 in &scripts {
+            let mut cmd = std::process::Command::new("pwsh");
+            cmd.args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", ps1]);
+            if !target_session.is_empty() {
+                cmd.env("PSMUX_TARGET_SESSION", &target_session);
+            }
+            cmd.stdout(std::process::Stdio::null());
+            cmd.stderr(std::process::Stdio::null());
+            if let Ok(child) = cmd.spawn() {
+                children.push(child);
+            }
+        }
+
+        // Drain CtrlReq messages until all scripts finish (max 5s).
+        if !children.is_empty() {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            // Temporarily take rx out of app to avoid borrow conflict
+            if let Some(rx) = app.control_rx.take() {
+                loop {
+                    let all_done = children.iter_mut().all(|c| {
+                        matches!(c.try_wait(), Ok(Some(_)))
+                    });
+                    let remaining = deadline.saturating_duration_since(Instant::now());
+                    if all_done || remaining.is_zero() {
+                        while let Ok(req) = rx.try_recv() {
+                            drain_plugin_req(&mut app, req, &shared_aliases_main);
+                        }
+                        break;
+                    }
+                    match rx.recv_timeout(Duration::from_millis(50).min(remaining)) {
+                        Ok(req) => drain_plugin_req(&mut app, req, &shared_aliases_main),
+                        Err(mpsc::RecvTimeoutError::Timeout) => {}
+                        Err(_) => break,
+                    }
+                }
+                app.control_rx = Some(rx);
+            }
+        }
+    }
 
     // If the user configured a custom default-shell in their config, the
     // early warm pane has the wrong shell — kill it so create_window falls
