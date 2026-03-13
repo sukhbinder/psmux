@@ -750,6 +750,7 @@ pub enum CtrlReq {
     SaveBuffer(String),
     LoadBuffer(String),
     SetEnvironment(String, String),
+    UnsetEnvironment(String),
     ShowEnvironment(mpsc::Sender<String>),
     SetHook(String, String),
     ShowHooks(mpsc::Sender<String>),

@@ -961,8 +961,13 @@ match cmd {
         let _ = tx.send(CtrlReq::LoadBuffer(path));
     }
     "set-environment" | "setenv" => {
+        let has_u = args.iter().any(|a| *a == "-u");
         let non_flag: Vec<&str> = args.iter().filter(|a| !a.starts_with('-')).copied().collect();
-        if non_flag.len() >= 2 {
+        if has_u {
+            if let Some(key) = non_flag.first() {
+                let _ = tx.send(CtrlReq::UnsetEnvironment(key.to_string()));
+            }
+        } else if non_flag.len() >= 2 {
             let _ = tx.send(CtrlReq::SetEnvironment(non_flag[0].to_string(), non_flag[1].to_string()));
         } else if non_flag.len() == 1 {
             let _ = tx.send(CtrlReq::SetEnvironment(non_flag[0].to_string(), String::new()));

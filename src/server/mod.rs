@@ -2368,6 +2368,16 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         let _ = wp.writer.write_all(cmd.as_bytes());
                     }
                 }
+                CtrlReq::UnsetEnvironment(key) => {
+                    app.environment.remove(&key);
+                    env::remove_var(&key);
+                    // Clear the var in the waiting warm pane too.
+                    if let Some(ref mut wp) = app.warm_pane {
+                        let cmd = format!("Remove-Item Env:{} -ErrorAction SilentlyContinue\r\n", key);
+                        use std::io::Write as _;
+                        let _ = wp.writer.write_all(cmd.as_bytes());
+                    }
+                }
                 CtrlReq::ShowEnvironment(resp) => {
                     let mut output = String::new();
                     // Show psmux/tmux-specific environment vars
