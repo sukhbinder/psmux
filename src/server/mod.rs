@@ -259,8 +259,8 @@ fn drain_plugin_req(
         }
         CtrlReq::SetOptionAppend(option, value) => {
             if option.starts_with('@') {
-                let existing = app.environment.get(&option).cloned().unwrap_or_default();
-                app.environment.insert(option, format!("{}{}", existing, value));
+                let existing = app.user_options.get(&option).cloned().unwrap_or_default();
+                app.user_options.insert(option, format!("{}{}", existing, value));
             } else {
                 match option.as_str() {
                     "status-left" => app.status_left.push_str(&value),
@@ -272,7 +272,7 @@ fn drain_plugin_req(
         }
         CtrlReq::SetOptionUnset(option) => {
             if option.starts_with('@') {
-                app.environment.remove(&option);
+                app.user_options.remove(&option);
             }
         }
         CtrlReq::ShowOptionValue(resp, name) => {
@@ -2008,7 +2008,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 CtrlReq::SetOptionUnset(option) => {
                     // Reset option to default or remove @user-option
                     if option.starts_with('@') {
-                        app.environment.remove(&option);
+                        app.user_options.remove(&option);
                     } else {
                         match option.as_str() {
                             "status-left" => { app.status_left = "psmux:#I".to_string(); }
@@ -2040,8 +2040,8 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 CtrlReq::SetOptionAppend(option, value) => {
                     // Append to existing option value
                     if option.starts_with('@') {
-                        let existing = app.environment.get(&option).cloned().unwrap_or_default();
-                        app.environment.insert(option, format!("{}{}", existing, value));
+                        let existing = app.user_options.get(&option).cloned().unwrap_or_default();
+                        app.user_options.insert(option, format!("{}{}", existing, value));
                     } else {
                         match option.as_str() {
                             "status-left" => { app.status_left.push_str(&value); }
@@ -2133,10 +2133,8 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         output.push_str(&format!("mode-style \"{}\"\n", app.mode_style));
                     }
                     // Include @user-options (used by plugins)
-                    for (key, val) in &app.environment {
-                        if key.starts_with('@') {
-                            output.push_str(&format!("{} \"{}\"\n", key, val));
-                        }
+                    for (key, val) in &app.user_options {
+                        output.push_str(&format!("{} \"{}\"\n", key, val));
                     }
                     // New options
                     output.push_str(&format!("main-pane-width {}\n", app.main_pane_width));

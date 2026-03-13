@@ -763,7 +763,7 @@ pub fn lookup_option_pub(name: &str, app: &AppState) -> Option<String> {
 
 fn lookup_option(name: &str, app: &AppState) -> Option<String> {
     if name.starts_with('@') {
-        return app.environment.get(name).cloned();
+        return app.user_options.get(name).cloned();
     }
     match name {
         "status-left" => Some(app.status_left.clone()),
@@ -817,12 +817,14 @@ fn lookup_option(name: &str, app: &AppState) -> Option<String> {
         "claude-code-fix-tty" => Some(if app.claude_code_fix_tty { "on".into() } else { "off".into() }),
         "claude-code-force-interactive" => Some(if app.claude_code_force_interactive { "on".into() } else { "off".into() }),
         _ => {
-            // Try exact name first, then @name for plugin user-option compat
-            // (plugins store @cpu_percentage but format strings use #{cpu_percentage})
-            app.environment.get(name).cloned()
+            // Try user_options first (plugins store @cpu_percentage etc.),
+            // then environment, then @name fallback for plugin compat
+            // (format strings use #{cpu_percentage} without the @ prefix).
+            app.user_options.get(name).cloned()
+                .or_else(|| app.environment.get(name).cloned())
                 .or_else(|| {
                     if !name.starts_with('@') {
-                        app.environment.get(&format!("@{}", name)).cloned()
+                        app.user_options.get(&format!("@{}", name)).cloned()
                     } else {
                         None
                     }

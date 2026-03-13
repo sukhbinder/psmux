@@ -617,8 +617,13 @@ pub fn parse_option_value(app: &mut AppState, rest: &str, _is_global: bool) {
                     return;
                 }
             }
-            // Store any unknown option in the environment map for plugin compat
-            app.environment.insert(key.to_string(), value.to_string());
+            // Store @-prefixed user/plugin options separately from environment
+            // so they don't leak into child shells (#105).
+            if key.starts_with('@') {
+                app.user_options.insert(key.to_string(), value.to_string());
+            } else {
+                app.environment.insert(key.to_string(), value.to_string());
+            }
 
             // Auto-source plugin conf files when @plugin is declared.
             // This makes theme/settings load synchronously during config

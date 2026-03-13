@@ -348,6 +348,10 @@ pub struct AppState {
     pub set_titles_string: String,
     /// Environment variables set via set-environment
     pub environment: std::collections::HashMap<String, String>,
+    /// User/plugin options (@-prefixed, tmux convention).
+    /// Stored separately from `environment` so they are NOT passed as
+    /// shell environment variables to child panes (#105).
+    pub user_options: std::collections::HashMap<String, String>,
     /// pane-border-style: style for inactive pane borders
     pub pane_border_style: String,
     /// pane-active-border-style: style for active pane borders
@@ -537,6 +541,7 @@ impl AppState {
             set_titles: false,
             set_titles_string: String::new(),
             environment: std::collections::HashMap::new(),
+            user_options: std::collections::HashMap::new(),
             pane_border_style: String::new(),
             pane_active_border_style: "fg=green".to_string(),
             window_status_format: "#I:#W#{?window_flags,#{window_flags}, }".to_string(),
