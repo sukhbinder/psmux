@@ -611,13 +611,32 @@ const PROFILE_SOURCE: &str = concat!(
     ")) { if ($__p -and (Test-Path $__p)) { try { . $__p } catch { Write-Warning \"psmux: profile error in ${__p}: $_\" } } }",
 );
 
+/// Sync PowerShell's $PWD to the OS-level CWD on every prompt (#111).
+/// PowerShell's `cd` (Set-Location) only updates `$PWD` internally and
+/// does NOT call Win32 SetCurrentDirectory(). This means the process PEB
+/// still shows the original spawn directory, causing #{pane_current_path}
+/// to always return the initial CWD.
+/// This hook wraps the prompt function to call SetCurrentDirectory after
+/// every command, keeping the PEB CWD in sync with PowerShell's $PWD.
+const CWD_SYNC: &str = concat!(
+    "if (-not $__psmux_cwd_hook) { ",
+    "$Global:__psmux_cwd_hook = $true; ",
+    "$__psmux_orig_prompt = if (Test-Path Function:\\prompt) { Get-Content Function:\\prompt } else { $null }; ",
+    "function Global:prompt { ",
+    "[System.IO.Directory]::SetCurrentDirectory($PWD.ProviderPath); ",
+    "if ($__psmux_orig_prompt) { & ([scriptblock]::Create($__psmux_orig_prompt)) } ",
+    "else { \"PS $($executionContext.SessionState.Path.CurrentLocation)$('>' * ($nestedPromptLevel + 1)) \" } ",
+    "} }",
+);
+
 /// Build the full interactive init string for PowerShell:
 /// 1. Disable PSReadLine predictions (before profile — prevents #109 crash)
 /// 2. Source the user's profile scripts
 /// 3. Re-disable predictions (in case the profile re-enabled them)
-/// 4. Optionally append the env shim
+/// 4. Install CWD sync hook (enables #{pane_current_path} — #111)
+/// 5. Optionally append the env shim
 fn build_psrl_init(env_shim: bool) -> String {
-    let mut s = format!("{}; {}; {}", PSRL_FIX, PROFILE_SOURCE, PSRL_FIX);
+    let mut s = format!("{}; {}; {}; {}", PSRL_FIX, PROFILE_SOURCE, PSRL_FIX, CWD_SYNC);
     if env_shim {
         s.push_str("; ");
         s.push_str(ENV_SHIM_PS);
