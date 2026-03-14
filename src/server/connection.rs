@@ -218,7 +218,8 @@ let args: Vec<&str> = {
     filtered
 };
 // Commands that should permanently change focus when used with -t
-let is_focus_cmd = matches!(cmd, "select-window" | "selectw" | "select-pane" | "selectp");
+let is_focus_cmd = matches!(cmd, "select-window" | "selectw" | "select-pane" | "selectp")
+    || (matches!(cmd, "split-window" | "splitw") && !args.iter().any(|a| *a == "-d"));
 if let Some(wid) = target_win {
     if is_focus_cmd {
         let _ = tx.send(CtrlReq::FocusWindow(wid));
