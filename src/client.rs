@@ -2732,9 +2732,10 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                 }
             }
             // If a display-message is active, show it on the status bar
-            // instead of the normal status content (tmux parity)
+            // instead of the normal status content (tmux parity).
+            // Uses message-style (default: bg=yellow,fg=black) matching tmux.
             let status_bar = if let Some(ref msg) = state.status_message {
-                let msg_style = Style::default().fg(Color::Yellow).bg(Color::Black);
+                let msg_style = crate::rendering::parse_tmux_style("bg=yellow,fg=black");
                 let padded = if msg.len() < status_chunk.width as usize {
                     format!("{}{}", msg, " ".repeat(status_chunk.width as usize - msg.len()))
                 } else {
