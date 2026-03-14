@@ -81,7 +81,7 @@ Write-Host ("=" * 60)
 # ══════════════════════════════════════════════════════════════════════
 
 # --- Test 1: split-window while zoomed → re-zooms on new pane ---
-Write-Test "1: split-window while zoomed → stays zoomed (tmux push/pop)"
+Write-Test "1: split-window while zoomed → unzooms permanently (tmux parity)"
 try {
     if (-not (New-TestSession $SESSION)) { throw "skip" }
 
@@ -101,12 +101,10 @@ try {
     $pAfter = Get-ActivePaneId $SESSION
     $count = Get-PaneCount $SESSION
 
-    if ($count -eq 3 -and $zoomed -eq "1" -and $pAfter -ne $pBefore) {
-        Write-Pass "1: Split while zoomed → re-zoomed on new pane ($pAfter), 3 panes"
-    } elseif ($count -eq 3 -and $zoomed -eq "0") {
-        Write-Pass "1: Split while zoomed → unzoomed, 3 panes (acceptable)"
+    if ($count -eq 3 -and $zoomed -eq "0") {
+        Write-Pass "1: Split while zoomed → permanently unzoomed, 3 panes visible"
     } else {
-        Write-Fail "1: panes=$count zoomed=$zoomed active=$pAfter"
+        Write-Fail "1: Expected 3 panes, unzoomed. Got panes=$count zoomed=$zoomed"
     }
 } catch {
     if ($_.ToString() -ne "skip") { Write-Fail "1: Exception: $_" }
@@ -114,8 +112,8 @@ try {
     Cleanup-Session $SESSION
 }
 
-# --- Test 2: Unzoom after split-while-zoomed shows all panes ---
-Write-Test "2: Unzoom after split-while-zoomed → all panes visible"
+# --- Test 2: Split while zoomed already unzooms — no toggle needed ---
+Write-Test "2: Split while zoomed already shows all panes (no extra unzoom)"
 try {
     if (-not (New-TestSession $SESSION)) { throw "skip" }
 
@@ -125,18 +123,16 @@ try {
     & $PSMUX resize-pane -Z -t $SESSION 2>&1 | Out-Null
     Start-Sleep -Milliseconds 500
 
+    # Split while zoomed — should permanently unzoom
     & $PSMUX split-window -v -t $SESSION 2>&1 | Out-Null
     Start-Sleep -Seconds 3
 
-    # Toggle zoom off
-    & $PSMUX resize-pane -Z -t $SESSION 2>&1 | Out-Null
-    Start-Sleep -Milliseconds 500
-
+    # Already unzoomed — no toggle needed. All 3 panes visible.
     $zoomed = Get-ZoomFlag $SESSION
     $count = Get-PaneCount $SESSION
 
     if ($count -eq 3 -and $zoomed -eq "0") {
-        Write-Pass "2: After unzoom → 3 panes visible, not zoomed"
+        Write-Pass "2: Split while zoomed → 3 panes visible, already unzoomed"
     } else {
         Write-Fail "2: panes=$count zoomed=$zoomed"
     }
@@ -147,7 +143,7 @@ try {
 }
 
 # --- Test 3: swap-pane while zoomed → stays zoomed ---
-Write-Test "3: swap-pane while zoomed → stays zoomed (push/pop)"
+Write-Test "3: swap-pane while zoomed → permanently unzooms (tmux parity)"
 try {
     if (-not (New-TestSession $SESSION)) { throw "skip" }
 
@@ -161,10 +157,10 @@ try {
     Start-Sleep -Milliseconds 500
 
     $zoomed = Get-ZoomFlag $SESSION
-    if ($zoomed -eq "1") {
-        Write-Pass "3: swap-pane while zoomed → stays zoomed"
+    if ($zoomed -eq "0") {
+        Write-Pass "3: swap-pane while zoomed → permanently unzoomed"
     } else {
-        Write-Pass "3: swap-pane while zoomed → unzoomed (acceptable)"
+        Write-Fail "3: swap-pane should unzoom but zoomed=$zoomed"
     }
 } catch {
     if ($_.ToString() -ne "skip") { Write-Fail "3: Exception: $_" }
