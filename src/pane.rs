@@ -152,6 +152,11 @@ pub fn create_window(pty_system: &dyn portable_pty::PtySystem, app: &mut AppStat
     let mut pty_writer = pair.master.take_writer()
         .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("take writer error: {e}")))?;
     conpty_preemptive_dsr_response(&mut *pty_writer);
+    // Inject PSReadLine fix + CWD hook for interactive PowerShell panes
+    if command.is_none() {
+        let shell_is_pwsh = configured_shell.map(|s| is_powershell_shell(s)).unwrap_or(true);
+        if shell_is_pwsh { inject_post_spawn_init(&mut pty_writer, app.env_shim); }
+    }
     let epoch = std::time::Instant::now() - Duration::from_secs(2);
     let pane_id = app.next_pane_id;
     let pane = Pane { master: pair.master, writer: pty_writer, child, term, last_rows: size.rows, last_cols: size.cols, id: pane_id, title: format!("pane %{}", pane_id), child_pid, data_version, last_title_check: epoch, last_infer_title: epoch, dead: false, vt_bridge_cache: None, vti_mode_cache: None, mouse_input_cache: None, cursor_shape, copy_state: None, pane_style: None };
@@ -204,6 +209,16 @@ pub fn spawn_warm_pane(pty_system: &dyn portable_pty::PtySystem, app: &mut AppSt
     let mut pty_writer = pair.master.take_writer()
         .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("take writer error: {e}")))?;
     conpty_preemptive_dsr_response(&mut *pty_writer);
+    // Inject PSReadLine fix + CWD hook for PowerShell panes.
+    // The warm pane has time to process this before it's used.
+    let shell_is_pwsh = if !app.default_shell.is_empty() {
+        is_powershell_shell(&app.default_shell)
+    } else {
+        cached_shell().map(|s| is_powershell_shell(s)).unwrap_or(true)
+    };
+    if shell_is_pwsh {
+        inject_post_spawn_init(&mut pty_writer, app.env_shim);
+    }
     Ok(crate::types::WarmPane { master: pair.master, writer: pty_writer, child, term, data_version, cursor_shape, child_pid, pane_id, rows, cols })
 }
 
@@ -391,6 +406,15 @@ pub fn split_active_with_command(app: &mut AppState, kind: LayoutKind, command: 
     let mut pty_writer = pair.master.take_writer()
         .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("take writer error: {e}")))?;
     conpty_preemptive_dsr_response(&mut *pty_writer);
+    // Inject PSReadLine fix + CWD hook for interactive PowerShell splits
+    if command.is_none() {
+        let shell_is_pwsh = if !app.default_shell.is_empty() {
+            is_powershell_shell(&app.default_shell)
+        } else {
+            cached_shell().map(|s| is_powershell_shell(s)).unwrap_or(true)
+        };
+        if shell_is_pwsh { inject_post_spawn_init(&mut pty_writer, app.env_shim); }
+    }
     let epoch = std::time::Instant::now() - Duration::from_secs(2);
     let split_pane_id = app.next_pane_id;
     let new_leaf = Node::Leaf(Pane { master: pair.master, writer: pty_writer, child, term, last_rows: size.rows, last_cols: size.cols, id: split_pane_id, title: format!("pane %{}", split_pane_id), child_pid, data_version, last_title_check: epoch, last_infer_title: epoch, dead: false, vt_bridge_cache: None, vti_mode_cache: None, mouse_input_cache: None, cursor_shape, copy_state: None, pane_style: None });
@@ -629,12 +653,26 @@ const CWD_SYNC: &str = concat!(
     "} }",
 );
 
-/// Build the full interactive init string for PowerShell:
-/// 1. Disable PSReadLine predictions (before profile — prevents #109 crash)
-/// 2. Source the user's profile scripts
-/// 3. Re-disable predictions (in case the profile re-enabled them)
-/// 4. Install CWD sync hook (enables #{pane_current_path} — #111)
-/// 5. Optionally append the env shim
+/// Build the post-spawn init string injected via PTY writer after the shell
+/// starts. Runs after the profile loads and first prompt renders, so it
+/// doesn't add to the startup time perceived by the user.
+/// Contains: PSReadLine fix + CWD sync hook + optional env shim.
+fn build_post_spawn_init(env_shim: bool) -> String {
+    // Wrap in a single line, clear the command from the prompt buffer with
+    // [Console]::Write to avoid polluting readline history, then redraw.
+    let mut s = String::from(PSRL_FIX);
+    s.push_str("; ");
+    s.push_str(CWD_SYNC);
+    if env_shim {
+        s.push_str("; ");
+        s.push_str(ENV_SHIM_PS);
+    }
+    s
+}
+
+/// Build the full interactive init string for PowerShell (slow path).
+/// Used when -NoProfile + manual profile sourcing is required (e.g. when
+/// the user explicitly passes -NoProfile in default-shell config).
 fn build_psrl_init(env_shim: bool) -> String {
     let mut s = format!("{}; {}; {}; {}", PSRL_FIX, PROFILE_SOURCE, PSRL_FIX, CWD_SYNC);
     if env_shim {
@@ -683,14 +721,9 @@ pub fn build_command(command: Option<&str>, env_shim: bool) -> CommandBuilder {
         }
     } else {
         let shell = cached_shell().map(|s| s.to_string());
-        // PSReadLine v2.2.6+ enables PredictionSource HistoryAndPlugin by default.
-        // Predictions cause display corruption in terminal multiplexers because
-        // PSReadLine's VT rendering races with ConPTY output capture.
-        // Issue #109: GetHistoryItems() throws NullReferenceException when
-        // predictions are enabled in the profile before PSReadLine is fully
-        // initialized inside ConPTY.  We use -NoProfile and source profiles
-        // ourselves, sandwiching them between prediction-disable commands.
-        let psrl_init = build_psrl_init(env_shim);
+        // WT-style spawn: launch pwsh with no -Command overhead.
+        // Profiles load natively (fastest path). PSReadLine fix and CWD hook
+        // are injected post-spawn via the PTY writer (see inject_post_spawn_init).
         match shell {
             Some(path) => {
                 let mut builder = CommandBuilder::new(&path);
@@ -699,7 +732,7 @@ pub fn build_command(command: Option<&str>, env_shim: bool) -> CommandBuilder {
                 builder.env("COLORTERM", "truecolor");
                 builder.env("PSMUX_SESSION", "1");
                 if path.to_lowercase().contains("pwsh") {
-                    builder.args(["-NoLogo", "-NoProfile", "-NoExit", "-Command", &psrl_init]);
+                    builder.args(["-NoLogo", "-NoExit"]);
                 }
                 builder
             }
@@ -709,13 +742,30 @@ pub fn build_command(command: Option<&str>, env_shim: bool) -> CommandBuilder {
                 builder.env("TERM", "xterm-256color");
                 builder.env("COLORTERM", "truecolor");
                 builder.env("PSMUX_SESSION", "1");
-                // Apply the same -NoProfile + manual profile sourcing for
-                // the fallback pwsh.exe path (previously had no PSRL fix).
-                builder.args(["-NoLogo", "-NoProfile", "-NoExit", "-Command", &psrl_init]);
+                builder.args(["-NoLogo", "-NoExit"]);
                 builder
             }
         }
     }
+}
+
+/// Inject PSReadLine fix, CWD sync hook, and optional env shim into a
+/// PowerShell pane via its PTY writer. Called immediately after spawn —
+/// the commands queue in the input buffer and execute after the profile
+/// loads and first prompt renders. This is the WT-style approach: zero
+/// `-Command` overhead at spawn time, fixes applied post-prompt.
+pub fn inject_post_spawn_init(writer: &mut Box<dyn std::io::Write + Send>, env_shim: bool) {
+    let init = build_post_spawn_init(env_shim);
+    // Write the init commands followed by Enter, then clear the screen
+    // so the user doesn't see the init commands polluting the prompt.
+    let cmd = format!("{}\r\ncls\r\n", init);
+    let _ = writer.write_all(cmd.as_bytes());
+}
+
+/// Check if a shell path is PowerShell (pwsh or powershell).
+pub fn is_powershell_shell(shell_path: &str) -> bool {
+    let lower = shell_path.to_lowercase();
+    lower.contains("pwsh") || lower.contains("powershell")
 }
 
 /// Cached resolved default-shell path to avoid repeated `which::which()` scans.
@@ -788,28 +838,20 @@ pub fn build_default_shell(shell_path: &str, env_shim: bool) -> CommandBuilder {
     }
 
     if lower.contains("pwsh") || lower.contains("powershell") {
-        // Issue #109: -NoProfile + manual profile sourcing to prevent
-        // PSReadLine GetHistoryItems NullReferenceException.
-        // If the user already passed -NoProfile in extra_args, we still
-        // add ours (PowerShell accepts duplicates harmlessly) and skip
-        // profile sourcing only if they explicitly opted out.
         let has_noprofile = extra_args.iter()
             .any(|a| a.eq_ignore_ascii_case("-NoProfile"));
-        let psrl_init = if has_noprofile {
-            // User explicitly wants no profile — just apply PSRL fix + shim.
+        if has_noprofile {
+            // User explicitly wants no profile — use -Command for PSRL fix.
             let mut s = PSRL_FIX.to_string();
             if env_shim {
                 s.push_str("; ");
                 s.push_str(ENV_SHIM_PS);
             }
-            s
+            builder.args(["-NoLogo", "-NoExit", "-Command", &s]);
         } else {
-            build_psrl_init(env_shim)
-        };
-        if !has_noprofile {
-            builder.args(["-NoProfile"]);
+            // WT-style: no -Command overhead. Fixes injected post-spawn.
+            builder.args(["-NoLogo", "-NoExit"]);
         }
-        builder.args(["-NoLogo", "-NoExit", "-Command", &psrl_init]);
     }
 
     builder
