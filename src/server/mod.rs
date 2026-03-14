@@ -134,6 +134,16 @@ fn serialize_overlay_json(app: &AppState) -> String {
         }
         _ => {}
     }
+    // Include status_message for display-message without -p (#110)
+    if let Some((ref msg, since)) = app.status_message {
+        let elapsed = since.elapsed().as_millis() as u64;
+        let display_time = app.display_time_ms as u64;
+        if elapsed < display_time {
+            out.push_str(",\"status_message\":\"");
+            out.push_str(&json_escape_string(msg));
+            out.push('"');
+        }
+    }
     out
 }
 
@@ -2557,9 +2567,15 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 }
                 CtrlReq::ConfirmBefore(prompt, cmd) => {
                     let prompt_text = if prompt.is_empty() {
-                        format!("Confirm: {} (y/n)?", cmd)
+                        format!("Confirm: {}? (y/n)", cmd)
                     } else {
-                        format!("{} (y/n)?", prompt)
+                        // Don't append (y/n) if prompt already contains it
+                        if prompt.contains("(y/n)") {
+                            prompt.clone()
+                        } else {
+                            let base = prompt.trim_end_matches('?');
+                            format!("{}? (y/n)", base)
+                        }
                     };
                     app.mode = Mode::ConfirmMode {
                         prompt: prompt_text,

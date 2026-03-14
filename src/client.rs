@@ -547,6 +547,9 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
         /// Display-panes overlay active
         #[serde(default)]
         display_panes: bool,
+        /// Status bar message from display-message (without -p)
+        #[serde(default)]
+        status_message: Option<String>,
     }
 
     let mut cmd_batch: Vec<String> = Vec::new();
@@ -2728,7 +2731,19 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                     status_spans.extend(right_spans);
                 }
             }
-            let status_bar = Paragraph::new(Line::from(status_spans)).style(sb_base);
+            // If a display-message is active, show it on the status bar
+            // instead of the normal status content (tmux parity)
+            let status_bar = if let Some(ref msg) = state.status_message {
+                let msg_style = Style::default().fg(Color::Yellow).bg(Color::Black);
+                let padded = if msg.len() < status_chunk.width as usize {
+                    format!("{}{}", msg, " ".repeat(status_chunk.width as usize - msg.len()))
+                } else {
+                    msg.chars().take(status_chunk.width as usize).collect()
+                };
+                Paragraph::new(Line::from(Span::styled(padded, msg_style))).style(msg_style)
+            } else {
+                Paragraph::new(Line::from(status_spans)).style(sb_base)
+            };
             f.render_widget(Clear, status_chunk);
             // Render the first status line (line 0)
             let line0_area = Rect { x: status_chunk.x, y: status_chunk.y, width: status_chunk.width, height: 1.min(status_chunk.height) };

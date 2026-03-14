@@ -1069,7 +1069,7 @@ match cmd {
         }
         let non_flag: Vec<&str> = args.iter().filter(|a| !a.starts_with('-') && Some(&a.to_string()) != prompt.as_ref()).copied().collect();
         let command = non_flag.join(" ");
-        let prompt_str = prompt.unwrap_or_else(|| format!("Run '{}'?", command));
+        let prompt_str = prompt.unwrap_or_else(|| format!("Run '{}'", command));
         let _ = tx.send(CtrlReq::ConfirmBefore(prompt_str, command));
     }
     // tmux standard aliases
