@@ -638,10 +638,12 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     CtrlReq::DumpLayout(_) => 1,
                     _ => 0,
                 });
-                // Track temporary -t focus: save (active_idx, active_path) when
+                // Track temporary -t focus: save (active_idx, pane_id) when
                 // FocusWindowTemp/FocusPaneTemp is seen, restore after next
                 // non-temp command so the user's view doesn't jump.
-                let mut temp_focus_restore: Option<(usize, Vec<usize>)> = None;
+                // We store the pane ID (not path) because kill-pane
+                // restructures the tree, invalidating saved paths (#71).
+                let mut temp_focus_restore: Option<(usize, usize)> = None;
                 for req in pending {
                     let mutates_state = !matches!(&req,
                         CtrlReq::DumpState(..)
@@ -847,7 +849,11 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 // the original focus (see temp_focus_restore below).
                 CtrlReq::FocusWindowTemp(wid) => {
                     if temp_focus_restore.is_none() {
-                        temp_focus_restore = Some((app.active_idx, app.windows[app.active_idx].active_path.clone()));
+                        let pane_id = crate::tree::get_active_pane_id(
+                            &app.windows[app.active_idx].root,
+                            &app.windows[app.active_idx].active_path,
+                        ).unwrap_or(usize::MAX);
+                        temp_focus_restore = Some((app.active_idx, pane_id));
                     }
                     if wid >= app.window_base_index {
                         let internal_idx = wid - app.window_base_index;
@@ -858,13 +864,21 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 }
                 CtrlReq::FocusPaneTemp(pid) => {
                     if temp_focus_restore.is_none() {
-                        temp_focus_restore = Some((app.active_idx, app.windows[app.active_idx].active_path.clone()));
+                        let pane_id = crate::tree::get_active_pane_id(
+                            &app.windows[app.active_idx].root,
+                            &app.windows[app.active_idx].active_path,
+                        ).unwrap_or(usize::MAX);
+                        temp_focus_restore = Some((app.active_idx, pane_id));
                     }
                     focus_pane_by_id(&mut app, pid);
                 }
                 CtrlReq::FocusPaneByIndexTemp(idx) => {
                     if temp_focus_restore.is_none() {
-                        temp_focus_restore = Some((app.active_idx, app.windows[app.active_idx].active_path.clone()));
+                        let pane_id = crate::tree::get_active_pane_id(
+                            &app.windows[app.active_idx].root,
+                            &app.windows[app.active_idx].active_path,
+                        ).unwrap_or(usize::MAX);
+                        temp_focus_restore = Some((app.active_idx, pane_id));
                     }
                     focus_pane_by_index(&mut app, idx);
                 }
@@ -2737,12 +2751,19 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         _pre_hook_idx, app.active_idx, event));
                 }
             }
-            // Restore temporary -t focus after non-temp command completes
+            // Restore temporary -t focus after non-temp command completes.
+            // Use pane ID (not path) because kill-pane restructures the
+            // tree and invalidates saved paths (#71).
             if !is_temp_focus {
-                if let Some((restore_idx, restore_path)) = temp_focus_restore.take() {
+                if let Some((restore_idx, restore_pane_id)) = temp_focus_restore.take() {
                     if restore_idx < app.windows.len() {
                         app.active_idx = restore_idx;
-                        app.windows[restore_idx].active_path = restore_path;
+                        let win = &mut app.windows[restore_idx];
+                        if let Some(path) = crate::tree::find_path_by_id(&win.root, restore_pane_id) {
+                            win.active_path = path;
+                        }
+                        // If the pane was killed, keep whatever active_path
+                        // kill_pane_at_path already set (MRU target).
                     }
                 }
             }
@@ -2751,10 +2772,13 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
             }
         }
                 // Clean up any trailing temp focus at end of batch
-                if let Some((restore_idx, restore_path)) = temp_focus_restore {
+                if let Some((restore_idx, restore_pane_id)) = temp_focus_restore {
                     if restore_idx < app.windows.len() {
                         app.active_idx = restore_idx;
-                        app.windows[restore_idx].active_path = restore_path;
+                        let win = &mut app.windows[restore_idx];
+                        if let Some(path) = crate::tree::find_path_by_id(&win.root, restore_pane_id) {
+                            win.active_path = path;
+                        }
                     }
                 }
             }
