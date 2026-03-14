@@ -1070,16 +1070,32 @@ pub fn expand_var(var: &str, app: &AppState, win_idx: usize) -> String {
                 }
             } else { String::new() }
         }
-        "pane_current_path" | "pane_path" => {
+        "pane_current_path" => {
             if let Some(p) = target_pane() {
+                // Layer 1: PEB walk (authoritative for local processes)
                 if let Some(pid) = p.child_pid {
-                    crate::platform::process_info::get_foreground_cwd(pid)
-                        .unwrap_or_default()
-                } else {
-                    std::env::current_dir()
-                        .map(|d| d.to_string_lossy().into_owned())
-                        .unwrap_or_default()
+                    if let Some(cwd) = crate::platform::process_info::get_foreground_cwd(pid) {
+                        return cwd;
+                    }
                 }
+                // Layer 2: OSC 7 path (works over SSH/WSL where PEB fails)
+                if let Ok(parser) = p.term.lock() {
+                    if let Some(osc_path) = parser.screen().path() {
+                        return osc_path.to_string();
+                    }
+                }
+                // Layer 3: fallback to server CWD
+                std::env::current_dir()
+                    .map(|d| d.to_string_lossy().into_owned())
+                    .unwrap_or_default()
+            } else { String::new() }
+        }
+        "pane_path" => {
+            // Pure OSC 7 value (tmux-compatible: only what the shell announced)
+            if let Some(p) = target_pane() {
+                if let Ok(parser) = p.term.lock() {
+                    parser.screen().path().unwrap_or_default().to_string()
+                } else { String::new() }
             } else { String::new() }
         }
         "pane_pid" => {
