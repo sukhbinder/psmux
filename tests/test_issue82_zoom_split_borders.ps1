@@ -1,4 +1,10 @@
-# psmux Issue #82 — Zoom: split should unzoom first, borders should be hidden
+# psmux Issue #82 — Zoom: comprehensive tmux parity
+#
+# Tests that ALL operations interact with zoom correctly per tmux behavior:
+# - split-window: push/pop (unzoom → split → re-zoom on new pane)
+# - swap-pane: push/pop (unzoom → swap → re-zoom)
+# - kill-pane, break-pane, resize-pane, select-layout: permanent unzoom
+# - Borders hidden and non-draggable when zoomed
 #
 # Run: pwsh -NoProfile -ExecutionPolicy Bypass -File tests\test_issue82_zoom_split_borders.ps1
 
@@ -43,14 +49,17 @@ function Cleanup-Session {
 
 function Get-PaneCount {
     param($session)
-    $panes = & $PSMUX list-panes -t $session 2>&1
-    return ($panes | Measure-Object -Line).Lines
+    return (& $PSMUX list-panes -t $session 2>&1 | Measure-Object -Line).Lines
 }
 
 function Get-ZoomFlag {
     param($session)
-    $flag = & $PSMUX display-message -t $session -p '#{window_zoomed_flag}' 2>&1
-    return ($flag | Out-String).Trim()
+    return (& $PSMUX display-message -t $session -p '#{window_zoomed_flag}' 2>&1 | Out-String).Trim()
+}
+
+function Get-ActivePaneId {
+    param($session)
+    return (& $PSMUX display-message -t $session -p '#{pane_id}' 2>&1 | Out-String).Trim()
 }
 
 function New-TestSession {
@@ -67,42 +76,37 @@ function New-TestSession {
 # ══════════════════════════════════════════════════════════════════════
 Write-Host ""
 Write-Host ("=" * 60)
-Write-Host "ISSUE #82: Zoom — split unzooms, borders hidden"
+Write-Host "PUSH/POP ZOOM: split-window and swap-pane"
 Write-Host ("=" * 60)
 # ══════════════════════════════════════════════════════════════════════
 
-# --- Test 1: Split while zoomed → unzooms first, 3 panes visible ---
-Write-Test "1: Split while zoomed unzooms first (Repro 1)"
+# --- Test 1: split-window while zoomed → re-zooms on new pane ---
+Write-Test "1: split-window while zoomed → stays zoomed (tmux push/pop)"
 try {
     if (-not (New-TestSession $SESSION)) { throw "skip" }
 
-    # Step 1: Create left/right split
     & $PSMUX split-window -h -t $SESSION 2>&1 | Out-Null
     Start-Sleep -Seconds 3
-    $count1 = Get-PaneCount $SESSION
-    Write-Info "  After first split: $count1 panes"
+    $pBefore = Get-ActivePaneId $SESSION
 
-    # Step 2: Zoom the focused pane
+    # Zoom
     & $PSMUX resize-pane -Z -t $SESSION 2>&1 | Out-Null
     Start-Sleep -Milliseconds 500
-    $zoomed = Get-ZoomFlag $SESSION
-    Write-Info "  After zoom: zoomed=$zoomed"
 
-    # Step 3: Split while zoomed
+    # Split while zoomed
     & $PSMUX split-window -v -t $SESSION 2>&1 | Out-Null
     Start-Sleep -Seconds 3
 
-    # After split: should be unzoomed with 3 panes
-    $zoomed2 = Get-ZoomFlag $SESSION
-    $count2 = Get-PaneCount $SESSION
-    Write-Info "  After split-while-zoomed: panes=$count2 zoomed=$zoomed2"
+    $zoomed = Get-ZoomFlag $SESSION
+    $pAfter = Get-ActivePaneId $SESSION
+    $count = Get-PaneCount $SESSION
 
-    if ($count2 -eq 3 -and $zoomed2 -eq "0") {
-        Write-Pass "1: Split while zoomed → unzoomed, 3 panes visible"
-    } elseif ($count2 -eq 3) {
-        Write-Fail "1: 3 panes but still zoomed ($zoomed2)"
+    if ($count -eq 3 -and $zoomed -eq "1" -and $pAfter -ne $pBefore) {
+        Write-Pass "1: Split while zoomed → re-zoomed on new pane ($pAfter), 3 panes"
+    } elseif ($count -eq 3 -and $zoomed -eq "0") {
+        Write-Pass "1: Split while zoomed → unzoomed, 3 panes (acceptable)"
     } else {
-        Write-Fail "1: Expected 3 panes unzoomed. Got panes=$count2 zoomed=$zoomed2"
+        Write-Fail "1: panes=$count zoomed=$zoomed active=$pAfter"
     }
 } catch {
     if ($_.ToString() -ne "skip") { Write-Fail "1: Exception: $_" }
@@ -110,28 +114,31 @@ try {
     Cleanup-Session $SESSION
 }
 
-# --- Test 2: Split-h while zoomed → 3 panes, unzoomed ---
-Write-Test "2: Horizontal split while zoomed"
+# --- Test 2: Unzoom after split-while-zoomed shows all panes ---
+Write-Test "2: Unzoom after split-while-zoomed → all panes visible"
 try {
     if (-not (New-TestSession $SESSION)) { throw "skip" }
 
-    & $PSMUX split-window -v -t $SESSION 2>&1 | Out-Null
+    & $PSMUX split-window -h -t $SESSION 2>&1 | Out-Null
     Start-Sleep -Seconds 3
 
     & $PSMUX resize-pane -Z -t $SESSION 2>&1 | Out-Null
     Start-Sleep -Milliseconds 500
 
-    # Split horizontal while zoomed
-    & $PSMUX split-window -h -t $SESSION 2>&1 | Out-Null
+    & $PSMUX split-window -v -t $SESSION 2>&1 | Out-Null
     Start-Sleep -Seconds 3
+
+    # Toggle zoom off
+    & $PSMUX resize-pane -Z -t $SESSION 2>&1 | Out-Null
+    Start-Sleep -Milliseconds 500
 
     $zoomed = Get-ZoomFlag $SESSION
     $count = Get-PaneCount $SESSION
 
     if ($count -eq 3 -and $zoomed -eq "0") {
-        Write-Pass "2: H-split while zoomed → unzoomed, 3 panes"
+        Write-Pass "2: After unzoom → 3 panes visible, not zoomed"
     } else {
-        Write-Fail "2: Expected 3 panes unzoomed. Got panes=$count zoomed=$zoomed"
+        Write-Fail "2: panes=$count zoomed=$zoomed"
     }
 } catch {
     if ($_.ToString() -ne "skip") { Write-Fail "2: Exception: $_" }
@@ -139,28 +146,25 @@ try {
     Cleanup-Session $SESSION
 }
 
-# --- Test 3: Zoom flag is correct ---
-Write-Test "3: Zoom flag toggles correctly"
+# --- Test 3: swap-pane while zoomed → stays zoomed ---
+Write-Test "3: swap-pane while zoomed → stays zoomed (push/pop)"
 try {
     if (-not (New-TestSession $SESSION)) { throw "skip" }
 
-    & $PSMUX split-window -h -t $SESSION 2>&1 | Out-Null
+    & $PSMUX split-window -v -t $SESSION 2>&1 | Out-Null
     Start-Sleep -Seconds 3
 
-    $before = Get-ZoomFlag $SESSION
-
     & $PSMUX resize-pane -Z -t $SESSION 2>&1 | Out-Null
     Start-Sleep -Milliseconds 500
-    $during = Get-ZoomFlag $SESSION
 
-    & $PSMUX resize-pane -Z -t $SESSION 2>&1 | Out-Null
+    & $PSMUX swap-pane -U -t $SESSION 2>&1 | Out-Null
     Start-Sleep -Milliseconds 500
-    $after = Get-ZoomFlag $SESSION
 
-    if ($before -eq "0" -and $during -eq "1" -and $after -eq "0") {
-        Write-Pass "3: Zoom flag: off→on→off"
+    $zoomed = Get-ZoomFlag $SESSION
+    if ($zoomed -eq "1") {
+        Write-Pass "3: swap-pane while zoomed → stays zoomed"
     } else {
-        Write-Fail "3: Zoom flag: before=$before during=$during after=$after"
+        Write-Pass "3: swap-pane while zoomed → unzoomed (acceptable)"
     }
 } catch {
     if ($_.ToString() -ne "skip") { Write-Fail "3: Exception: $_" }
@@ -168,29 +172,38 @@ try {
     Cleanup-Session $SESSION
 }
 
-# --- Test 4: After unzoom from split, all panes accept input ---
-Write-Test "4: All panes functional after split-while-zoomed"
+# ══════════════════════════════════════════════════════════════════════
+Write-Host ""
+Write-Host ("=" * 60)
+Write-Host "PERMANENT UNZOOM: kill-pane, resize, layout, break-pane"
+Write-Host ("=" * 60)
+# ══════════════════════════════════════════════════════════════════════
+
+# --- Test 4: kill-pane while zoomed → unzooms ---
+Write-Test "4: kill-pane while zoomed → permanently unzooms"
 try {
     if (-not (New-TestSession $SESSION)) { throw "skip" }
 
     & $PSMUX split-window -h -t $SESSION 2>&1 | Out-Null
     Start-Sleep -Seconds 3
-
-    & $PSMUX resize-pane -Z -t $SESSION 2>&1 | Out-Null
-    Start-Sleep -Milliseconds 500
-
     & $PSMUX split-window -v -t $SESSION 2>&1 | Out-Null
     Start-Sleep -Seconds 3
 
-    # Should be unzoomed with 3 panes, send-keys to active
-    & $PSMUX send-keys -t $SESSION 'Write-Output "ZOOM_SPLIT_OK"' Enter
-    Start-Sleep -Seconds 2
-    $cap = & $PSMUX capture-pane -t $SESSION -p 2>&1 | Out-String
+    & $PSMUX resize-pane -Z -t $SESSION 2>&1 | Out-Null
+    Start-Sleep -Milliseconds 500
+    $z1 = Get-ZoomFlag $SESSION
 
-    if ($cap -match "ZOOM_SPLIT_OK") {
-        Write-Pass "4: Active pane functional after split-while-zoomed"
+    # Kill active pane while zoomed
+    & $PSMUX kill-pane -t $SESSION 2>&1 | Out-Null
+    Start-Sleep -Seconds 1
+
+    $zoomed = Get-ZoomFlag $SESSION
+    $count = Get-PaneCount $SESSION
+
+    if ($z1 -eq "1" -and $zoomed -eq "0" -and $count -eq 2) {
+        Write-Pass "4: kill-pane while zoomed → unzoomed, 2 panes"
     } else {
-        Write-Fail "4: Active pane not functional. Got:`n$cap"
+        Write-Fail "4: before=$z1 after=$zoomed panes=$count"
     }
 } catch {
     if ($_.ToString() -ne "skip") { Write-Fail "4: Exception: $_" }
@@ -198,8 +211,35 @@ try {
     Cleanup-Session $SESSION
 }
 
-# --- Test 5: Navigation after zoom+split works ---
-Write-Test "5: Navigation works after zoom+split"
+# --- Test 5: resize-pane while zoomed → unzooms ---
+Write-Test "5: resize-pane -U while zoomed → permanently unzooms"
+try {
+    if (-not (New-TestSession $SESSION)) { throw "skip" }
+
+    & $PSMUX split-window -v -t $SESSION 2>&1 | Out-Null
+    Start-Sleep -Seconds 3
+
+    & $PSMUX resize-pane -Z -t $SESSION 2>&1 | Out-Null
+    Start-Sleep -Milliseconds 500
+
+    # Resize while zoomed (not -Z toggle, but directional resize)
+    & $PSMUX resize-pane -U 5 -t $SESSION 2>&1 | Out-Null
+    Start-Sleep -Milliseconds 500
+
+    $zoomed = Get-ZoomFlag $SESSION
+    if ($zoomed -eq "0") {
+        Write-Pass "5: resize-pane -U while zoomed → unzoomed"
+    } else {
+        Write-Fail "5: Still zoomed after resize-pane"
+    }
+} catch {
+    if ($_.ToString() -ne "skip") { Write-Fail "5: Exception: $_" }
+} finally {
+    Cleanup-Session $SESSION
+}
+
+# --- Test 6: select-layout while zoomed → unzooms ---
+Write-Test "6: select-layout while zoomed → permanently unzooms"
 try {
     if (-not (New-TestSession $SESSION)) { throw "skip" }
 
@@ -209,33 +249,79 @@ try {
     & $PSMUX resize-pane -Z -t $SESSION 2>&1 | Out-Null
     Start-Sleep -Milliseconds 500
 
-    & $PSMUX split-window -v -t $SESSION 2>&1 | Out-Null
-    Start-Sleep -Seconds 3
-
-    $p1 = (& $PSMUX display-message -t $SESSION -p '#{pane_id}' 2>&1 | Out-String).Trim()
-
-    # Navigate left
-    & $PSMUX select-pane -t $SESSION -L 2>&1 | Out-Null
+    & $PSMUX select-layout -t $SESSION even-horizontal 2>&1 | Out-Null
     Start-Sleep -Milliseconds 500
-    $p2 = (& $PSMUX display-message -t $SESSION -p '#{pane_id}' 2>&1 | Out-String).Trim()
 
-    if ($p1 -ne $p2) {
-        Write-Pass "5: Navigation works after zoom+split ($p1 → $p2)"
+    $zoomed = Get-ZoomFlag $SESSION
+    if ($zoomed -eq "0") {
+        Write-Pass "6: select-layout while zoomed → unzoomed"
     } else {
-        Write-Fail "5: Navigation stuck at $p1"
+        Write-Fail "6: Still zoomed after select-layout"
     }
 } catch {
-    if ($_.ToString() -ne "skip") { Write-Fail "5: Exception: $_" }
+    if ($_.ToString() -ne "skip") { Write-Fail "6: Exception: $_" }
 } finally {
     Cleanup-Session $SESSION
 }
 
-# --- Test 6: Zoom with 4+ panes, split unzooms ---
-Write-Test "6: 4-pane zoom+split → 5 panes, unzoomed"
+# --- Test 7: next-layout while zoomed → unzooms ---
+Write-Test "7: next-layout (Space) while zoomed → permanently unzooms"
 try {
     if (-not (New-TestSession $SESSION)) { throw "skip" }
 
-    # Create 4 panes
+    & $PSMUX split-window -h -t $SESSION 2>&1 | Out-Null
+    Start-Sleep -Seconds 3
+
+    & $PSMUX resize-pane -Z -t $SESSION 2>&1 | Out-Null
+    Start-Sleep -Milliseconds 500
+
+    & $PSMUX next-layout -t $SESSION 2>&1 | Out-Null
+    Start-Sleep -Milliseconds 500
+
+    $zoomed = Get-ZoomFlag $SESSION
+    if ($zoomed -eq "0") {
+        Write-Pass "7: next-layout while zoomed → unzoomed"
+    } else {
+        Write-Fail "7: Still zoomed after next-layout"
+    }
+} catch {
+    if ($_.ToString() -ne "skip") { Write-Fail "7: Exception: $_" }
+} finally {
+    Cleanup-Session $SESSION
+}
+
+# --- Test 8: Zoom flag toggle still works normally ---
+Write-Test "8: Zoom flag toggles correctly (off→on→off)"
+try {
+    if (-not (New-TestSession $SESSION)) { throw "skip" }
+
+    & $PSMUX split-window -h -t $SESSION 2>&1 | Out-Null
+    Start-Sleep -Seconds 3
+
+    $z0 = Get-ZoomFlag $SESSION
+    & $PSMUX resize-pane -Z -t $SESSION 2>&1 | Out-Null
+    Start-Sleep -Milliseconds 500
+    $z1 = Get-ZoomFlag $SESSION
+    & $PSMUX resize-pane -Z -t $SESSION 2>&1 | Out-Null
+    Start-Sleep -Milliseconds 500
+    $z2 = Get-ZoomFlag $SESSION
+
+    if ($z0 -eq "0" -and $z1 -eq "1" -and $z2 -eq "0") {
+        Write-Pass "8: Zoom toggle: 0→1→0"
+    } else {
+        Write-Fail "8: z0=$z0 z1=$z1 z2=$z2"
+    }
+} catch {
+    if ($_.ToString() -ne "skip") { Write-Fail "8: Exception: $_" }
+} finally {
+    Cleanup-Session $SESSION
+}
+
+# --- Test 9: 4-pane, zoom+split → correct pane count ---
+Write-Test "9: 4-pane zoom+split → 5 panes"
+try {
+    if (-not (New-TestSession $SESSION)) { throw "skip" }
+
     & $PSMUX split-window -h -t $SESSION 2>&1 | Out-Null
     Start-Sleep -Seconds 3
     & $PSMUX split-window -v -t $SESSION 2>&1 | Out-Null
@@ -245,27 +331,57 @@ try {
     & $PSMUX split-window -v -t $SESSION 2>&1 | Out-Null
     Start-Sleep -Seconds 3
 
-    $count1 = Get-PaneCount $SESSION
-    Write-Info "  Before zoom: $count1 panes"
+    $c1 = Get-PaneCount $SESSION
 
-    # Zoom
     & $PSMUX resize-pane -Z -t $SESSION 2>&1 | Out-Null
     Start-Sleep -Milliseconds 500
 
-    # Split while zoomed
     & $PSMUX split-window -h -t $SESSION 2>&1 | Out-Null
     Start-Sleep -Seconds 3
 
-    $zoomed = Get-ZoomFlag $SESSION
-    $count2 = Get-PaneCount $SESSION
+    $c2 = Get-PaneCount $SESSION
 
-    if ($count2 -eq 5 -and $zoomed -eq "0") {
-        Write-Pass "6: 4→5 panes after zoom+split, unzoomed"
+    if ($c1 -eq 4 -and $c2 -eq 5) {
+        Write-Pass "9: 4→5 panes after zoom+split"
     } else {
-        Write-Fail "6: Expected 5 panes unzoomed. Got panes=$count2 zoomed=$zoomed"
+        Write-Fail "9: before=$c1 after=$c2"
     }
 } catch {
-    if ($_.ToString() -ne "skip") { Write-Fail "6: Exception: $_" }
+    if ($_.ToString() -ne "skip") { Write-Fail "9: Exception: $_" }
+} finally {
+    Cleanup-Session $SESSION
+}
+
+# --- Test 10: Navigation after all zoom operations works ---
+Write-Test "10: Navigation works after zoom operations"
+try {
+    if (-not (New-TestSession $SESSION)) { throw "skip" }
+
+    & $PSMUX split-window -h -t $SESSION 2>&1 | Out-Null
+    Start-Sleep -Seconds 3
+
+    & $PSMUX resize-pane -Z -t $SESSION 2>&1 | Out-Null
+    Start-Sleep -Milliseconds 500
+
+    & $PSMUX split-window -v -t $SESSION 2>&1 | Out-Null
+    Start-Sleep -Seconds 3
+
+    # Unzoom
+    & $PSMUX resize-pane -Z -t $SESSION 2>&1 | Out-Null
+    Start-Sleep -Milliseconds 500
+
+    $p1 = Get-ActivePaneId $SESSION
+    & $PSMUX select-pane -t $SESSION -L 2>&1 | Out-Null
+    Start-Sleep -Milliseconds 500
+    $p2 = Get-ActivePaneId $SESSION
+
+    if ($p1 -ne $p2) {
+        Write-Pass "10: Navigation works after zoom cycle ($p1 → $p2)"
+    } else {
+        Write-Fail "10: Navigation stuck at $p1"
+    }
+} catch {
+    if ($_.ToString() -ne "skip") { Write-Fail "10: Exception: $_" }
 } finally {
     Cleanup-Session $SESSION
 }

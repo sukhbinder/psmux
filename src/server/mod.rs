@@ -32,7 +32,7 @@ use crate::layout::{dump_layout_json, dump_layout_json_fast, apply_layout, cycle
     cycle_layout_reverse};
 use crate::window_ops::{toggle_zoom, remote_mouse_down, remote_mouse_drag, remote_mouse_up,
     remote_mouse_button, remote_mouse_motion, remote_scroll_up, remote_scroll_down,
-    swap_pane, break_pane_to_window, unzoom_if_zoomed, resize_pane_vertical,
+    swap_pane, break_pane_to_window, unzoom_if_zoomed, push_zoom, pop_zoom, resize_pane_vertical,
     resize_pane_horizontal, resize_pane_absolute, rotate_panes, respawn_active_pane};
 use crate::config::{load_config, parse_key_string, format_key_binding, normalize_key_for_binding,
     parse_config_content, parse_config_line};
@@ -733,8 +733,8 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     resize_all_panes(&mut app); meta_dirty = true; hook_event = Some("after-new-window");
                 }
                 CtrlReq::SplitWindow(k, cmd, detached, start_dir, size_pct, resp) => {
-                    // Unzoom before splitting (tmux parity #82)
-                    unzoom_if_zoomed(&mut app);
+                    // tmux push/pop: unzoom → split → re-zoom on new pane (#82)
+                    let was_zoomed = push_zoom(&mut app);
                     let start_dir = start_dir.map(|d| expand_format(&d, &app)).filter(|d| !d.is_empty());
                     let saved_dir = if start_dir.is_some() { env::current_dir().ok() } else { None };
                     if let Some(dir) = &start_dir { env::set_current_dir(dir).ok(); }
@@ -772,11 +772,11 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                             Err(_) => {}
                         }
                     }
+                    pop_zoom(&mut app, was_zoomed);
                     resize_all_panes(&mut app); meta_dirty = true; hook_event = Some("after-split-window");
                 }
                 CtrlReq::SplitWindowPrint(k, cmd, detached, start_dir, size_pct, format_str, resp) => {
-                    // Unzoom before splitting (tmux parity #82)
-                    unzoom_if_zoomed(&mut app);
+                    let was_zoomed = push_zoom(&mut app);
                     let start_dir = start_dir.map(|d| expand_format(&d, &app)).filter(|d| !d.is_empty());
                     let saved_dir = if start_dir.is_some() { env::current_dir().ok() } else { None };
                     if let Some(dir) = &start_dir { env::set_current_dir(dir).ok(); }
@@ -811,10 +811,11 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                             Err(_) => {}
                         }
                     }
+                    pop_zoom(&mut app, was_zoomed);
                     resize_all_panes(&mut app); meta_dirty = true; hook_event = Some("after-split-window");
                 }
-                CtrlReq::KillPane => { let _ = kill_active_pane(&mut app); resize_all_panes(&mut app); meta_dirty = true; hook_event = Some("after-kill-pane"); }
-                CtrlReq::KillPaneById(pid) => { let _ = kill_pane_by_id(&mut app, pid); resize_all_panes(&mut app); meta_dirty = true; hook_event = Some("after-kill-pane"); }
+                CtrlReq::KillPane => { unzoom_if_zoomed(&mut app); let _ = kill_active_pane(&mut app); resize_all_panes(&mut app); meta_dirty = true; hook_event = Some("after-kill-pane"); }
+                CtrlReq::KillPaneById(pid) => { unzoom_if_zoomed(&mut app); let _ = kill_pane_by_id(&mut app, pid); resize_all_panes(&mut app); meta_dirty = true; hook_event = Some("after-kill-pane"); }
                 CtrlReq::CapturePane(resp) => {
                     if let Some(text) = capture_active_pane_text(&mut app)? { let _ = resp.send(text); } else { let _ = resp.send(String::new()); }
                 }
@@ -1819,14 +1820,18 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     hook_event = Some("after-rename-session");
                 }
                 CtrlReq::SwapPane(dir) => {
+                    // tmux push/pop: unzoom → swap → re-zoom (#82)
+                    let was_zoomed = push_zoom(&mut app);
                     match dir.as_str() {
                         "U" => { swap_pane(&mut app, FocusDir::Up); }
                         "D" => { swap_pane(&mut app, FocusDir::Down); }
                         _ => { swap_pane(&mut app, FocusDir::Down); }
                     }
+                    pop_zoom(&mut app, was_zoomed);
                     hook_event = Some("after-swap-pane");
                 }
                 CtrlReq::ResizePane(dir, amount) => {
+                    unzoom_if_zoomed(&mut app);
                     match dir.as_str() {
                         "U" | "D" => { resize_pane_vertical(&mut app, if dir == "U" { -(amount as i16) } else { amount as i16 }); }
                         "L" | "R" => { resize_pane_horizontal(&mut app, if dir == "L" { -(amount as i16) } else { amount as i16 }); }
@@ -1910,11 +1915,13 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     state_dirty = true;
                 }
                 CtrlReq::BreakPane => {
+                    unzoom_if_zoomed(&mut app);
                     break_pane_to_window(&mut app);
                     hook_event = Some("after-break-pane");
                     meta_dirty = true;
                 }
                 CtrlReq::JoinPane(target_win) => {
+                    unzoom_if_zoomed(&mut app);
                     // Real join-pane: extract active pane from current window and
                     // graft it as a vertical split into the target window.
                     let src_idx = app.active_idx;
@@ -2324,10 +2331,12 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     }
                 }
                 CtrlReq::SelectLayout(layout) => {
+                    unzoom_if_zoomed(&mut app);
                     apply_layout(&mut app, &layout);
                     state_dirty = true;
                 }
                 CtrlReq::NextLayout => {
+                    unzoom_if_zoomed(&mut app);
                     cycle_layout(&mut app);
                     state_dirty = true;
                 }
@@ -2563,9 +2572,11 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     state_dirty = true;
                 }
                 CtrlReq::ResizePaneAbsolute(axis, size) => {
+                    unzoom_if_zoomed(&mut app);
                     resize_pane_absolute(&mut app, &axis, size);
                 }
                 CtrlReq::ResizePanePercent(axis, pct) => {
+                    unzoom_if_zoomed(&mut app);
                     // Convert percentage to absolute size based on current window dimensions
                     let area = app.last_window_area;
                     let total = if axis == "x" { area.width } else { area.height };
@@ -2626,6 +2637,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     }
                 }
                 CtrlReq::PrevLayout => {
+                    unzoom_if_zoomed(&mut app);
                     cycle_layout_reverse(&mut app);
                     state_dirty = true;
                 }
