@@ -515,6 +515,9 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
         /// Repeat key timeout in ms (default: 500, synced from server)
         #[serde(default = "default_repeat_time")]
         repeat_time: u64,
+        /// Whether a pane is currently zoomed (borders should be hidden)
+        #[serde(default)]
+        zoomed: bool,
         // ── Server-side overlay state ──
         /// Popup overlay active
         #[serde(default)]
@@ -1550,10 +1553,13 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                                 } else { false };
 
                                 // Detect if click is on a separator line (for border resize)
+                                // Skip when zoomed — no borders to drag (#82)
                                 let on_sep = if !prev_dump_buf.is_empty() {
                                     if let Ok(state) = serde_json::from_str::<DumpState>(&prev_dump_buf) {
-                                        let content_area = Rect { x: 0, y: 0, width: last_sent_size.0, height: last_sent_size.1 };
-                                        is_on_separator(&state.layout, content_area, me.column, me.row)
+                                        if state.zoomed { false } else {
+                                            let content_area = Rect { x: 0, y: 0, width: last_sent_size.0, height: last_sent_size.1 };
+                                            is_on_separator(&state.layout, content_area, me.column, me.row)
+                                        }
                                     } else { false }
                                 } else { false };
 
@@ -2105,7 +2111,7 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                 }
             }
 
-            fn render_json(f: &mut Frame, node: &LayoutJson, area: Rect, dim_preds: bool, border_fg: Color, active_border_fg: Color, clock_mode: bool, active_rect: Option<Rect>, mode_style_str: &str) {
+            fn render_json(f: &mut Frame, node: &LayoutJson, area: Rect, dim_preds: bool, border_fg: Color, active_border_fg: Color, clock_mode: bool, active_rect: Option<Rect>, mode_style_str: &str, zoomed: bool) {
                 match node {
                     LayoutJson::Leaf {
                         id: _,
@@ -2318,10 +2324,12 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
 
                         // Render children first
                         for (i, child) in children.iter().enumerate() {
-                            if i < rects.len() { render_json(f, child, rects[i], dim_preds, border_fg, active_border_fg, clock_mode, active_rect, mode_style_str); }
+                            if i < rects.len() { render_json(f, child, rects[i], dim_preds, border_fg, active_border_fg, clock_mode, active_rect, mode_style_str, zoomed); }
                         }
 
                         // Draw separator lines between children using direct buffer access.
+                        // Skip when zoomed — no visible borders (#82)
+                        if zoomed { return; }
                         let border_style = Style::default().fg(border_fg);
                         let active_border_style = Style::default().fg(active_border_fg);
                         let buf = f.buffer_mut();
@@ -2413,7 +2421,7 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
             }
 
             let active_rect = compute_active_rect_json(&root, content_chunk);
-            render_json(f, &root, content_chunk, dim_preds, pane_border_fg, pane_active_border_fg, clock_active, active_rect, &mode_style_str);
+            render_json(f, &root, content_chunk, dim_preds, pane_border_fg, pane_active_border_fg, clock_active, active_rect, &mode_style_str, state.zoomed);
             fix_border_intersections(f.buffer_mut());
 
             // ── Left-click drag text selection overlay ────────────────

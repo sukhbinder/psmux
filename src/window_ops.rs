@@ -465,8 +465,11 @@ pub fn remote_mouse_down(app: &mut AppState, x: u16, y: u16) {
     }
 
     let mut on_border = false;
+    // Skip border detection when zoomed — no visible borders (#82)
     let mut borders: Vec<(Vec<usize>, LayoutKind, usize, u16, u16)> = Vec::new();
-    compute_split_borders(&win.root, app.last_window_area, &mut borders);
+    if app.zoom_saved.is_none() {
+        compute_split_borders(&win.root, app.last_window_area, &mut borders);
+    }
     let tol = 1u16;
     for (path, kind, idx, pos, total_px) in borders.iter() {
         match kind {
