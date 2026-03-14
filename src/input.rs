@@ -1880,6 +1880,10 @@ pub fn handle_mouse(app: &mut AppState, me: MouseEvent, window_area: Rect) -> io
             }
         }
         MouseEventKind::ScrollUp => {
+            // Ignore scroll in popup mode — don't enter copy-mode (#110)
+            if matches!(app.mode, Mode::PopupMode { .. }) {
+                return Ok(());
+            }
             if matches!(app.mode, Mode::CopyMode | Mode::CopySearch { .. }) {
                 scroll_copy_up(app, 3);
                 return Ok(());
@@ -1924,6 +1928,10 @@ pub fn handle_mouse(app: &mut AppState, me: MouseEvent, window_area: Rect) -> io
             }
         }
         MouseEventKind::ScrollDown => {
+            // Ignore scroll in popup mode — don't enter copy-mode (#110)
+            if matches!(app.mode, Mode::PopupMode { .. }) {
+                return Ok(());
+            }
             if matches!(app.mode, Mode::CopyMode | Mode::CopySearch { .. }) {
                 scroll_copy_down(app, 3);
                 // Auto-exit copy mode when scrolled back to live output

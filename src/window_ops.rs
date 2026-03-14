@@ -694,6 +694,12 @@ fn remote_scroll_wheel(app: &mut AppState, x: u16, y: u16, up: bool) {
     };
     mouse_log(&format!("remote_scroll_wheel: x={} y={} up={} mode={}", x, y, up, mode_str));
 
+    // Ignore scroll in popup mode — don't enter copy-mode (#110)
+    if matches!(app.mode, Mode::PopupMode { .. }) {
+        mouse_log("  -> popup mode, ignoring scroll");
+        return;
+    }
+
     // Handle scroll while already in copy mode
     if matches!(app.mode, Mode::CopyMode | Mode::CopySearch { .. }) {
         mouse_log("  -> already in copy mode, scrolling within");
