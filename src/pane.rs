@@ -611,21 +611,32 @@ const PROFILE_SOURCE: &str = concat!(
     ")) { if ($__p -and (Test-Path $__p)) { try { . $__p } catch { Write-Warning \"psmux: profile error in ${__p}: $_\" } } }",
 );
 
-/// Sync PowerShell's $PWD to the OS-level CWD on every prompt (#111).
+/// Sync PowerShell's $PWD to the OS-level CWD (#111).
 /// PowerShell's `cd` (Set-Location) only updates `$PWD` internally and
 /// does NOT call Win32 SetCurrentDirectory(). This means the process PEB
 /// still shows the original spawn directory, causing #{pane_current_path}
 /// to always return the initial CWD.
-/// This hook wraps the prompt function to call SetCurrentDirectory after
-/// every command, keeping the PEB CWD in sync with PowerShell's $PWD.
+///
+/// Instead of wrapping the `prompt` function (which conflicts with prompt
+/// customizers like Starship, oh-my-posh, etc.), we wrap the three cmdlets
+/// that actually change directories: Set-Location, Push-Location, and
+/// Pop-Location.  This is invisible to prompt customizers and survives
+/// `. $PROFILE` reloads.
 const CWD_SYNC: &str = concat!(
-    "if (-not $__psmux_cwd_hook) { ",
+    "if (-not $Global:__psmux_cwd_hook) { ",
     "$Global:__psmux_cwd_hook = $true; ",
-    "$__psmux_orig_prompt = if (Test-Path Function:\\prompt) { Get-Content Function:\\prompt } else { $null }; ",
-    "function Global:prompt { ",
-    "[System.IO.Directory]::SetCurrentDirectory($PWD.ProviderPath); ",
-    "if ($__psmux_orig_prompt) { & ([scriptblock]::Create($__psmux_orig_prompt)) } ",
-    "else { \"PS $($executionContext.SessionState.Path.CurrentLocation)$('>' * ($nestedPromptLevel + 1)) \" } ",
+    "try { [System.IO.Directory]::SetCurrentDirectory($PWD.ProviderPath) } catch {}; ",
+    "function Global:Set-Location { ",
+    "Microsoft.PowerShell.Management\\Set-Location @args; ",
+    "try { [System.IO.Directory]::SetCurrentDirectory($PWD.ProviderPath) } catch {} ",
+    "}; ",
+    "function Global:Push-Location { ",
+    "Microsoft.PowerShell.Management\\Push-Location @args; ",
+    "try { [System.IO.Directory]::SetCurrentDirectory($PWD.ProviderPath) } catch {} ",
+    "}; ",
+    "function Global:Pop-Location { ",
+    "Microsoft.PowerShell.Management\\Pop-Location @args; ",
+    "try { [System.IO.Directory]::SetCurrentDirectory($PWD.ProviderPath) } catch {} ",
     "} }",
 );
 
