@@ -471,6 +471,10 @@ pub fn remote_mouse_down(app: &mut AppState, x: u16, y: u16) {
     for (path, area) in rects.iter() {
         if area.contains(ratatui::layout::Position { x, y }) {
             win.active_path = path.clone();
+            // Update MRU for clicked pane (tmux parity #70)
+            if let Some(pid) = crate::tree::get_active_pane_id(&win.root, path) {
+                crate::tree::touch_mru(&mut win.pane_mru, pid);
+            }
             active_area = Some(*area);
         }
     }

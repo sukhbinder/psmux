@@ -602,6 +602,11 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
     // (250ms is imperceptible to users).
     let mut last_reap = Instant::now();
 
+    // Persist temp_focus_restore across batch boundaries so that a
+    // FocusWindowTemp/FocusPaneByIndexTemp in one batch plus the actual
+    // command (e.g. CapturePane) in the next batch still works correctly.
+    let mut temp_focus_restore: Option<(usize, usize)> = None;
+
     loop {
         // Adaptive timeout: ramps from 1ms (active typing/echo) through
         // 5ms (client recently active) up to 50ms (fully idle).  This
@@ -655,7 +660,10 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 // non-temp command so the user's view doesn't jump.
                 // We store the pane ID (not path) because kill-pane
                 // restructures the tree, invalidating saved paths (#71).
-                let mut temp_focus_restore: Option<(usize, usize)> = None;
+                // NOTE: temp_focus_restore lives outside the loop so it
+                // persists across batch boundaries (prevents race where
+                // FocusWindowTemp and the actual command land in different
+                // batches).
                 for req in pending {
                     let mutates_state = !matches!(&req,
                         CtrlReq::DumpState(..)
@@ -780,12 +788,12 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         let mut revert_path = prev_path;
                         revert_path.push(0);
                         app.windows[app.active_idx].active_path = revert_path;
-                        // Detached splits never focus the new pane, so move
-                        // it to the END of MRU, not the front (#112).
+                        // Detached splits never focus the new pane — remove
+                        // from MRU entirely so directional nav tie-breaks by
+                        // pane_index among equally-unvisited candidates (#70).
                         if let Some(nid) = new_pane_id {
                             let win = &mut app.windows[app.active_idx];
                             win.pane_mru.retain(|&id| id != nid);
-                            win.pane_mru.push(nid);
                         }
                     } else {
                         // Non-detached: new pane keeps focus.
@@ -833,11 +841,10 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         let mut revert_path = prev_path;
                         revert_path.push(0);
                         app.windows[app.active_idx].active_path = revert_path;
-                        // Detached splits: new pane to END of MRU (#112)
+                        // Detached splits: remove from MRU (#70 pane_index tie-break)
                         if let Some(nid) = new_pane_id {
                             let win = &mut app.windows[app.active_idx];
                             win.pane_mru.retain(|&id| id != nid);
-                            win.pane_mru.push(nid);
                         }
                     } else {
                         temp_focus_restore = None;
@@ -2860,16 +2867,10 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 state_dirty = true;
             }
         }
-                // Clean up any trailing temp focus at end of batch
-                if let Some((restore_idx, restore_pane_id)) = temp_focus_restore {
-                    if restore_idx < app.windows.len() {
-                        app.active_idx = restore_idx;
-                        let win = &mut app.windows[restore_idx];
-                        if let Some(path) = crate::tree::find_path_by_id(&win.root, restore_pane_id) {
-                            win.active_path = path;
-                        }
-                    }
-                }
+                // No trailing cleanup: temp_focus_restore persists across
+                // batch boundaries so the actual command that follows in a
+                // later batch can still benefit from the temp focus (and
+                // will restore when it processes as a non-temp-focus req).
             }
         }
         // ── Server-push: proactively send frames to attached clients ──
