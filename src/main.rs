@@ -68,6 +68,7 @@ fn run_main() -> io::Result<()> {
     // IMPORTANT: Only recognize -L as a global flag when it appears BEFORE the subcommand.
     // This avoids conflict with subcommand flags (e.g. select-pane -L, resize-pane -L).
     let mut l_socket_name: Option<String> = None;
+    let mut f_config_file: Option<String> = None;
     {
         let mut i = 1; // skip binary name
         while i < args.len() {
@@ -75,7 +76,10 @@ fn run_main() -> io::Result<()> {
             if arg == "-L" && i + 1 < args.len() {
                 l_socket_name = Some(args[i + 1].clone());
                 i += 2;
-            } else if (arg == "-S" || arg == "-f" || arg == "-t") && i + 1 < args.len() {
+            } else if arg == "-f" && i + 1 < args.len() {
+                f_config_file = Some(args[i + 1].clone());
+                i += 2;
+            } else if (arg == "-S" || arg == "-t") && i + 1 < args.len() {
                 i += 2; // skip other global flag-value pairs
             } else if arg.starts_with('-') {
                 i += 1; // skip single global flags (e.g. -v, -V)
@@ -83,6 +87,11 @@ fn run_main() -> io::Result<()> {
                 break; // hit the subcommand name — stop scanning for global flags
             }
         }
+    }
+
+    // Set PSMUX_CONFIG_FILE if -f was provided, so load_config() picks it up.
+    if let Some(ref cf) = f_config_file {
+        env::set_var("PSMUX_CONFIG_FILE", cf);
     }
 
     // Parse -t flag early to set target session for all commands
@@ -167,7 +176,7 @@ fn run_main() -> io::Result<()> {
         while i < args.len() {
             if !found_subcommand {
                 // Before subcommand: skip global flags with values
-                if (args[i] == "-t" || args[i] == "-L") && i + 1 < args.len() {
+                if (args[i] == "-t" || args[i] == "-L" || args[i] == "-f" || args[i] == "-S") && i + 1 < args.len() {
                     i += 2; // skip flag and its value
                     continue;
                 } else if args[i] == "-h" || args[i] == "--help"
