@@ -589,7 +589,7 @@ const ENV_SHIM_PS: &str = concat!(
 
 /// PSReadLine prediction fix — disables predictions that crash with
 /// NullReferenceException in GetHistoryItems() during ConPTY startup.
-/// See https://github.com/marlocarlo/psmux/issues/109
+/// See https://github.com/psmux/psmux/issues/109
 const PSRL_FIX: &str = concat!(
     "$PSStyle.OutputRendering = 'Ansi'; ",
     "try { Set-PSReadLineOption -PredictionSource None -ErrorAction Stop } catch {}; ",

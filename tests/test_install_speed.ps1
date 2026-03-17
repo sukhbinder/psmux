@@ -161,7 +161,7 @@ if (!$hasScoop) {
         $scoopManifest = @{
             version = "3.2.0-local"
             description = "psmux local test"
-            homepage = "https://github.com/marlocarlo/psmux"
+            homepage = "https://github.com/psmux/psmux"
             license = "MIT"
             url = $zipUrl
             hash = $sha256
@@ -299,8 +299,8 @@ Uninstall-BinFile -Name "tmux"
     <id>psmux</id>
     <version>3.2.0-local</version>
     <title>psmux local test</title>
-    <authors>marlocarlo</authors>
-    <owners>marlocarlo</owners>
+    <authors>Josh</authors>
+    <owners>Josh</owners>
     <description>psmux local install test</description>
     <requireLicenseAcceptance>false</requireLicenseAcceptance>
   </metadata>

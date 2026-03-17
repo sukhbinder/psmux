@@ -12,7 +12,7 @@
 #   5. Bare "bash" (no full path) works as default-shell
 #   6. Paths with forward and backslashes both work
 #
-# https://github.com/marlocarlo/psmux/issues/99
+# https://github.com/psmux/psmux/issues/99
 #
 # Run: pwsh -NoProfile -ExecutionPolicy Bypass -File tests\test_issue99_default_shell_bash.ps1
 
