@@ -111,10 +111,12 @@ pub fn create_window(pty_system: &dyn portable_pty::PtySystem, app: &mut AppStat
 
     // When no explicit command is given, use the configured default-shell
     // (from `set -g default-shell` / `default-command`).
+    // Expand format variables like #{pane_current_path} at spawn time (#111).
+    let expanded_shell = crate::format::expand_format(&app.default_shell, app);
     let mut shell_cmd = if command.is_some() {
         build_command(command, app.env_shim)
-    } else if !app.default_shell.is_empty() {
-        build_default_shell(&app.default_shell, app.env_shim)
+    } else if !expanded_shell.is_empty() {
+        build_default_shell(&expanded_shell, app.env_shim)
     } else {
         build_command(None, app.env_shim)
     };
@@ -176,8 +178,10 @@ pub fn spawn_warm_pane(pty_system: &dyn portable_pty::PtySystem, app: &mut AppSt
     let pair = pty_system
         .openpty(size)
         .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("openpty error: {e}")))?;
-    let mut shell_cmd = if !app.default_shell.is_empty() {
-        build_default_shell(&app.default_shell, app.env_shim)
+    // Expand format variables like #{pane_current_path} at spawn time (#111).
+    let expanded_shell = crate::format::expand_format(&app.default_shell, app);
+    let mut shell_cmd = if !expanded_shell.is_empty() {
+        build_default_shell(&expanded_shell, app.env_shim)
     } else {
         build_command(None, app.env_shim)
     };
@@ -363,10 +367,12 @@ pub fn split_active_with_command(app: &mut AppState, kind: LayoutKind, command: 
     // ── Normal path: cold-spawn a new ConPTY + shell ────────────────
     let pair = pty_system.openpty(size).map_err(|e| io::Error::new(io::ErrorKind::Other, format!("openpty error: {e}")))?;
     // When no explicit command is given, use the configured default-shell.
+    // Expand format variables like #{pane_current_path} at spawn time (#111).
+    let expanded_shell = crate::format::expand_format(&app.default_shell, app);
     let mut shell_cmd = if command.is_some() {
         build_command(command, app.env_shim)
-    } else if !app.default_shell.is_empty() {
-        build_default_shell(&app.default_shell, app.env_shim)
+    } else if !expanded_shell.is_empty() {
+        build_default_shell(&expanded_shell, app.env_shim)
     } else {
         build_command(None, app.env_shim)
     };

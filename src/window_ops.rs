@@ -980,14 +980,18 @@ pub fn respawn_active_pane(app: &mut AppState, pty_system_ref: Option<&dyn porta
         owned_pty = native_pty_system();
         &*owned_pty
     };
+    // Expand format variables like #{pane_current_path} at spawn time (#111).
+    // Must happen before the mutable borrow of app.windows below.
+    let expanded_shell = crate::format::expand_format(&app.default_shell, &app);
+
     let win = &mut app.windows[app.active_idx];
     let Some(pane) = active_pane_mut(&mut win.root, &win.active_path) else { return Ok(()); };
     let pane_id = pane.id;
     
     let size = PtySize { rows: pane.last_rows, cols: pane.last_cols, pixel_width: 0, pixel_height: 0 };
     let pair = pty_system.openpty(size).map_err(|e| io::Error::new(io::ErrorKind::Other, format!("openpty error: {e}")))?;
-    let mut shell_cmd = if !app.default_shell.is_empty() {
-        build_default_shell(&app.default_shell, app.env_shim)
+    let mut shell_cmd = if !expanded_shell.is_empty() {
+        build_default_shell(&expanded_shell, app.env_shim)
     } else {
         detect_shell()
     };
