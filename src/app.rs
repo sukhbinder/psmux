@@ -1166,16 +1166,16 @@ pub fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<
                 }
                 CtrlReq::FocusPaneCmd(pid) => { focus_pane_by_id(&mut app, pid); }
                 CtrlReq::FocusWindowCmd(wid) => { if let Some(idx) = find_window_index_by_id(&app, wid) { app.active_idx = idx; } }
-                CtrlReq::MouseDown(x,y) => { remote_mouse_down(&mut app, x, y); }
-                CtrlReq::MouseDownRight(x,y) => { remote_mouse_button(&mut app, x, y, 2, true); }
-                CtrlReq::MouseDownMiddle(x,y) => { remote_mouse_button(&mut app, x, y, 1, true); }
-                CtrlReq::MouseDrag(x,y) => { remote_mouse_drag(&mut app, x, y); }
-                CtrlReq::MouseUp(x,y) => { remote_mouse_up(&mut app, x, y); }
-                CtrlReq::MouseUpRight(x,y) => { remote_mouse_button(&mut app, x, y, 2, false); }
-                CtrlReq::MouseUpMiddle(x,y) => { remote_mouse_button(&mut app, x, y, 1, false); }
-                CtrlReq::MouseMove(x,y) => { remote_mouse_motion(&mut app, x, y); }
-                CtrlReq::ScrollUp(x, y) => { remote_scroll_up(&mut app, x, y); }
-                CtrlReq::ScrollDown(x, y) => { remote_scroll_down(&mut app, x, y); }
+                CtrlReq::MouseDown(_,x,y) => { remote_mouse_down(&mut app, x, y); }
+                CtrlReq::MouseDownRight(_,x,y) => { remote_mouse_button(&mut app, x, y, 2, true); }
+                CtrlReq::MouseDownMiddle(_,x,y) => { remote_mouse_button(&mut app, x, y, 1, true); }
+                CtrlReq::MouseDrag(_,x,y) => { remote_mouse_drag(&mut app, x, y); }
+                CtrlReq::MouseUp(_,x,y) => { remote_mouse_up(&mut app, x, y); }
+                CtrlReq::MouseUpRight(_,x,y) => { remote_mouse_button(&mut app, x, y, 2, false); }
+                CtrlReq::MouseUpMiddle(_,x,y) => { remote_mouse_button(&mut app, x, y, 1, false); }
+                CtrlReq::MouseMove(_,x,y) => { remote_mouse_motion(&mut app, x, y); }
+                CtrlReq::ScrollUp(_, x, y) => { remote_scroll_up(&mut app, x, y); }
+                CtrlReq::ScrollDown(_, x, y) => { remote_scroll_down(&mut app, x, y); }
                 CtrlReq::NextWindow => { if !app.windows.is_empty() { app.active_idx = (app.active_idx + 1) % app.windows.len(); } }
                 CtrlReq::PrevWindow => { if !app.windows.is_empty() { app.active_idx = (app.active_idx + app.windows.len() - 1) % app.windows.len(); } }
                 CtrlReq::RenameWindow(name) => { let win = &mut app.windows[app.active_idx]; win.name = name; }

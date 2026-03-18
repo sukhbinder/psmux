@@ -409,38 +409,38 @@ match cmd {
         if let Some(wid) = args.get(0).and_then(|s| s.parse::<usize>().ok()) { let _ = tx.send(CtrlReq::FocusWindowCmd(wid)); }
     }
     "mouse-down" => {
-        if args.len()>=2 { if let (Ok(x),Ok(y))=(args[0].parse::<u16>(),args[1].parse::<u16>()) { let _ = tx.send(CtrlReq::MouseDown(x,y)); } }
+        if args.len()>=2 { if let (Ok(x),Ok(y))=(args[0].parse::<u16>(),args[1].parse::<u16>()) { let _ = tx.send(CtrlReq::MouseDown(client_id,x,y)); } }
     }
     "mouse-down-right" => {
-        if args.len()>=2 { if let (Ok(x),Ok(y))=(args[0].parse::<u16>(),args[1].parse::<u16>()) { let _ = tx.send(CtrlReq::MouseDownRight(x,y)); } }
+        if args.len()>=2 { if let (Ok(x),Ok(y))=(args[0].parse::<u16>(),args[1].parse::<u16>()) { let _ = tx.send(CtrlReq::MouseDownRight(client_id,x,y)); } }
     }
     "mouse-down-middle" => {
-        if args.len()>=2 { if let (Ok(x),Ok(y))=(args[0].parse::<u16>(),args[1].parse::<u16>()) { let _ = tx.send(CtrlReq::MouseDownMiddle(x,y)); } }
+        if args.len()>=2 { if let (Ok(x),Ok(y))=(args[0].parse::<u16>(),args[1].parse::<u16>()) { let _ = tx.send(CtrlReq::MouseDownMiddle(client_id,x,y)); } }
     }
     "mouse-drag" => {
-        if args.len()>=2 { if let (Ok(x),Ok(y))=(args[0].parse::<u16>(),args[1].parse::<u16>()) { let _ = tx.send(CtrlReq::MouseDrag(x,y)); } }
+        if args.len()>=2 { if let (Ok(x),Ok(y))=(args[0].parse::<u16>(),args[1].parse::<u16>()) { let _ = tx.send(CtrlReq::MouseDrag(client_id,x,y)); } }
     }
     "mouse-up" => {
-        if args.len()>=2 { if let (Ok(x),Ok(y))=(args[0].parse::<u16>(),args[1].parse::<u16>()) { let _ = tx.send(CtrlReq::MouseUp(x,y)); } }
+        if args.len()>=2 { if let (Ok(x),Ok(y))=(args[0].parse::<u16>(),args[1].parse::<u16>()) { let _ = tx.send(CtrlReq::MouseUp(client_id,x,y)); } }
     }
     "mouse-up-right" => {
-        if args.len()>=2 { if let (Ok(x),Ok(y))=(args[0].parse::<u16>(),args[1].parse::<u16>()) { let _ = tx.send(CtrlReq::MouseUpRight(x,y)); } }
+        if args.len()>=2 { if let (Ok(x),Ok(y))=(args[0].parse::<u16>(),args[1].parse::<u16>()) { let _ = tx.send(CtrlReq::MouseUpRight(client_id,x,y)); } }
     }
     "mouse-up-middle" => {
-        if args.len()>=2 { if let (Ok(x),Ok(y))=(args[0].parse::<u16>(),args[1].parse::<u16>()) { let _ = tx.send(CtrlReq::MouseUpMiddle(x,y)); } }
+        if args.len()>=2 { if let (Ok(x),Ok(y))=(args[0].parse::<u16>(),args[1].parse::<u16>()) { let _ = tx.send(CtrlReq::MouseUpMiddle(client_id,x,y)); } }
     }
     "mouse-move" => {
-        if args.len()>=2 { if let (Ok(x),Ok(y))=(args[0].parse::<u16>(),args[1].parse::<u16>()) { let _ = tx.send(CtrlReq::MouseMove(x,y)); } }
+        if args.len()>=2 { if let (Ok(x),Ok(y))=(args[0].parse::<u16>(),args[1].parse::<u16>()) { let _ = tx.send(CtrlReq::MouseMove(client_id,x,y)); } }
     }
     "scroll-up" => {
         let x = args.get(0).and_then(|s| s.parse::<u16>().ok()).unwrap_or(0);
         let y = args.get(1).and_then(|s| s.parse::<u16>().ok()).unwrap_or(0);
-        let _ = tx.send(CtrlReq::ScrollUp(x, y));
+        let _ = tx.send(CtrlReq::ScrollUp(client_id, x, y));
     }
     "scroll-down" => {
         let x = args.get(0).and_then(|s| s.parse::<u16>().ok()).unwrap_or(0);
         let y = args.get(1).and_then(|s| s.parse::<u16>().ok()).unwrap_or(0);
-        let _ = tx.send(CtrlReq::ScrollDown(x, y));
+        let _ = tx.send(CtrlReq::ScrollDown(client_id, x, y));
     }
     "next-window" | "next" => { let _ = tx.send(CtrlReq::NextWindow); }
     "previous-window" | "prev" => { let _ = tx.send(CtrlReq::PrevWindow); }
@@ -700,7 +700,7 @@ match cmd {
         // Pass target pane index for PANE_POS_OVERRIDE (#113).
         let target_pane_idx: Option<usize> = if !pane_is_id { target_pane } else { None };
         let (rtx, rrx) = mpsc::channel::<String>();
-        let _ = tx.send(CtrlReq::DisplayMessage(rtx, fmt, target_pane_idx));
+        let _ = tx.send(CtrlReq::DisplayMessage(rtx, fmt, target_pane_idx, !print_stdout));
         if let Ok(text) = rrx.recv() {
             if print_stdout {
                 let _ = writeln!(write_stream, "{}", text);
@@ -1222,7 +1222,7 @@ match cmd {
         let fmt = args.windows(2).find(|w| w[0] == "-F").map(|w| w[1].to_string());
         if let Some(fmt_str) = fmt {
             let (rtx, rrx) = mpsc::channel::<String>();
-            let _ = tx.send(CtrlReq::DisplayMessage(rtx, fmt_str, None));
+            let _ = tx.send(CtrlReq::DisplayMessage(rtx, fmt_str, None, false));
             if let Ok(text) = rrx.recv() { let _ = write!(write_stream, "{}\n", text); let _ = write_stream.flush(); }
         } else {
             let (rtx, rrx) = mpsc::channel::<String>();

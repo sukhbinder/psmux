@@ -363,6 +363,13 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
     // Set to true when Ctrl+V Release is seen — confirms the burst was a paste.
     #[cfg(windows)]
     let mut paste_confirmed: bool = false;
+    // Buffer size at previous stage2 timeout check — for growth detection.
+    #[cfg(windows)]
+    let mut paste_stage2_last_len: usize = 0;
+    // Suppression window: after right-click copy, discard text key events
+    // for a short period to prevent VS Code ConPTY duplicate injection.
+    #[cfg(windows)]
+    let mut paste_suppress_until: Option<Instant> = None;
 
     // list-keys overlay state (C-b ?)
     let mut keys_viewer = false;
@@ -700,8 +707,18 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                         // because IME routinely generates 3+ chars in <20ms and would
                         // trigger a false-positive 300ms delay (fixes #91).
                         paste_stage2 = true;
+                        paste_stage2_last_len = paste_pend.len();
                         if input_log_enabled() {
                             input_log("paste", &format!("stage2: {} chars in 20ms, waiting for Ctrl+V Release", paste_pend.len()));
+                        }
+                    } else if paste_pend.len() >= 20 && has_non_ascii {
+                        // ≥20 non-ASCII chars in 20ms — almost certainly a paste
+                        // containing Unicode content (em-dashes, CJK, etc.), not
+                        // IME composition (which rarely exceeds a few chars).
+                        paste_stage2 = true;
+                        paste_stage2_last_len = paste_pend.len();
+                        if input_log_enabled() {
+                            input_log("paste", &format!("stage2 (large non-ASCII): {} chars in 20ms", paste_pend.len()));
                         }
                     } else if paste_pend.len() >= 3 && has_non_ascii {
                         // ≥3 chars but contains non-ASCII (IME input) — flush
@@ -750,19 +767,26 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                         paste_pend_start = None;
                     }
                 } else if paste_stage2 && elapsed > Duration::from_millis(300) {
-                    // Stage 2 timeout — no Ctrl+V Release arrived.  Since we
-                    // accumulated ≥3 chars in <20ms this is almost certainly a
-                    // paste.  Send as send-paste so the server wraps it in
-                    // bracketed paste sequences and child apps (nvim, etc.) can
-                    // distinguish paste from typed input (fixes autoindent).
-                    if input_log_enabled() {
-                        input_log("paste", &format!("stage2 timeout, sending {} chars as send-paste", paste_pend.len()));
+                    // Stage 2 timeout — no Ctrl+V Release arrived.
+                    // Growth detection: if the buffer grew since last check,
+                    // ConPTY is still injecting characters (large paste).
+                    // Extend the window instead of splitting the paste.
+                    if paste_pend.len() > paste_stage2_last_len {
+                        paste_stage2_last_len = paste_pend.len();
+                        paste_pend_start = Some(Instant::now() - Duration::from_millis(280));
+                    } else {
+                        // Buffer stopped growing — send accumulated chars as
+                        // send-paste so the server wraps in bracketed paste.
+                        if input_log_enabled() {
+                            input_log("paste", &format!("stage2 timeout, sending {} chars as send-paste", paste_pend.len()));
+                        }
+                        let encoded = base64_encode(&paste_pend);
+                        cmd_batch.push(format!("send-paste {}\n", encoded));
+                        paste_pend.clear();
+                        paste_pend_start = None;
+                        paste_stage2 = false;
+                        paste_stage2_last_len = 0;
                     }
-                    let encoded = base64_encode(&paste_pend);
-                    cmd_batch.push(format!("send-paste {}\n", encoded));
-                    paste_pend.clear();
-                    paste_pend_start = None;
-                    paste_stage2 = false;
                 }
             }
         }
@@ -1491,9 +1515,20 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                                 KeyCode::Char(c) => {
                                     #[cfg(windows)]
                                     {
-                                        paste_pend.push(c);
-                                        if paste_pend_start.is_none() {
-                                            paste_pend_start = Some(Instant::now());
+                                        // Suppress text key events during the post-copy
+                                        // suppression window (VS Code ConPTY duplicate).
+                                        let suppressed = paste_suppress_until
+                                            .map_or(false, |t| Instant::now() < t);
+                                        if suppressed {
+                                            if input_log_enabled() {
+                                                input_log("paste", &format!("suppressed char '{}' during paste suppress window", c));
+                                            }
+                                        } else {
+                                            paste_suppress_until = None;
+                                            paste_pend.push(c);
+                                            if paste_pend_start.is_none() {
+                                                paste_pend_start = Some(Instant::now());
+                                            }
                                         }
                                     }
                                     #[cfg(not(windows))]
@@ -1634,6 +1669,9 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                                     rsel_end = None;
                                     rsel_dragged = false;
                                     selection_changed = true;
+                                    // Suppress text key events that VS Code's ConPTY
+                                    // injects after a right-click copy action.
+                                    paste_suppress_until = Some(Instant::now() + Duration::from_secs(2));
                                 } else {
                                     // No selection, no TUI — paste from clipboard (pwsh-style)
                                     rsel_start = None;

@@ -161,13 +161,18 @@ pub fn parse_command_line(line: &str) -> Vec<String> {
                 current.push(c);
             }
         } else if c == '\\' && in_double_quotes {
-            // Inside double quotes, only treat \" as an escape (produces a
-            // literal double-quote).  All other backslashes are kept literal
-            // because psmux is a Windows-native tool where backslash is the
-            // normal path separator (e.g. "C:\Program Files\Git\bin\bash.exe").
+            // Inside double quotes, recognise two escape sequences:
+            //   \"  → literal double-quote
+            //   \\  → literal backslash
+            // All other backslashes are kept literal because psmux is a
+            // Windows-native tool where backslash is the normal path
+            // separator (e.g. "C:\Program Files\Git\bin\bash.exe").
             if i + 1 < chars.len() && chars[i + 1] == '"' {
                 current.push('"');
                 i += 1; // skip the quote
+            } else if i + 1 < chars.len() && chars[i + 1] == '\\' {
+                current.push('\\');
+                i += 1; // skip the second backslash
             } else {
                 current.push(c); // literal backslash
             }
