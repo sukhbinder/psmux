@@ -1136,7 +1136,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 CtrlReq::SendText(s) => { app.status_message = None; send_text_to_active(&mut app, &s)?; echo_pending_until = Some(Instant::now()); }
                 CtrlReq::SendKey(k) => { app.status_message = None; send_key_to_active(&mut app, &k)?; echo_pending_until = Some(Instant::now()); }
                 CtrlReq::SendPaste(s) => { send_paste_to_active(&mut app, &s)?; echo_pending_until = Some(Instant::now()); }
-                CtrlReq::ZoomPane => { toggle_zoom(&mut app); hook_event = Some("after-resize-pane"); }
+                CtrlReq::ZoomPane => { toggle_zoom(&mut app); state_dirty = true; hook_event = Some("after-resize-pane"); }
                 CtrlReq::CopyEnter => { enter_copy_mode(&mut app); }
                 CtrlReq::CopyEnterPageUp => {
                     enter_copy_mode(&mut app);
