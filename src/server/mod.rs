@@ -183,8 +183,10 @@ fn spawn_warm_server(app: &AppState) {
                 }
             }
         }
-        // Stale port file — remove it
+        // Stale port file — remove it (and matching key file)
         let _ = std::fs::remove_file(&warm_port_path);
+        let warm_key_path = format!("{}\\.psmux\\{}.key", home, warm_base);
+        let _ = std::fs::remove_file(&warm_key_path);
     }
     let exe = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("psmux"));
     let mut args: Vec<String> = vec!["server".into(), "-s".into(), "__warm__".into()];

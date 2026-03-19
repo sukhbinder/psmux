@@ -349,8 +349,10 @@ fn run_main() -> io::Result<()> {
                                                     println!("{}", base); 
                                                 }
                                             } else {
-                                                // stale port file - remove it
+                                                // stale port file - remove it along with matching key
                                                 let _ = std::fs::remove_file(e.path());
+                                                let key_path = e.path().with_extension("key");
+                                                let _ = std::fs::remove_file(&key_path);
                                             }
                                         }
                                     }
@@ -2408,17 +2410,29 @@ fn run_main() -> io::Result<()> {
                         let _ = write!(stream, "AUTH {}\n", warm_key);
                         let _ = write!(stream, "claim-session {}\n", session_name);
                         let _ = stream.flush();
-                        let mut buf = Vec::new();
-                        let mut temp = [0u8; 256];
-                        loop {
-                            match std::io::Read::read(&mut stream, &mut temp) {
-                                Ok(0) => break,
-                                Ok(n) => { buf.extend_from_slice(&temp[..n]); break; }
-                                Err(_) => break,
+                        // Use send_auth_cmd_response pattern: read AUTH
+                        // "OK" line first, then read the claim-session
+                        // response.  Previously a single raw read() would
+                        // pick up only the AUTH "OK" and proceed before
+                        // the server finished renaming port/key files,
+                        // causing "auth failed" on the subsequent attach
+                        // (issue #136).
+                        if let Ok(reader_stream) = stream.try_clone() {
+                            let mut br = std::io::BufReader::new(reader_stream);
+                            let mut auth_line = String::new();
+                            if std::io::BufRead::read_line(&mut br, &mut auth_line).unwrap_or(0) > 0
+                                && auth_line.trim().starts_with("OK")
+                            {
+                                // Auth succeeded — now wait for the claim
+                                // response so files are renamed before we
+                                // try to attach.
+                                let mut claim_line = String::new();
+                                if std::io::BufRead::read_line(&mut br, &mut claim_line).unwrap_or(0) > 0
+                                    && claim_line.contains("OK")
+                                {
+                                    warm_claimed = true;
+                                }
                             }
-                        }
-                        if String::from_utf8_lossy(&buf).contains("OK") {
-                            warm_claimed = true;
                         }
                     }
                 }
