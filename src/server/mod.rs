@@ -882,6 +882,12 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                                 app.last_window_idx = app.active_idx;
                                 app.active_idx = internal_idx;
                             });
+                            // Clear activity/bell/silence flags on the newly-focused window
+                            if let Some(win) = app.windows.get_mut(internal_idx) {
+                                win.activity_flag = false;
+                                win.bell_flag = false;
+                                win.silence_flag = false;
+                            }
                             // Lazily resize panes in the newly-focused window
                             resize_all_panes(&mut app);
                         }
@@ -952,7 +958,24 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     let line = format!("{}: {} windows (created {}){}\n", app.session_name, windows, created, attached);
                     let _ = resp.send(line);
                 }
-                CtrlReq::ClientAttach(cid) => { app.attached_clients = app.attached_clients.saturating_add(1); app.latest_client_id = Some(cid); hook_event = Some("client-attached"); }
+                CtrlReq::ClientAttach(cid) => {
+                    app.attached_clients = app.attached_clients.saturating_add(1);
+                    app.latest_client_id = Some(cid);
+                    hook_event = Some("client-attached");
+                    // update-environment: refresh env vars from the attaching client's environment
+                    let update_vars = app.update_environment.clone();
+                    for var_spec in &update_vars {
+                        let remove = var_spec.starts_with('-');
+                        let name = if remove { &var_spec[1..] } else { var_spec.as_str() };
+                        if remove {
+                            app.environment.remove(name);
+                        } else if let Ok(val) = std::env::var(name) {
+                            app.environment.insert(name.to_string(), val);
+                        } else {
+                            app.environment.remove(name);
+                        }
+                    }
+                }
                 CtrlReq::ClientDetach(cid) => {
                     app.attached_clients = app.attached_clients.saturating_sub(1);
                     app.client_sizes.remove(&cid);
@@ -986,10 +1009,15 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     let _ = resp.send(json);
                 }
                 CtrlReq::DumpState(resp, allow_nc) => {
-                    // ── Automatic rename: resolve foreground process ──
+                    // ── Activity / bell / silence detection ──
+                    helpers::check_window_activity(&mut app);
+
+                    // ── Automatic rename / allow-rename: resolve window names ──
                     {
                         let in_copy = matches!(app.mode, Mode::CopyMode | Mode::CopySearch { .. });
-                        if app.automatic_rename && !in_copy {
+                        let auto_rename = app.automatic_rename;
+                        let allow_rename = app.allow_rename;
+                        if (auto_rename || allow_rename) && !in_copy {
                             for win in app.windows.iter_mut() {
                                 if win.manual_rename { continue; }
                                 if let Some(p) = crate::tree::active_pane_mut(&mut win.root, &win.active_path) {
@@ -999,11 +1027,28 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                                     if p.child_pid.is_none() {
                                         p.child_pid = crate::platform::mouse_inject::get_child_pid(&*p.child);
                                     }
-                                    let new_name = if let Some(pid) = p.child_pid {
-                                        crate::platform::process_info::get_foreground_process_name(pid)
-                                            .unwrap_or_else(|| "shell".into())
-                                    } else if !p.title.is_empty() {
-                                        p.title.clone()
+                                    let new_name = if auto_rename {
+                                        // automatic-rename: use foreground process name
+                                        if let Some(pid) = p.child_pid {
+                                            crate::platform::process_info::get_foreground_process_name(pid)
+                                                .unwrap_or_else(|| "shell".into())
+                                        } else if allow_rename && !p.title.is_empty() {
+                                            p.title.clone()
+                                        } else {
+                                            continue;
+                                        }
+                                    } else if allow_rename {
+                                        // allow-rename only: use OSC title from child
+                                        if let Ok(parser) = p.term.lock() {
+                                            let title = parser.screen().title();
+                                            if !title.is_empty() {
+                                                title.to_string()
+                                            } else {
+                                                continue;
+                                            }
+                                        } else {
+                                            continue;
+                                        }
                                     } else {
                                         continue;
                                     };

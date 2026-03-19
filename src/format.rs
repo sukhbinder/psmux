@@ -1016,6 +1016,8 @@ pub fn expand_var(var: &str, app: &AppState, win_idx: usize) -> String {
             if win_idx == app.active_idx { f.push('*'); }
             else if win_idx == app.last_window_idx { f.push('-'); }
             if win.activity_flag { f.push('#'); }
+            if win.bell_flag { f.push('!'); }
+            if win.silence_flag { f.push('~'); }
             f
         }
         "window_id" => format!("@{}", win.id),

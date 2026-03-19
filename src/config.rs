@@ -535,7 +535,7 @@ pub fn parse_option_value(app: &mut AppState, rest: &str, _is_global: bool) {
         "set-titles-string" => {
             app.set_titles_string = value.to_string();
         }
-        "status-keys" => { app.environment.insert(key.to_string(), value.to_string()); }
+        "status-keys" => { app.user_options.insert(key.to_string(), value.to_string()); }
         "pane-border-style" => { app.pane_border_style = value.to_string(); }
         "pane-active-border-style" => { app.pane_active_border_style = value.to_string(); }
         "window-status-format" => { app.window_status_format = value.to_string(); }
@@ -547,17 +547,26 @@ pub fn parse_option_value(app: &mut AppState, rest: &str, _is_global: bool) {
         "synchronize-panes" => {
             app.sync_input = matches!(value, "on" | "true" | "1");
         }
-        "allow-rename" => { /* tmux option, not an env var — stored in automatic_rename */ }
-        "terminal-overrides" => { /* tmux option — accepted for compatibility, no-op */ }
+        "allow-rename" => {
+            app.allow_rename = matches!(value, "on" | "true" | "1");
+        }
+        "terminal-overrides" => { /* tmux terminfo override — accepted for compatibility, no-op on Windows */ }
         "default-terminal" => {
             // tmux sets the TERM env var from this option (#137)
             app.environment.insert("TERM".to_string(), value.to_string());
         }
-        "update-environment" => { /* tmux option — accepted for compatibility, no-op */ }
+        "update-environment" => {
+            // tmux: space-separated list of env var names to update from client on attach
+            app.update_environment = value.split_whitespace().map(|s| s.to_string()).collect();
+        }
         "bell-action" => { app.bell_action = value.to_string(); }
         "visual-bell" => { app.visual_bell = matches!(value, "on" | "true" | "1"); }
-        "activity-action" => { /* tmux option — accepted for compatibility, no-op */ }
-        "silence-action" => { /* tmux option — accepted for compatibility, no-op */ }
+        "activity-action" => {
+            app.activity_action = value.to_string();
+        }
+        "silence-action" => {
+            app.silence_action = value.to_string();
+        }
         "monitor-silence" => {
             if let Ok(n) = value.parse::<u64>() { app.monitor_silence = n; }
         }
@@ -571,12 +580,12 @@ pub fn parse_option_value(app: &mut AppState, rest: &str, _is_global: bool) {
         "window-status-last-style" => { app.window_status_last_style = value.to_string(); }
         "status-left-style" => { app.status_left_style = value.to_string(); }
         "status-right-style" => { app.status_right_style = value.to_string(); }
-        "clock-mode-colour" | "clock-mode-style" => { app.environment.insert(key.to_string(), value.to_string()); }
-        "pane-border-format" | "pane-border-status" => { app.environment.insert(key.to_string(), value.to_string()); }
-        "popup-style" | "popup-border-style" | "popup-border-lines" => { app.environment.insert(key.to_string(), value.to_string()); }
-        "window-style" | "window-active-style" => { app.environment.insert(key.to_string(), value.to_string()); }
-        "wrap-search" => { app.environment.insert(key.to_string(), value.to_string()); }
-        "lock-after-time" | "lock-command" => { app.environment.insert(key.to_string(), value.to_string()); }
+        "clock-mode-colour" | "clock-mode-style" => { app.user_options.insert(key.to_string(), value.to_string()); }
+        "pane-border-format" | "pane-border-status" => { app.user_options.insert(key.to_string(), value.to_string()); }
+        "popup-style" | "popup-border-style" | "popup-border-lines" => { app.user_options.insert(key.to_string(), value.to_string()); }
+        "window-style" | "window-active-style" => { app.user_options.insert(key.to_string(), value.to_string()); }
+        "wrap-search" => { app.user_options.insert(key.to_string(), value.to_string()); }
+        "lock-after-time" | "lock-command" => { app.user_options.insert(key.to_string(), value.to_string()); }
         "main-pane-width" => {
             if let Ok(n) = value.parse::<u16>() { app.main_pane_width = n; }
         }
@@ -623,6 +632,11 @@ pub fn parse_option_value(app: &mut AppState, rest: &str, _is_global: bool) {
             // Store @-prefixed user/plugin options separately from environment
             // so they don't leak into child shells (#105).
             if key.starts_with('@') {
+                app.user_options.insert(key.to_string(), value.to_string());
+            } else if key.contains('-') {
+                // Options with hyphens are tmux config options, NOT environment
+                // variables.  Storing them in environment causes PowerShell
+                // ParserErrors when injected via $env:NAME syntax (#137).
                 app.user_options.insert(key.to_string(), value.to_string());
             } else {
                 app.environment.insert(key.to_string(), value.to_string());

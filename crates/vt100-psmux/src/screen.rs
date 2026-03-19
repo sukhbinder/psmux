@@ -111,6 +111,9 @@ pub struct Screen {
     mouse_protocol_mode: MouseProtocolMode,
     mouse_protocol_encoding: MouseProtocolEncoding,
 
+    /// Window title set by the application via OSC 0 or OSC 2.
+    osc_title: String,
+
     /// Path announced by the shell via OSC 7 (`\e]7;file://host/path\a`).
     /// Used as a fallback for CWD when PEB walking fails (SSH, WSL).
     osc7_path: Option<String>,
@@ -133,6 +136,7 @@ impl Screen {
             modes: 0,
             mouse_protocol_mode: MouseProtocolMode::default(),
             mouse_protocol_encoding: MouseProtocolEncoding::default(),
+            osc_title: String::new(),
             osc7_path: None,
         }
     }
@@ -636,6 +640,19 @@ impl Screen {
     #[must_use]
     pub fn mouse_protocol_encoding(&self) -> MouseProtocolEncoding {
         self.mouse_protocol_encoding
+    }
+
+    /// Returns the window title set via OSC 0 or OSC 2.
+    #[must_use]
+    pub fn title(&self) -> &str {
+        &self.osc_title
+    }
+
+    /// Store a window title set via OSC 0 or OSC 2.
+    pub fn set_title(&mut self, raw: &[u8]) {
+        if let Ok(s) = std::str::from_utf8(raw) {
+            self.osc_title = s.to_string();
+        }
     }
 
     /// Returns the path announced by the shell via OSC 7, if any.

@@ -45,6 +45,7 @@ pub(crate) fn get_option_value(app: &AppState, name: &str) -> String {
         "focus-events" => if app.focus_events { "on".into() } else { "off".into() },
         "renumber-windows" => if app.renumber_windows { "on".into() } else { "off".into() },
         "automatic-rename" => if app.automatic_rename { "on".into() } else { "off".into() },
+        "allow-rename" => if app.allow_rename { "on".into() } else { "off".into() },
         "monitor-activity" => if app.monitor_activity { "on".into() } else { "off".into() },
         "synchronize-panes" => if app.sync_input { "on".into() } else { "off".into() },
         "remain-on-exit" => if app.remain_on_exit { "on".into() } else { "off".into() },
@@ -78,6 +79,9 @@ pub(crate) fn get_option_value(app: &AppState, name: &str) -> String {
         "bell-action" => app.bell_action.clone(),
         "visual-bell" => if app.visual_bell { "on".into() } else { "off".into() },
         "monitor-silence" => app.monitor_silence.to_string(),
+        "activity-action" => app.activity_action.clone(),
+        "silence-action" => app.silence_action.clone(),
+        "update-environment" => app.update_environment.join(" "),
         "status-left-length" => app.status_left_length.to_string(),
         "status-right-length" => app.status_right_length.to_string(),
         "window-size" => app.window_size.clone(),
@@ -274,6 +278,12 @@ pub(crate) fn apply_set_option(app: &mut AppState, option: &str, value: &str, _q
                     w.manual_rename = false;
                 }
             }
+        }
+        "allow-rename" => { app.allow_rename = matches!(value, "on" | "true" | "1"); }
+        "activity-action" => { app.activity_action = value.to_string(); }
+        "silence-action" => { app.silence_action = value.to_string(); }
+        "update-environment" => {
+            app.update_environment = value.split_whitespace().map(|s| s.to_string()).collect();
         }
         "prediction-dimming" | "dim-predictions" => {
             app.prediction_dimming = !matches!(value, "off" | "false" | "0");

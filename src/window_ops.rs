@@ -1009,7 +1009,10 @@ pub fn respawn_active_pane(app: &mut AppState, pty_system_ref: Option<&dyn porta
     let cursor_shape = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(crate::pane::CURSOR_SHAPE_UNSET));
     let cs_writer = cursor_shape.clone();
     
-    crate::pane::spawn_reader_thread(reader, term_reader, dv_writer, cs_writer);
+    let bell_pending = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let bell_writer = bell_pending.clone();
+    
+    crate::pane::spawn_reader_thread(reader, term_reader, dv_writer, cs_writer, bell_writer);
     
     let mut pty_writer = pair.master.take_writer().map_err(|e| io::Error::new(io::ErrorKind::Other, format!("take writer error: {e}")))?;
     crate::pane::conpty_preemptive_dsr_response(&mut *pty_writer);
@@ -1020,6 +1023,7 @@ pub fn respawn_active_pane(app: &mut AppState, pty_system_ref: Option<&dyn porta
     pane.term = term;
     pane.data_version = data_version;
     pane.cursor_shape = cursor_shape;
+    pane.bell_pending = bell_pending;
     pane.child_pid = None;
     pane.vt_bridge_cache = None;
     pane.vti_mode_cache = None;

@@ -46,6 +46,9 @@ pub struct Pane {
     /// Last cursor shape requested by the child process via DECSCUSR (`\x1b[N q`).
     /// 0 = no override (use PSMUX_CURSOR_STYLE default), 1-6 = DECSCUSR values.
     pub cursor_shape: std::sync::Arc<std::sync::atomic::AtomicU8>,
+    /// Set by the PTY reader thread when a BEL character (\x07) is detected.
+    /// Consumed by the server loop to set the window's bell_flag.
+    pub bell_pending: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// Per-pane copy mode state (tmux-style pane-local copy mode).
     /// Some(_) when this pane is in copy mode, None otherwise.
     pub copy_state: Option<CopyModeState>,
@@ -67,6 +70,7 @@ pub struct WarmPane {
     pub term: Arc<Mutex<vt100::Parser>>,
     pub data_version: std::sync::Arc<std::sync::atomic::AtomicU64>,
     pub cursor_shape: std::sync::Arc<std::sync::atomic::AtomicU8>,
+    pub bell_pending: std::sync::Arc<std::sync::atomic::AtomicBool>,
     pub child_pid: Option<u32>,
     pub pane_id: usize,
     pub rows: u16,
@@ -334,9 +338,15 @@ pub struct AppState {
     pub renumber_windows: bool,
     /// automatic-rename: update window name from active pane's running command
     pub automatic_rename: bool,
+    /// allow-rename: allow programs to set window title via escape sequences
+    pub allow_rename: bool,
     /// monitor-activity / visual-activity: stored for compat
     pub monitor_activity: bool,
     pub visual_activity: bool,
+    /// activity-action: what to do on activity ("any", "none", "current", "other")
+    pub activity_action: String,
+    /// silence-action: what to do on silence ("any", "none", "current", "other")
+    pub silence_action: String,
     /// remain-on-exit: keep panes open after process exits
     pub remain_on_exit: bool,
     /// destroy-unattached: exit server when no clients remain attached
@@ -349,6 +359,8 @@ pub struct AppState {
     pub set_titles: bool,
     /// set-titles-string: format for terminal title
     pub set_titles_string: String,
+    /// update-environment: list of env var names to update from client on attach
+    pub update_environment: Vec<String>,
     /// Environment variables set via set-environment
     pub environment: std::collections::HashMap<String, String>,
     /// User/plugin options (@-prefixed, tmux convention).
@@ -537,14 +549,27 @@ impl AppState {
             word_separators: " -_@".to_string(),
             renumber_windows: false,
             automatic_rename: true,
+            allow_rename: true,
             monitor_activity: false,
             visual_activity: false,
+            activity_action: "other".to_string(),
+            silence_action: "other".to_string(),
             remain_on_exit: false,
             destroy_unattached: false,
             exit_empty: true,
             aggressive_resize: false,
             set_titles: false,
             set_titles_string: String::new(),
+            update_environment: vec![
+                "DISPLAY".to_string(),
+                "KRB5CCNAME".to_string(),
+                "SSH_ASKPASS".to_string(),
+                "SSH_AUTH_SOCK".to_string(),
+                "SSH_AGENT_PID".to_string(),
+                "SSH_CONNECTION".to_string(),
+                "WINDOWID".to_string(),
+                "XAUTHORITY".to_string(),
+            ],
             environment: std::collections::HashMap::new(),
             user_options: std::collections::HashMap::new(),
             pane_border_style: String::new(),

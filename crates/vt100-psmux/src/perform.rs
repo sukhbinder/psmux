@@ -208,12 +208,14 @@ impl<CB: crate::callbacks::Callbacks> vte::Perform for WrappedScreen<CB> {
             [b"0", s] => {
                 self.callbacks.set_window_icon_name(&mut self.screen, s);
                 self.callbacks.set_window_title(&mut self.screen, s);
+                self.screen.set_title(s);
             }
             [b"1", s] => {
                 self.callbacks.set_window_icon_name(&mut self.screen, s);
             }
             [b"2", s] => {
                 self.callbacks.set_window_title(&mut self.screen, s);
+                self.screen.set_title(s);
             }
             [b"7", uri] => {
                 self.screen.set_path(uri);
