@@ -496,10 +496,10 @@ pub fn execute_command_string(app: &mut AppState, cmd: &str) -> io::Result<()> {
                 else if parts.iter().any(|p| *p == "-L") { FocusDir::Left }
                 else if parts.iter().any(|p| *p == "-R") { FocusDir::Right }
                 else { return Ok(()); };
-            // Zoom-aware directional navigation (tmux parity):
-            // If zoomed, check if there's a *direct* neighbor (no wrapping).
+            // Zoom-aware directional navigation (tmux parity #134):
+            // If zoomed, check if there's a direct neighbor OR a wrap target.
             // If yes: cancel zoom and navigate to it.
-            // If no: no-op — stay zoomed on the current pane.
+            // If no (single-pane window): no-op — stay zoomed.
             if app.zoom_saved.is_some() {
                 // Temporarily unzoom to compute real geometry
                 let saved = app.zoom_saved.take();
@@ -510,16 +510,18 @@ pub fn execute_command_string(app: &mut AppState, cmd: &str) -> io::Result<()> {
                     }
                 }
                 crate::tree::resize_all_panes(app);
-                // Find direct neighbor (no wrapping)
+                // Find direct neighbor or wrap target (tmux parity #134)
                 let win = &app.windows[app.active_idx];
                 let mut rects: Vec<(Vec<usize>, ratatui::layout::Rect)> = Vec::new();
                 crate::tree::compute_rects(&win.root, app.last_window_area, &mut rects);
                 let active_idx = rects.iter().position(|(path, _)| *path == win.active_path);
-                let has_neighbor = if let Some(ai) = active_idx {
+                let has_target = if let Some(ai) = active_idx {
                     let (_, arect) = &rects[ai];
-                    crate::input::find_best_pane_in_direction(&rects, ai, arect, dir, &[], &[]).is_some()
+                    crate::input::find_best_pane_in_direction(&rects, ai, arect, dir, &[], &[])
+                        .or_else(|| crate::input::find_wrap_target(&rects, ai, arect, dir, &[], &[]))
+                        .is_some()
                 } else { false };
-                if has_neighbor {
+                if has_target {
                     // Cancel zoom (already unzoomed) and navigate
                     switch_with_copy_save(app, |app| {
                         let win = &app.windows[app.active_idx];
@@ -527,7 +529,7 @@ pub fn execute_command_string(app: &mut AppState, cmd: &str) -> io::Result<()> {
                         crate::input::move_focus(app, dir);
                     });
                 } else {
-                    // No neighbor — re-zoom (restore saved zoom state)
+                    // No target (single-pane) — re-zoom (restore saved zoom state)
                     if let Some(s) = saved {
                         let win = &mut app.windows[app.active_idx];
                         for (p, sz) in s.iter() {

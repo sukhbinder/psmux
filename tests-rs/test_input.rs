@@ -302,3 +302,59 @@ fn alt_enter_encoding_for_conpty() {
     assert_eq!(bytes, b"\x1b\r",
         "Alt+Enter on Windows must produce ESC+CR for ConPTY; got {:?}", bytes);
 }
+
+// ── Issue #134: wrapped directional navigation geometry tests ──
+
+/// Build a two-pane horizontal layout (left | right) for geometry tests.
+fn two_pane_h_rects() -> Vec<(Vec<usize>, ratatui::layout::Rect)> {
+    use ratatui::layout::Rect;
+    vec![
+        (vec![0], Rect { x: 0,  y: 0, width: 40, height: 24 }), // left
+        (vec![1], Rect { x: 40, y: 0, width: 40, height: 24 }), // right
+    ]
+}
+
+#[test]
+fn issue134_wrap_right_from_rightmost_pane() {
+    // From the rightmost pane (index 1), going Right should find no direct
+    // neighbor but find a wrap target (the leftmost pane, index 0).
+    let rects = two_pane_h_rects();
+    let ai = 1; // rightmost pane
+    let arect = &rects[ai].1;
+    let direct = find_best_pane_in_direction(
+        &rects, ai, arect, crate::types::FocusDir::Right, &[], &[],
+    );
+    assert!(direct.is_none(), "rightmost pane should have no direct Right neighbor");
+    let wrap = find_wrap_target(
+        &rects, ai, arect, crate::types::FocusDir::Right, &[], &[],
+    );
+    assert_eq!(wrap, Some(0), "wrap Right from rightmost should reach leftmost (index 0)");
+}
+
+#[test]
+fn issue134_wrap_left_from_leftmost_pane() {
+    let rects = two_pane_h_rects();
+    let ai = 0; // leftmost pane
+    let arect = &rects[ai].1;
+    let direct = find_best_pane_in_direction(
+        &rects, ai, arect, crate::types::FocusDir::Left, &[], &[],
+    );
+    assert!(direct.is_none(), "leftmost pane should have no direct Left neighbor");
+    let wrap = find_wrap_target(
+        &rects, ai, arect, crate::types::FocusDir::Left, &[], &[],
+    );
+    assert_eq!(wrap, Some(1), "wrap Left from leftmost should reach rightmost (index 1)");
+}
+
+#[test]
+fn issue134_direct_neighbor_takes_priority_over_wrap() {
+    // From left pane (index 0), going Right should find a direct neighbor (index 1),
+    // ensuring wrap is NOT used when a direct neighbor exists.
+    let rects = two_pane_h_rects();
+    let ai = 0;
+    let arect = &rects[ai].1;
+    let direct = find_best_pane_in_direction(
+        &rects, ai, arect, crate::types::FocusDir::Right, &[], &[],
+    );
+    assert_eq!(direct, Some(1), "left pane should have direct Right neighbor (right pane)");
+}
