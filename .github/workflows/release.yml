@@ -219,8 +219,25 @@ jobs:
           }
         shell: pwsh
 
-      - name: Publish to crates.io
-        run: cargo publish --allow-dirty
+      - name: Publish sub-crates then main crate to crates.io
+        shell: pwsh
+        run: |
+          # Sub-crates must be published first so crates.io can resolve path deps
+          cargo publish --allow-dirty -p portable-pty-psmux 2>&1
+          if ($LASTEXITCODE -ne 0) {
+            Write-Warning "portable-pty-psmux publish failed (may already be published)"
+          }
+          Start-Sleep 15
+          cargo publish --allow-dirty -p vt100-psmux 2>&1
+          if ($LASTEXITCODE -ne 0) {
+            Write-Warning "vt100-psmux publish failed (may already be published)"
+          }
+          Start-Sleep 15
+          cargo publish --allow-dirty
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "psmux publish failed!"
+            exit 1
+          }
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
