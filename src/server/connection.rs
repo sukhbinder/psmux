@@ -986,8 +986,14 @@ match cmd {
         if !persistent { break; }
     }
     "set-hook" => {
+        let has_unset = args.iter().any(|a| *a == "-u" || *a == "-gu" || *a == "-ug");
         let non_flag: Vec<&str> = args.iter().filter(|a| !a.starts_with('-')).copied().collect();
-        if non_flag.len() >= 2 {
+        if has_unset {
+            // set-hook -gu <hook-name>  →  remove the hook
+            if let Some(name) = non_flag.first() {
+                let _ = tx.send(CtrlReq::RemoveHook(name.to_string()));
+            }
+        } else if non_flag.len() >= 2 {
             let _ = tx.send(CtrlReq::SetHook(non_flag[0].to_string(), non_flag[1..].join(" ")));
         }
     }

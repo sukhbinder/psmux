@@ -2535,7 +2535,9 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     let _ = resp.send(output);
                 }
                 CtrlReq::SetHook(hook, cmd) => {
-                    app.hooks.entry(hook).or_insert_with(Vec::new).push(cmd);
+                    // Replace (not append) to match tmux semantics – prevents
+                    // duplicate hooks on config reload (issue #133).
+                    app.hooks.insert(hook, vec![cmd]);
                 }
                 CtrlReq::ShowHooks(resp) => {
                     let mut output = String::new();

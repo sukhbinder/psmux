@@ -287,11 +287,20 @@ pub fn parse_config_line(app: &mut AppState, line: &str) {
         parse_if_shell(app, l);
     }
     else if l.starts_with("set-hook ") {
-        // Parse set-hook: set-hook [-g] hook-name command
+        // Parse set-hook: set-hook [-g] [-u] hook-name [command]
         let parts: Vec<&str> = l.split_whitespace().collect();
         let mut i = 1;
-        while i < parts.len() && parts[i].starts_with('-') { i += 1; }
-        if i + 1 < parts.len() {
+        let mut unset = false;
+        while i < parts.len() && parts[i].starts_with('-') {
+            if parts[i].contains('u') { unset = true; }
+            i += 1;
+        }
+        if unset {
+            // set-hook -gu <hook-name>  →  remove the hook
+            if i < parts.len() {
+                app.hooks.remove(parts[i]);
+            }
+        } else if i + 1 < parts.len() {
             let hook = parts[i].to_string();
             let cmd = parts[i+1..].join(" ");
             // Strip matching outer quotes (single or double) that wrap the command
@@ -310,7 +319,9 @@ pub fn parse_config_line(app: &mut AppState, line: &str) {
                     cmd
                 }
             };
-            app.hooks.entry(hook).or_insert_with(Vec::new).push(cmd);
+            // Replace (not append) to match tmux – prevents duplicates on
+            // config reload (issue #133).
+            app.hooks.insert(hook, vec![cmd]);
         }
     }
     else if l.starts_with("set-environment ") || l.starts_with("setenv ") {
