@@ -665,11 +665,17 @@ pub fn parse_option_value(app: &mut AppState, rest: &str, _is_global: bool) {
                 let plugin_name = value.rsplit('/').next().unwrap_or(value);
                 if plugin_name != "ppm" {
                     let home = env::var("USERPROFILE").or_else(|_| env::var("HOME")).unwrap_or_default();
+                    let xdg_config = env::var("XDG_CONFIG_HOME")
+                        .unwrap_or_else(|_| format!("{}\\.config", home));
                     let candidates = [
+                        // Classic paths: ~/.psmux/plugins/
                         format!("{}\\.psmux\\plugins\\{}\\plugin.conf", home, value.replace('/', "\\")),
                         format!("{}\\.psmux\\plugins\\{}\\plugin.conf", home, plugin_name),
-                        // Common layout: plugins installed under psmux-plugins/ subdirectory
                         format!("{}\\.psmux\\plugins\\psmux-plugins\\{}\\plugin.conf", home, plugin_name),
+                        // XDG paths: ~/.config/psmux/plugins/
+                        format!("{}\\psmux\\plugins\\{}\\plugin.conf", xdg_config, value.replace('/', "\\")),
+                        format!("{}\\psmux\\plugins\\{}\\plugin.conf", xdg_config, plugin_name),
+                        format!("{}\\psmux\\plugins\\psmux-plugins\\{}\\plugin.conf", xdg_config, plugin_name),
                     ];
                     let mut found = false;
                     for conf in &candidates {
@@ -687,9 +693,14 @@ pub fn parse_option_value(app: &mut AppState, rest: &str, _is_global: bool) {
                     // If no plugin.conf, try .ps1 entry scripts
                     if !found {
                         let ps1_candidates = [
+                            // Classic paths
                             format!("{}\\.psmux\\plugins\\{}\\{}.ps1", home, value.replace('/', "\\"), plugin_name),
                             format!("{}\\.psmux\\plugins\\{}\\{}.ps1", home, plugin_name, plugin_name),
                             format!("{}\\.psmux\\plugins\\psmux-plugins\\{}\\{}.ps1", home, plugin_name, plugin_name),
+                            // XDG paths
+                            format!("{}\\psmux\\plugins\\{}\\{}.ps1", xdg_config, value.replace('/', "\\"), plugin_name),
+                            format!("{}\\psmux\\plugins\\{}\\{}.ps1", xdg_config, plugin_name, plugin_name),
+                            format!("{}\\psmux\\plugins\\psmux-plugins\\{}\\{}.ps1", xdg_config, plugin_name, plugin_name),
                         ];
                         for ps1 in &ps1_candidates {
                             if std::path::Path::new(ps1).exists() {
@@ -986,6 +997,23 @@ pub fn source_file(app: &mut AppState, path: &str) {
     // Normalize path separators for Windows
     let expanded_path = expanded_path.replace('/', &std::path::MAIN_SEPARATOR.to_string());
 
+    // Fallback: if path references ~/.psmux/ but doesn't exist and the
+    // XDG equivalent (~/.config/psmux/) does, use that instead (issue #135).
+    let expanded_path = if !std::path::Path::new(&expanded_path).exists() {
+        let home = env::var("USERPROFILE").or_else(|_| env::var("HOME")).unwrap_or_default();
+        let classic = format!("{}\\.psmux\\", home);
+        if expanded_path.starts_with(&classic) {
+            let xdg_base = env::var("XDG_CONFIG_HOME")
+                .unwrap_or_else(|_| format!("{}\\.config", home));
+            let xdg_alt = expanded_path.replacen(&classic, &format!("{}\\psmux\\", xdg_base), 1);
+            if std::path::Path::new(&xdg_alt).exists() { xdg_alt } else { expanded_path }
+        } else {
+            expanded_path
+        }
+    } else {
+        expanded_path
+    };
+
     // Save and restore current_config_file around the nested parse
     let prev_file = current_config_file();
     set_current_config_file(&expanded_path);
@@ -1168,6 +1196,31 @@ fn parse_run_shell(app: &mut AppState, line: &str) {
         shell_cmd.replace("~/", &format!("{}/", home)).replace("~\\", &format!("{}\\", home))
     } else {
         shell_cmd
+    };
+
+    // Fallback: if the command references ~/.psmux/plugins/ but that directory
+    // doesn't exist and ~/.config/psmux/plugins/ does, rewrite the path.
+    // Plugin repos may hardcode ~/.psmux/plugins/ but the TUI installs to
+    // the XDG location (issue #135).
+    let shell_cmd = {
+        let home = std::env::var("USERPROFILE").or_else(|_| std::env::var("HOME")).unwrap_or_default();
+        let classic_fwd = format!("{}/.psmux/plugins/", home);
+        let classic_win = format!("{}\\.psmux\\plugins\\", home);
+        if shell_cmd.contains(&classic_fwd) || shell_cmd.contains(&classic_win) {
+            let classic_dir = std::path::Path::new(&home).join(".psmux").join("plugins");
+            let xdg_base = std::env::var("XDG_CONFIG_HOME")
+                .unwrap_or_else(|_| format!("{}\\.config", home));
+            let xdg_dir = std::path::Path::new(&xdg_base).join("psmux").join("plugins");
+            if !classic_dir.is_dir() && xdg_dir.is_dir() {
+                let xdg_fwd = format!("{}/psmux/plugins/", xdg_base.replace('\\', "/"));
+                let xdg_win = format!("{}\\psmux\\plugins\\", xdg_base);
+                shell_cmd.replace(&classic_fwd, &xdg_fwd).replace(&classic_win, &xdg_win)
+            } else {
+                shell_cmd
+            }
+        } else {
+            shell_cmd
+        }
     };
 
     // ── Handle .tmux files natively ──────────────────────────────────
@@ -1477,3 +1530,7 @@ fn parse_if_shell(app: &mut AppState, line: &str) {
         parse_config_line(app, cmd);
     }
 }
+
+#[cfg(test)]
+#[path = "../tests-rs/test_config_plugin_paths.rs"]
+mod tests_plugin_paths;
