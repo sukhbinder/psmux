@@ -24,7 +24,7 @@ use helpers::{collect_pane_paths_server, serialize_bindings_json, json_escape_st
     list_windows_json_with_tabs, combined_data_version, TMUX_COMMANDS};
 use options::{get_option_value, get_window_option_value, render_window_options, apply_set_option};
 
-use crate::input::{send_text_to_active, send_key_to_active, send_paste_to_active, move_focus, find_best_pane_in_direction};
+use crate::input::{send_text_to_active, send_key_to_active, send_paste_to_active, move_focus, find_best_pane_in_direction, find_wrap_target};
 use crate::copy_mode::{enter_copy_mode, exit_copy_mode, move_copy_cursor, current_prompt_pos,
     yank_selection, scroll_copy_up, scroll_copy_down, switch_with_copy_save,
     capture_active_pane_text, capture_active_pane_range, capture_active_pane_styled};
@@ -432,8 +432,10 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
     // loading immediately and runs in parallel with config parsing / plugin
     // initialization.  By the time create_window() consumes it, the shell
     // has had the full config-load duration (~100-500ms) as a head start.
-    // Only when we have real dimensions and default shell (no custom command).
-    let early_warm = if init_size.is_some() && initial_command.is_none() && raw_command.is_none() && start_dir.is_none() {
+    // Only when using default shell (no custom command).
+    // For detached sessions without -x/-y, last_window_area defaults to
+    // 120x30 which is fine for the warm pane (resized later on first attach).
+    let early_warm = if initial_command.is_none() && raw_command.is_none() && start_dir.is_none() {
         match spawn_warm_pane(&*pty_system, &mut app) {
             Ok(wp) => Some(wp),
             Err(_) => None,
@@ -541,8 +543,8 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
     // Apply window name if specified via -n
     if let Some(n) = window_name { app.windows.last_mut().map(|w| w.name = n); }
     // Replenish: spawn a warm pane for the NEXT new-window / split.
-    // For detached sessions without init_size, defer until first ClientSize.
-    if init_size.is_some() && app.warm_pane.is_none() {
+    // Always replenish when no warm pane is available.
+    if app.warm_pane.is_none() {
         match spawn_warm_pane(&*pty_system, &mut app) {
             Ok(wp) => { app.warm_pane = Some(wp); }
             Err(e) => { eprintln!("psmux: warm pane pre-spawn failed: {e}"); }
@@ -1631,7 +1633,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                             };
                             let was_zoomed = unzoom_if_zoomed(&mut app);
                             if was_zoomed {
-                                // Zoom-aware: check for direct neighbor only (no wrap when zoomed — tmux parity).
+                                // Zoom-aware: check direct neighbor or wrap target (tmux parity: unzoom+wrap).
                                 let win = &app.windows[app.active_idx];
                                 let mut rects: Vec<(Vec<usize>, ratatui::layout::Rect)> = Vec::new();
                                 crate::tree::compute_rects(&win.root, app.last_window_area, &mut rects);
@@ -1639,6 +1641,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                                 let has_target = if let Some(ai) = active_idx {
                                     let (_, arect) = &rects[ai];
                                     find_best_pane_in_direction(&rects, ai, arect, focus_dir, &[], &[])
+                                        .or_else(|| find_wrap_target(&rects, ai, arect, focus_dir, &[], &[]))
                                         .is_some()
                                 } else { false };
                                 if has_target {

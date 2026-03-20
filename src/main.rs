@@ -25,7 +25,7 @@ mod app;
 mod ssh_input;
 mod debug_log;
 
-use std::io::{self, Write, Read as _, BufRead as _};
+use std::io::{self, Write, Read as _, BufRead as _, IsTerminal};
 use std::time::Duration;
 use std::env;
 
@@ -550,9 +550,17 @@ fn run_main() -> io::Result<()> {
                                 ).is_ok() {
                                     let warm_key = crate::session::read_session_key(&warm_base).unwrap_or_default();
                                     if !warm_key.is_empty() {
+                                        let client_cwd = std::env::current_dir()
+                                            .ok()
+                                            .and_then(|p| p.to_str().map(|s| s.to_string()));
+                                        let claim_cmd = if let Some(ref cwd) = client_cwd {
+                                            format!("claim-session {} \"{}\"\n", name, cwd.replace('"', "\\\""))
+                                        } else {
+                                            format!("claim-session {}\n", name)
+                                        };
                                         match crate::session::send_auth_cmd_response(
                                             &warm_addr, &warm_key,
-                                            format!("claim-session {}\n", name).as_bytes(),
+                                            claim_cmd.as_bytes(),
                                         ) {
                                             Ok(resp) if resp.contains("OK") => {
                                                 if let Some(ref wn) = window_name {
@@ -2376,6 +2384,14 @@ fn run_main() -> io::Result<()> {
     // Default behavior (bare `psmux` with no command):
     // tmux-compatible: always create a new session with the next available
     // numeric name (0, 1, 2, ...) and attach to it.
+    //
+    // If stdin is not a terminal (headless/non-interactive environment, e.g.
+    // winget validation pipeline), print version and exit cleanly — starting
+    // a TUI session would fail without an interactive console.
+    if !std::io::stdin().is_terminal() {
+        print_version();
+        return Ok(());
+    }
     if env::var("PSMUX_REMOTE_ATTACH").ok().as_deref() != Some("1") {
         let home = env::var("USERPROFILE").or_else(|_| env::var("HOME")).unwrap_or_default();
         let session_name = env::var("PSMUX_SESSION_NAME").unwrap_or_else(|_| {
@@ -2408,7 +2424,14 @@ fn run_main() -> io::Result<()> {
                         let _ = stream.set_nodelay(true);
                         let _ = stream.set_read_timeout(Some(Duration::from_millis(3000)));
                         let _ = write!(stream, "AUTH {}\n", warm_key);
-                        let _ = write!(stream, "claim-session {}\n", session_name);
+                        let client_cwd = std::env::current_dir()
+                            .ok()
+                            .and_then(|p| p.to_str().map(|s| s.to_string()));
+                        if let Some(ref cwd) = client_cwd {
+                            let _ = write!(stream, "claim-session {} \"{}\"\n", session_name, cwd.replace('"', "\\\""));
+                        } else {
+                            let _ = write!(stream, "claim-session {}\n", session_name);
+                        }
                         let _ = stream.flush();
                         // Use send_auth_cmd_response pattern: read AUTH
                         // "OK" line first, then read the claim-session

@@ -590,9 +590,12 @@ match cmd {
     }
     "claim-session" => {
         // Warm-server claim: rename + synchronous response so CLI knows it's done.
-        if let Some(name) = args.iter().find(|a| !a.starts_with('-')) {
+        // Usage: claim-session <name> [<client-cwd>]
+        let non_flag: Vec<&str> = args.iter().filter(|a| !a.starts_with('-')).map(|s| &**s).collect();
+        if let Some(name) = non_flag.first().copied() {
+            let client_cwd = non_flag.get(1).map(|s| s.to_string());
             let (rtx, rrx) = mpsc::channel::<String>();
-            let _ = tx.send(CtrlReq::ClaimSession((*name).to_string(), rtx));
+            let _ = tx.send(CtrlReq::ClaimSession(name.to_string(), client_cwd, rtx));
             if let Ok(resp) = rrx.recv_timeout(std::time::Duration::from_secs(5)) {
                 let _ = write!(write_stream, "{}", resp);
                 let _ = write_stream.flush();
