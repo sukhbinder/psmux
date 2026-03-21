@@ -2347,6 +2347,11 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     } else {
                         crate::config::source_file(&mut app, &path);
                     }
+                    // Mark dirty so the client receives updated config
+                    // (status bar, bindings, styles, etc.) on the next
+                    // dump-state instead of getting an NC fast-path reply.
+                    state_dirty = true;
+                    meta_dirty = true;
                 }
                 CtrlReq::MoveWindow(target) => {
                     if let Some(t) = target {

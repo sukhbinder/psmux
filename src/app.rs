@@ -394,6 +394,12 @@ pub fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<
                         let _ = tx.send(CtrlReq::ListCommands(rtx));
                         if let Ok(text) = rrx.recv() { let _ = write!(stream, "{}\n", text); let _ = stream.flush(); }
                     }
+                    "source-file" | "source" => {
+                        let non_flag_args: Vec<&str> = args.iter().filter(|a| !a.starts_with('-')).copied().collect();
+                        if let Some(path) = non_flag_args.first() {
+                            let _ = tx.send(CtrlReq::SourceFile(path.to_string()));
+                        }
+                    }
                     _ => {}
                 }
                 }); // end per-connection thread
@@ -1168,6 +1174,9 @@ pub fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<
                     let _ = std::fs::remove_file(&regpath);
                     let _ = std::fs::remove_file(&keypath);
                     std::process::exit(0);
+                }
+                CtrlReq::SourceFile(path) => {
+                    crate::config::source_file(&mut app, &path);
                 }
                 // For attach mode, we just ignore the new commands - they're handled by the server
                 _ => {}
