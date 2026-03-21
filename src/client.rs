@@ -995,8 +995,7 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                                     cmd_batch.push(format!("select-pane -t {}\n", idx));
                                     cmd_batch.push("overlay-close\n".into());
                                 }
-                                KeyCode::Esc => { cmd_batch.push("overlay-close\n".into()); }
-                                _ => {}
+                                _ => { cmd_batch.push("overlay-close\n".into()); }
                             }
                         }
                         else if matches!(key.code, KeyCode::Esc) && (command_input || renaming || pane_renaming || chooser || tree_chooser || session_chooser || confirm_cmd.is_some() || keys_viewer) {

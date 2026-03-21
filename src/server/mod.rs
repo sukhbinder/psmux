@@ -3075,6 +3075,14 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 }
             }
         }
+        // ── PaneChooser timeout ──
+        // Auto-close display-panes overlay after display-panes-time (default 1000ms).
+        if let Mode::PaneChooser { opened_at } = &app.mode {
+            if opened_at.elapsed() > Duration::from_millis(app.display_panes_time_ms) {
+                app.mode = Mode::Passthrough;
+                state_dirty = true;
+            }
+        }
         // ── Popup child exit detection ──
         // Check if popup PTY's child process has exited; if so, auto-close.
         if let Mode::PopupMode { ref mut popup_pty, close_on_exit, .. } = app.mode {
