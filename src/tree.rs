@@ -694,7 +694,11 @@ pub fn reap_children(app: &mut AppState) -> io::Result<(bool, bool)> {
                     app.windows[i].pane_mru.retain(|id| surviving_ids.contains(id));
                 }
                 app.windows[i].root = new_root;
-                if !path_exists(&app.windows[i].root, &app.windows[i].active_path) {
+                // After tree restructuring, the old active_path indices may
+                // still be in-range but point to a different pane (issue #140).
+                // Always verify by pane ID, not just path validity.
+                let current_id = get_active_pane_id(&app.windows[i].root, &app.windows[i].active_path);
+                if current_id != active_pane_id || !path_exists(&app.windows[i].root, &app.windows[i].active_path) {
                     // The active pane's path shifted due to tree restructuring.
                     // Try to find it by ID first, then by MRU order (issue #71).
                     let found = active_pane_id.and_then(|id| find_path_by_id(&app.windows[i].root, id))
