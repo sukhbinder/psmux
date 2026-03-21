@@ -28,7 +28,7 @@ use crate::copy_mode::{enter_copy_mode, move_copy_cursor, current_prompt_pos, ya
 use crate::layout::dump_layout_json;
 use crate::window_ops::{toggle_zoom, remote_mouse_down, remote_mouse_drag, remote_mouse_up,
     remote_mouse_button, remote_mouse_motion, remote_scroll_up, remote_scroll_down};
-use crate::util::{list_windows_json, list_tree_json};
+use crate::util::{list_windows_json, list_tree_json, list_windows_tmux};
 
 // ── Bracket Paste Detector ───────────────────────────────────────────────────
 //
@@ -359,6 +359,40 @@ pub fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<
                         let (rtx, rrx) = mpsc::channel::<String>();
                         let _ = tx.send(CtrlReq::SessionInfo(rtx));
                         if let Ok(line) = rrx.recv() { let _ = write!(stream, "{}", line); let _ = stream.flush(); }
+                    }
+                    "list-windows" | "lsw" => {
+                        let (rtx, rrx) = mpsc::channel::<String>();
+                        if args.iter().any(|a| *a == "-J") {
+                            let _ = tx.send(CtrlReq::ListWindows(rtx));
+                        } else {
+                            let _ = tx.send(CtrlReq::ListWindowsTmux(rtx));
+                        }
+                        if let Ok(text) = rrx.recv() { let _ = write!(stream, "{}\n", text); let _ = stream.flush(); }
+                    }
+                    "list-panes" | "lsp" => {
+                        let all = args.iter().any(|a| *a == "-a" || *a == "-s");
+                        let (rtx, rrx) = mpsc::channel::<String>();
+                        if all {
+                            let _ = tx.send(CtrlReq::ListAllPanes(rtx));
+                        } else {
+                            let _ = tx.send(CtrlReq::ListPanes(rtx));
+                        }
+                        if let Ok(text) = rrx.recv() { let _ = write!(stream, "{}\n", text); let _ = stream.flush(); }
+                    }
+                    "list-clients" | "lsc" => {
+                        let (rtx, rrx) = mpsc::channel::<String>();
+                        let _ = tx.send(CtrlReq::ListClients(rtx));
+                        if let Ok(text) = rrx.recv() { let _ = write!(stream, "{}\n", text); let _ = stream.flush(); }
+                    }
+                    "show-hooks" => {
+                        let (rtx, rrx) = mpsc::channel::<String>();
+                        let _ = tx.send(CtrlReq::ShowHooks(rtx));
+                        if let Ok(text) = rrx.recv() { let _ = write!(stream, "{}\n", text); let _ = stream.flush(); }
+                    }
+                    "list-commands" | "lscm" => {
+                        let (rtx, rrx) = mpsc::channel::<String>();
+                        let _ = tx.send(CtrlReq::ListCommands(rtx));
+                        if let Ok(text) = rrx.recv() { let _ = write!(stream, "{}\n", text); let _ = stream.flush(); }
                     }
                     _ => {}
                 }
@@ -1051,7 +1085,73 @@ pub fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<
                 CtrlReq::PrevWindow => { if !app.windows.is_empty() { app.active_idx = (app.active_idx + app.windows.len() - 1) % app.windows.len(); } }
                 CtrlReq::RenameWindow(name) => { let win = &mut app.windows[app.active_idx]; win.name = name; }
                 CtrlReq::ListWindows(resp) => { let json = list_windows_json(&app)?; let _ = resp.send(json); }
+                CtrlReq::ListWindowsTmux(resp) => { let text = list_windows_tmux(&app); let _ = resp.send(text); }
                 CtrlReq::ListTree(resp) => { let json = list_tree_json(&app)?; let _ = resp.send(json); }
+                CtrlReq::ListPanes(resp) => {
+                    let win = &app.windows[app.active_idx];
+                    fn lp_collect(node: &crate::types::Node, panes: &mut Vec<(usize, u16, u16)>) {
+                        match node {
+                            crate::types::Node::Leaf(p) => { panes.push((p.id, p.last_cols, p.last_rows)); }
+                            crate::types::Node::Split { children, .. } => { for c in children { lp_collect(c, panes); } }
+                        }
+                    }
+                    let mut panes = Vec::new();
+                    lp_collect(&win.root, &mut panes);
+                    let active_id = crate::tree::get_active_pane_id(&win.root, &win.active_path);
+                    let mut output = String::new();
+                    for (pos, (id, cols, rows)) in panes.iter().enumerate() {
+                        let idx = pos + app.pane_base_index;
+                        let marker = if active_id == Some(*id) { " (active)" } else { "" };
+                        output.push_str(&format!("{}: [{}x{}] [history {}/{}, 0 bytes] %{}{}\n",
+                            idx, cols, rows, app.history_limit, app.history_limit, id, marker));
+                    }
+                    let _ = resp.send(output);
+                }
+                CtrlReq::ListAllPanes(resp) => {
+                    fn lap_collect(node: &crate::types::Node, panes: &mut Vec<(usize, u16, u16)>) {
+                        match node {
+                            crate::types::Node::Leaf(p) => { panes.push((p.id, p.last_cols, p.last_rows)); }
+                            crate::types::Node::Split { children, .. } => { for c in children { lap_collect(c, panes); } }
+                        }
+                    }
+                    let mut output = String::new();
+                    for (wi, win) in app.windows.iter().enumerate() {
+                        let mut panes = Vec::new();
+                        lap_collect(&win.root, &mut panes);
+                        let active_id = crate::tree::get_active_pane_id(&win.root, &win.active_path);
+                        for (pos, (id, cols, rows)) in panes.iter().enumerate() {
+                            let idx = pos + app.pane_base_index;
+                            let marker = if active_id == Some(*id) && wi == app.active_idx { " (active)" } else { "" };
+                            output.push_str(&format!("{}:{}: [{}x{}] %{}{}\n",
+                                wi + app.window_base_index, idx, cols, rows, id, marker));
+                        }
+                    }
+                    let _ = resp.send(output);
+                }
+                CtrlReq::ListClients(resp) => {
+                    let output = format!("/dev/pts/0: {}: {} [{}x{}] (utf8)\n",
+                        app.session_name,
+                        app.windows[app.active_idx].name,
+                        app.last_window_area.width,
+                        app.last_window_area.height);
+                    let _ = resp.send(output);
+                }
+                CtrlReq::ShowHooks(resp) => {
+                    let mut output = String::new();
+                    for (name, commands) in &app.hooks {
+                        for cmd in commands {
+                            output.push_str(&format!("{} -> {}\n", name, cmd));
+                        }
+                    }
+                    if output.is_empty() {
+                        output.push_str("(no hooks)\n");
+                    }
+                    let _ = resp.send(output);
+                }
+                CtrlReq::ListCommands(resp) => {
+                    let cmds = crate::help::cli_command_lines().join("\n");
+                    let _ = resp.send(cmds);
+                }
                 CtrlReq::ToggleSync => { app.sync_input = !app.sync_input; }
                 CtrlReq::SetPaneTitle(title) => {
                     let win = &mut app.windows[app.active_idx];
