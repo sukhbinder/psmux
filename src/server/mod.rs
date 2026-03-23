@@ -1909,9 +1909,11 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     // Honour the client's working directory: the warm server
                     // was spawned from a previous session whose CWD may differ
                     // from where the user ran `psmux` now.  Update the
-                    // server's CWD (for future pane spawns) and inject `cd`
-                    // into the active pane so the shell starts in the right
-                    // directory.
+                    // server's CWD (for future pane spawns) and silently
+                    // inject `cd` into the active pane so the shell starts
+                    // in the right directory.  A clear screen command is
+                    // chained after cd so the user never sees the injected
+                    // command or its echo.
                     if let Some(ref cwd) = client_cwd {
                         let cwd_path = std::path::Path::new(cwd);
                         if cwd_path.is_dir() {
@@ -1920,12 +1922,16 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                                 .unwrap_or(true);
                             if server_cwd_differs {
                                 env::set_current_dir(cwd_path).ok();
-                                // Inject cd into the active pane's shell
+                                // Inject cd + clear into the active pane so
+                                // the directory change is invisible to the
+                                // user.  Leading space keeps it out of shell
+                                // history; the clear wipes visible traces.
                                 if let Some(win) = app.windows.last_mut() {
                                     if let Some(p) = active_pane_mut(&mut win.root, &win.active_path) {
                                         use std::io::Write as _;
                                         let escaped = cwd.replace('\'', "''");
-                                        let cd_cmd = format!(" cd '{}'\r\n", escaped);
+                                        let clear = if cfg!(windows) { "cls" } else { "clear" };
+                                        let cd_cmd = format!(" cd '{}'; {}\r", escaped, clear);
                                         let _ = p.writer.write_all(cd_cmd.as_bytes());
                                         let _ = p.writer.flush();
                                     }
