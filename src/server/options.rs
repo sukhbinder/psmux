@@ -54,6 +54,7 @@ pub(crate) fn get_option_value(app: &AppState, name: &str) -> String {
         "set-titles" => if app.set_titles { "on".into() } else { "off".into() },
         "set-titles-string" => app.set_titles_string.clone(),
         "prediction-dimming" => if app.prediction_dimming { "on".into() } else { "off".into() },
+        "allow-predictions" => if app.allow_predictions { "on".into() } else { "off".into() },
         "cursor-style" => std::env::var("PSMUX_CURSOR_STYLE").unwrap_or_else(|_| "bar".to_string()),
         "cursor-blink" => if std::env::var("PSMUX_CURSOR_BLINK").unwrap_or_else(|_| "1".to_string()) != "0" { "on".into() } else { "off".into() },
         "default-shell" | "default-command" => app.default_shell.clone(),
@@ -288,6 +289,9 @@ pub(crate) fn apply_set_option(app: &mut AppState, option: &str, value: &str, _q
         }
         "prediction-dimming" | "dim-predictions" => {
             app.prediction_dimming = !matches!(value, "off" | "false" | "0");
+        }
+        "allow-predictions" => {
+            app.allow_predictions = matches!(value, "on" | "true" | "1");
         }
         "cursor-style" => { std::env::set_var("PSMUX_CURSOR_STYLE", value); }
         "cursor-blink" => { std::env::set_var("PSMUX_CURSOR_BLINK", if matches!(value, "on"|"true"|"1") { "1" } else { "0" }); }

@@ -411,6 +411,7 @@ const OPTIONS_REF: &[(&str, &str)] = &[
     ("cursor-style",               "\"\""),
     ("cursor-blink",               "off"),
     ("prediction-dimming",         "off"),
+    ("allow-predictions",          "off"),
     ("env-shim",                   "on"),
     ("claude-code-fix-tty",        "on"),
     ("claude-code-force-interactive", "on"),

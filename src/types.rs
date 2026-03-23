@@ -248,6 +248,11 @@ pub struct AppState {
     pub prefix_key: (KeyCode, KeyModifiers),
     pub prefix2_key: Option<(KeyCode, KeyModifiers)>,
     pub prediction_dimming: bool,
+    /// allow-predictions: when on, do not force PSReadLine PredictionSource to
+    /// None after the profile loads, letting the user's own prediction settings
+    /// take effect.  The pre-profile crash prevention (#109) still runs.
+    /// Default: off
+    pub allow_predictions: bool,
     pub drag: Option<DragState>,
     pub last_window_area: Rect,
     pub mouse_enabled: bool,
@@ -492,6 +497,7 @@ impl AppState {
             prediction_dimming: std::env::var("PSMUX_DIM_PREDICTIONS")
                 .map(|v| v == "1" || v.to_lowercase() == "true")
                 .unwrap_or(false),
+            allow_predictions: false,
             drag: None,
             last_window_area: Rect { x: 0, y: 0, width: 120, height: 30 },
             mouse_enabled: true,

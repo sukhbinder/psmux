@@ -623,6 +623,9 @@ pub fn parse_option_value(app: &mut AppState, rest: &str, _is_global: bool) {
         "env-shim" => {
             app.env_shim = matches!(value, "on" | "true" | "1");
         }
+        "allow-predictions" => {
+            app.allow_predictions = matches!(value, "on" | "true" | "1");
+        }
         "claude-code-fix-tty" => {
             app.claude_code_fix_tty = matches!(value, "on" | "true" | "1");
         }
