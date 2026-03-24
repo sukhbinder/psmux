@@ -231,6 +231,40 @@ pub fn spans_visual_width(spans: &[Span]) -> usize {
     spans.iter().map(|s| UnicodeWidthStr::width(s.content.as_ref())).sum()
 }
 
+/// Truncate a list of styled spans so their total visual width fits within
+/// `max_width` columns.  If the content exceeds `max_width`, spans are
+/// trimmed character by character and a trailing ellipsis is NOT added (to
+/// match tmux behaviour).  Returns the mutated vector in place.
+pub fn truncate_spans_to_width(spans: &mut Vec<Span<'static>>, max_width: usize) {
+    use unicode_width::UnicodeWidthChar;
+    let mut remaining = max_width;
+    let mut keep = 0;
+    for (i, span) in spans.iter().enumerate() {
+        let sw = spans_visual_width(&[span.clone()]);
+        if sw <= remaining {
+            remaining -= sw;
+            keep = i + 1;
+        } else {
+            // Partially truncate this span
+            let mut truncated = String::new();
+            for ch in span.content.chars() {
+                let cw = UnicodeWidthChar::width(ch).unwrap_or(0);
+                if cw > remaining {
+                    break;
+                }
+                remaining -= cw;
+                truncated.push(ch);
+            }
+            if !truncated.is_empty() {
+                spans[i] = Span::styled(truncated, span.style);
+                keep = i + 1;
+            }
+            break;
+        }
+    }
+    spans.truncate(keep);
+}
+
 // ─── Status bar parsing ─────────────────────────────────────────────────────
 
 /// Expand simple status variables (`#I`, `#W`, `#S`, `%H:%M`) in a fragment.

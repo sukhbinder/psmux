@@ -2330,11 +2330,17 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                                     if cell.underline { style = style.add_modifier(Modifier::UNDERLINED); }
                                     let text: &str = if cell.text.is_empty() { " " } else { &cell.text };
                                     let char_width = unicode_width::UnicodeWidthStr::width(text) as u16;
-                                    spans.push(Span::styled(text, style));
-                                    if char_width >= 2 {
-                                        c += 2;
-                                    } else {
+                                    if char_width >= 2 && c + char_width > max_c {
+                                        // Wide char at boundary would overflow
+                                        spans.push(Span::styled(" ", style));
                                         c += 1;
+                                    } else {
+                                        spans.push(Span::styled(text, style));
+                                        if char_width >= 2 {
+                                            c += 2;
+                                        } else {
+                                            c += 1;
+                                        }
                                     }
                                 }
                                 // Pad remaining columns so the Line fills the
@@ -2375,8 +2381,26 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                                     if run.flags & 32 != 0 { style = style.add_modifier(Modifier::SLOW_BLINK); }
                                     if run.flags & 64 != 0 { style = style.add_modifier(Modifier::HIDDEN); }
                                     let text: &str = if run.text.is_empty() { " " } else { &run.text };
-                                    spans.push(Span::styled(text, style));
-                                    c = c.saturating_add(run.width.max(1));
+                                    // Truncate run text if it extends past the pane width
+                                    let run_w = run.width.max(1);
+                                    if c + run_w > inner.width {
+                                        let avail = (inner.width - c) as usize;
+                                        let mut truncated = String::new();
+                                        let mut used = 0usize;
+                                        for ch in text.chars() {
+                                            let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1);
+                                            if used + cw > avail { break; }
+                                            used += cw;
+                                            truncated.push(ch);
+                                        }
+                                        if !truncated.is_empty() {
+                                            spans.push(Span::styled(truncated, style));
+                                        }
+                                        c = inner.width;
+                                    } else {
+                                        spans.push(Span::styled(text, style));
+                                        c = c.saturating_add(run_w);
+                                    }
                                 }
                                 // Pad remaining columns with the last run's bg
                                 // so every Line fills the full pane width.
@@ -2719,7 +2743,7 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                 client_log("status", &format!("parsing left_prefix ({} chars): [{}]",
                     left_prefix.len(), left_prefix.chars().take(100).collect::<String>()));
             }
-            let left_spans: Vec<Span> = crate::rendering::parse_inline_styles(&left_prefix, sb_base);
+            let mut left_spans: Vec<Span> = crate::rendering::parse_inline_styles(&left_prefix, sb_base);
 
             // Window tabs (the window list)
             let mut tab_spans_all: Vec<Span> = Vec::new();
@@ -2774,7 +2798,11 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                 client_log("status", &format!("parsing right_text ({} chars): [{}]",
                     right_text.len(), right_text.chars().take(100).collect::<String>()));
             }
-            let right_spans = crate::rendering::parse_inline_styles(&right_text, sb_base);
+            let mut right_spans = crate::rendering::parse_inline_styles(&right_text, sb_base);
+
+            // Enforce status-left-length / status-right-length truncation (tmux parity)
+            crate::style::truncate_spans_to_width(&mut left_spans, state.status_left_length);
+            crate::style::truncate_spans_to_width(&mut right_spans, state.status_right_length);
 
             // Measure widths using Unicode display width
             let left_w: usize = left_spans.iter().map(|s| UnicodeWidthStr::width(s.content.as_ref())).sum();
@@ -2828,6 +2856,8 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                     status_spans.extend(right_spans);
                 }
             }
+            // Truncate overall status line to fit the available width
+            crate::style::truncate_spans_to_width(&mut status_spans, total_width);
             // If a display-message is active, show it on the status bar
             // instead of the normal status content (tmux parity).
             // Uses message-style (default: bg=yellow,fg=black) matching tmux.

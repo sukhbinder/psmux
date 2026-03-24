@@ -20,7 +20,7 @@ use crate::tree::{active_pane_mut, compute_rects, resize_all_panes, kill_all_chi
 use crate::pane::{create_window, split_active_with_command, kill_active_pane, kill_pane_by_id};
 use crate::input::{handle_key, handle_mouse, send_text_to_active, send_key_to_active, send_paste_to_active};
 use crate::rendering::{render_window, parse_status, centered_rect};
-use crate::style::{parse_tmux_style, parse_inline_styles, spans_visual_width};
+use crate::style::{parse_tmux_style, parse_inline_styles, spans_visual_width, truncate_spans_to_width};
 use crate::config::load_config;
 use crate::cli::parse_target;
 use crate::copy_mode::{enter_copy_mode, move_copy_cursor, current_prompt_pos, yank_selection,
@@ -483,6 +483,8 @@ pub fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<
                     Span::styled(s.content.into_owned(), left_style)
                 } else { s }
             }).collect();
+            // Enforce status-left-length (tmux truncates left portion to this width)
+            truncate_spans_to_width(&mut combined, app.status_left_length);
             combined.push(Span::styled(" ".to_string(), base_status_style));
 
             // Track x position for tab click detection
@@ -567,14 +569,17 @@ pub fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<
             } else {
                 parse_tmux_style(&app.status_right_style)
             };
-            combined.push(Span::styled(" ".to_string(), base_status_style));
-            for s in right_spans.drain(..) {
+            // Enforce status-right-length (tmux truncates right portion to this width)
+            let mut right_styled: Vec<Span<'static>> = right_spans.drain(..).map(|s| {
                 if s.style == Style::default() {
-                    combined.push(Span::styled(s.content.into_owned(), right_style));
-                } else {
-                    combined.push(s);
-                }
-            }
+                    Span::styled(s.content.into_owned(), right_style)
+                } else { s }
+            }).collect();
+            truncate_spans_to_width(&mut right_styled, app.status_right_length);
+            combined.push(Span::styled(" ".to_string(), base_status_style));
+            combined.extend(right_styled);
+            // Truncate overall status line to fit the available width
+            truncate_spans_to_width(&mut combined, status_chunk.width as usize);
             let status_bar = Paragraph::new(Line::from(combined)).style(base_status_style);
             f.render_widget(Clear, status_chunk);
             f.render_widget(status_bar, status_chunk);
@@ -693,13 +698,19 @@ pub fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<
             if let Mode::MenuMode { menu } = &app.mode {
                 let item_count = menu.items.len();
                 let height = (item_count as u16 + 2).min(20);
-                let width = menu.items.iter().map(|i| i.name.len()).max().unwrap_or(10).max(menu.title.len()) as u16 + 8;
+                let width = (menu.items.iter()
+                    .map(|i| unicode_width::UnicodeWidthStr::width(i.name.as_str()))
+                    .max().unwrap_or(10)
+                    .max(unicode_width::UnicodeWidthStr::width(menu.title.as_str())) as u16 + 8)
+                    .min(area.width.saturating_sub(2));
                 
                 // Calculate position based on x/y or center
                 let menu_area = if let (Some(x), Some(y)) = (menu.x, menu.y) {
                     let x = if x < 0 { (area.width as i16 + x).max(0) as u16 } else { x as u16 };
                     let y = if y < 0 { (area.height as i16 + y).max(0) as u16 } else { y as u16 };
-                    Rect { x: x.min(area.width.saturating_sub(width)), y: y.min(area.height.saturating_sub(height)), width, height }
+                    let clamped_x = x.min(area.width.saturating_sub(width));
+                    let clamped_w = width.min(area.width.saturating_sub(clamped_x));
+                    Rect { x: clamped_x, y: y.min(area.height.saturating_sub(height)), width: clamped_w, height }
                 } else {
                     centered_rect((width * 100 / area.width.max(1)).max(30), height, area)
                 };
