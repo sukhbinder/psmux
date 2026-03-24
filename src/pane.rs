@@ -618,9 +618,27 @@ const PSRL_FIX: &str = concat!(
     "try { Remove-PSReadLineKeyHandler -Chord 'F2' -ErrorAction Stop } catch {}",
 );
 
-/// Lightweight post-profile init: only sets ANSI output rendering without
-/// touching PSReadLine predictions.  Used when allow-predictions is on (#150).
-const PSRL_ANSI_ONLY: &str = "$PSStyle.OutputRendering = 'Ansi'";
+/// Minimal crash guard: saves the user's original PredictionSource, then
+/// disables predictions to prevent the #109 NullReferenceException during
+/// ConPTY startup.  Does NOT touch PredictionViewStyle or F2 so those stay
+/// at whatever the system default is.  Used pre-profile when allow-predictions
+/// is on (#150).
+const PSRL_CRASH_GUARD: &str = concat!(
+    "$PSStyle.OutputRendering = 'Ansi'; ",
+    "$Global:__psmux_origPred = try { (Get-PSReadLineOption).PredictionSource } catch { 'History' }; ",
+    "try { Set-PSReadLineOption -PredictionSource None -ErrorAction Stop } catch {}",
+);
+
+/// Post-profile prediction restore: if PredictionSource is still None (meaning
+/// the user's profile did not explicitly set it), restore the saved original.
+/// If the profile DID set a value, we leave it alone.  Also re-applies ANSI
+/// output rendering.  Used post-profile when allow-predictions is on (#150).
+const PSRL_PRED_RESTORE: &str = concat!(
+    "$PSStyle.OutputRendering = 'Ansi'; ",
+    "if ((Get-PSReadLineOption).PredictionSource -eq 'None' -and $Global:__psmux_origPred -ne 'None') { ",
+    "try { Set-PSReadLineOption -PredictionSource $Global:__psmux_origPred -ErrorAction Stop } catch {} ",
+    "}",
+);
 
 /// Source all four PowerShell profile scripts in the standard order.
 /// Used with -NoProfile to give us control over execution order — we disable
@@ -669,12 +687,17 @@ const CWD_SYNC: &str = concat!(
 /// 1. Disable PSReadLine predictions (before profile — prevents #109 crash)
 /// 2. Source the user's profile scripts
 /// 3. If allow_predictions is false, re-disable predictions after the profile;
-///    otherwise only re-apply ANSI output rendering (#150)
+///    if allow_predictions is true, restore the saved original PredictionSource
+///    only when the profile did not set one explicitly (#150)
 /// 4. Install CWD sync hook (enables #{pane_current_path} — #111)
 /// 5. Optionally append the env shim
 fn build_psrl_init(env_shim: bool, allow_predictions: bool) -> String {
-    let post_profile = if allow_predictions { PSRL_ANSI_ONLY } else { PSRL_FIX };
-    let mut s = format!("{}; {}; {}; {}", PSRL_FIX, PROFILE_SOURCE, post_profile, CWD_SYNC);
+    let (pre_profile, post_profile) = if allow_predictions {
+        (PSRL_CRASH_GUARD, PSRL_PRED_RESTORE)
+    } else {
+        (PSRL_FIX, PSRL_FIX)
+    };
+    let mut s = format!("{}; {}; {}; {}", pre_profile, PROFILE_SOURCE, post_profile, CWD_SYNC);
     if env_shim {
         s.push_str("; ");
         s.push_str(ENV_SHIM_PS);
