@@ -1070,9 +1070,13 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     let has_placeholder_title = app.windows.get(app.active_idx)
                         .and_then(|w| crate::tree::active_pane(&w.root, &w.active_path))
                         .map_or(false, |p| p.title.starts_with("pane %"));
+                    let has_squelch = app.windows.get(app.active_idx)
+                        .and_then(|w| crate::tree::active_pane(&w.root, &w.active_path))
+                        .map_or(false, |p| p.squelch_until.is_some());
                     if allow_nc
                         && !state_dirty
                         && !has_placeholder_title
+                        && !has_squelch
                         && !cached_dump_state.is_empty()
                         && cached_data_version == combined_data_version(&app)
                     {
@@ -1926,21 +1930,18 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                                 // the directory change is invisible to the
                                 // user.  Leading space keeps it out of shell
                                 // history; the clear wipes visible traces.
+                                // The squelch_until flag tells the renderer to
+                                // return blank frames until cls/clear finishes,
+                                // preventing any flash of the injected command.
                                 if let Some(win) = app.windows.last_mut() {
                                     if let Some(p) = active_pane_mut(&mut win.root, &win.active_path) {
                                         use std::io::Write as _;
                                         let escaped = cwd.replace('\'', "''");
                                         let clear = if cfg!(windows) { "cls" } else { "clear" };
                                         let cd_cmd = format!(" cd '{}'; {}\r", escaped, clear);
+                                        p.squelch_until = Some(Instant::now() + Duration::from_millis(800));
                                         let _ = p.writer.write_all(cd_cmd.as_bytes());
                                         let _ = p.writer.flush();
-                                        // Immediately blank the vt100 screen buffer so
-                                        // the first frame rendered to the client is clean
-                                        // (avoids a visible flash of the injected command
-                                        // before cls/clear runs in the shell).
-                                        if let Ok(mut parser) = p.term.lock() {
-                                            parser.process(b"\x1b[H\x1b[2J");
-                                        }
                                     }
                                 }
                             }

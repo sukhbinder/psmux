@@ -101,6 +101,28 @@ pub fn dump_layout_json(app: &mut AppState) -> io::Result<String> {
                 const FLAG_BLINK: u8 = 32;
                 const FLAG_HIDDEN: u8 = 64;
 
+                // If the pane is squelched (hiding injected commands),
+                // return a blank leaf so the client never sees the flash.
+                if let Some(deadline) = p.squelch_until {
+                    if std::time::Instant::now() < deadline {
+                        return LayoutJson::Leaf {
+                            id: p.id, rows: p.last_rows, cols: p.last_cols,
+                            cursor_row: 0, cursor_col: 0, alternate_screen: false,
+                            hide_cursor: true,
+                            cursor_shape: 0,
+                            active: *cur_path == active_path, copy_mode: false,
+                            scroll_offset: 0,
+                            sel_start_row: None, sel_start_col: None,
+                            sel_end_row: None, sel_end_col: None,
+                            sel_mode: None,
+                            copy_cursor_row: None, copy_cursor_col: None,
+                            content: vec![], rows_v2: vec![],
+                        };
+                    } else {
+                        p.squelch_until = None;
+                    }
+                }
+
                 let Ok(parser) = p.term.lock() else {
                     return LayoutJson::Leaf {
                         id: p.id, rows: p.last_rows, cols: p.last_cols,

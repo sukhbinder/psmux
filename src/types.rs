@@ -57,6 +57,10 @@ pub struct Pane {
     /// Stored for API compatibility; ConPTY rendering doesn't support
     /// per-pane fg/bg tinting so this is not rendered yet.
     pub pane_style: Option<String>,
+    /// When set, the layout serialiser renders this pane as blank until
+    /// the deadline passes.  Used to hide injected cd+cls commands during
+    /// warm session claiming so the user never sees a flash.
+    pub squelch_until: Option<Instant>,
 }
 
 /// Pre-spawned shell ready to be transplanted into a new window instantly.
