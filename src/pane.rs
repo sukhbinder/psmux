@@ -1002,4 +1002,8 @@ pub fn spawn_reader_thread(
 #[path = "../tests-rs/test_issue151_strict_mode.rs"]
 mod test_issue151_strict_mode;
 
+#[cfg(test)]
+#[path = "../tests-rs/test_issue155_output_rendering.rs"]
+mod test_issue155_output_rendering;
+
 // reap_children is in tree.rs

@@ -1453,3 +1453,7 @@ fn u16_to_u8(i: u16) -> Option<u8> {
 #[path = "../../../tests-rs/test_vt100_screen.rs"]
 mod tests;
 
+#[cfg(test)]
+#[path = "../../../tests-rs/test_issue155_sgr_attrs.rs"]
+mod test_issue155_sgr_attrs;
+
