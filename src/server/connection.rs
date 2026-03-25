@@ -1290,13 +1290,8 @@ match cmd {
         let cmd_parts: Vec<&str> = args.iter().filter(|a| !a.starts_with('-')).copied().collect();
         let shell_cmd = cmd_parts.join(" ");
         let shell_cmd = shell_cmd.trim_matches(|c: char| c == '\'' || c == '"').to_string();
-        // Expand ~ to home directory
-        let shell_cmd = if shell_cmd.contains('~') {
-            let home = std::env::var("USERPROFILE").or_else(|_| std::env::var("HOME")).unwrap_or_default();
-            shell_cmd.replace("~/", &format!("{}/", home)).replace("~\\", &format!("{}\\", home))
-        } else {
-            shell_cmd
-        };
+        // Expand ~ to home directory + XDG fallback for plugin paths
+        let shell_cmd = crate::util::expand_run_shell_path(&shell_cmd);
         if !shell_cmd.is_empty() {
             if background {
                 let _ = std::process::Command::new("pwsh").args(["-NoProfile", "-Command", &shell_cmd]).spawn();

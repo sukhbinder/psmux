@@ -1,6 +1,7 @@
 use std::io;
 use std::time::Instant;
 
+use std::io::Write;
 use crate::types::{AppState, Mode, Action, FocusDir, LayoutKind, MenuItem, Menu, Node};
 use crate::tree::{compute_rects, kill_all_children, get_active_pane_id};
 use crate::pane::{create_window, split_active, kill_active_pane};
@@ -92,6 +93,68 @@ fn generate_show_hooks(app: &AppState) -> String {
         output.push_str("(no hooks)\n");
     }
     output
+}
+
+/// Generate show-options output locally (embedded mode fallback).
+fn generate_show_options(app: &AppState) -> String {
+    let mut output = String::new();
+    output.push_str(&format!("prefix {}\n", crate::config::format_key_binding(&app.prefix_key)));
+    output.push_str(&format!("base-index {}\n", app.window_base_index));
+    output.push_str(&format!("pane-base-index {}\n", app.pane_base_index));
+    output.push_str(&format!("escape-time {}\n", app.escape_time_ms));
+    output.push_str(&format!("mouse {}\n", if app.mouse_enabled { "on" } else { "off" }));
+    output.push_str(&format!("status {}\n", if app.status_visible { "on" } else { "off" }));
+    output.push_str(&format!("status-position {}\n", app.status_position));
+    output.push_str(&format!("status-left \"{}\"\n", app.status_left));
+    output.push_str(&format!("status-right \"{}\"\n", app.status_right));
+    output.push_str(&format!("history-limit {}\n", app.history_limit));
+    output.push_str(&format!("display-time {}\n", app.display_time_ms));
+    output.push_str(&format!("mode-keys {}\n", app.mode_keys));
+    output.push_str(&format!("focus-events {}\n", if app.focus_events { "on" } else { "off" }));
+    output.push_str(&format!("renumber-windows {}\n", if app.renumber_windows { "on" } else { "off" }));
+    output.push_str(&format!("automatic-rename {}\n", if app.automatic_rename { "on" } else { "off" }));
+    output.push_str(&format!("monitor-activity {}\n", if app.monitor_activity { "on" } else { "off" }));
+    output.push_str(&format!("synchronize-panes {}\n", if app.sync_input { "on" } else { "off" }));
+    output.push_str(&format!("remain-on-exit {}\n", if app.remain_on_exit { "on" } else { "off" }));
+    // Include @user-options
+    for (key, val) in &app.user_options {
+        output.push_str(&format!("{} \"{}\"\n", key, val));
+    }
+    output
+}
+
+/// Local join-pane: extract active pane and graft into target window.
+fn join_pane_local(app: &mut AppState, target_win: usize) {
+    let src_idx = app.active_idx;
+    if target_win < app.windows.len() && target_win != src_idx {
+        let src_path = app.windows[src_idx].active_path.clone();
+        let src_root = std::mem::replace(&mut app.windows[src_idx].root,
+            Node::Split { kind: LayoutKind::Horizontal, sizes: vec![], children: vec![] });
+        let (remaining, extracted) = crate::tree::extract_node(src_root, &src_path);
+        if let Some(pane_node) = extracted {
+            let src_empty = remaining.is_none();
+            if let Some(rem) = remaining {
+                app.windows[src_idx].root = rem;
+                app.windows[src_idx].active_path = crate::tree::first_leaf_path(&app.windows[src_idx].root);
+            }
+            let tgt = if src_empty && target_win > src_idx { target_win - 1 } else { target_win };
+            if src_empty {
+                app.windows.remove(src_idx);
+                if app.active_idx >= app.windows.len() {
+                    app.active_idx = app.windows.len().saturating_sub(1);
+                }
+            }
+            if tgt < app.windows.len() {
+                let tgt_path = app.windows[tgt].active_path.clone();
+                crate::tree::replace_leaf_with_split(&mut app.windows[tgt].root, &tgt_path, LayoutKind::Vertical, pane_node);
+                app.active_idx = tgt;
+            }
+        } else {
+            if let Some(rem) = remaining {
+                app.windows[src_idx].root = rem;
+            }
+        }
+    }
 }
 
 /// Generate list-commands output.
@@ -790,10 +853,20 @@ pub fn execute_command_string(app: &mut AppState, cmd: &str) -> io::Result<()> {
         "resize-pane" | "resizep" => {
             if parts.iter().any(|p| *p == "-Z") {
                 toggle_zoom(app);
+            } else if let Some(port) = app.control_port {
+                let _ = send_control_to_port(port, &format!("{}\n", cmd), &app.session_key);
             } else {
-                // Forward to server for actual resize
-                if let Some(port) = app.control_port {
-                    let _ = send_control_to_port(port, &format!("{}\n", cmd), &app.session_key);
+                // Local resize
+                let amount = parts.windows(2).find(|w| w[0] == "-x" || w[0] == "-y")
+                    .and_then(|w| w[1].parse::<i16>().ok());
+                if parts.iter().any(|p| *p == "-U" || *p == "-D") {
+                    let amt = amount.unwrap_or(1);
+                    let adj = if parts.iter().any(|p| *p == "-U") { -amt } else { amt };
+                    crate::window_ops::resize_pane_vertical(app, adj);
+                } else if parts.iter().any(|p| *p == "-L" || *p == "-R") {
+                    let amt = amount.unwrap_or(1);
+                    let adj = if parts.iter().any(|p| *p == "-L") { -amt } else { amt };
+                    crate::window_ops::resize_pane_horizontal(app, adj);
                 }
             }
         }
@@ -801,51 +874,93 @@ pub fn execute_command_string(app: &mut AppState, cmd: &str) -> io::Result<()> {
             if let Some(port) = app.control_port {
                 let dir = if parts.iter().any(|p| *p == "-U") { "-U" } else { "-D" };
                 let _ = send_control_to_port(port, &format!("swap-pane {}\n", dir), &app.session_key);
+            } else {
+                let dir = if parts.iter().any(|p| *p == "-U") { FocusDir::Up } else { FocusDir::Down };
+                crate::window_ops::swap_pane(app, dir);
             }
         }
         "rotate-window" | "rotatew" => {
             if let Some(port) = app.control_port {
                 let flag = if parts.iter().any(|p| *p == "-D") { "-D" } else { "" };
                 let _ = send_control_to_port(port, &format!("rotate-window {}\n", flag), &app.session_key);
+            } else {
+                crate::window_ops::rotate_panes(app, !parts.iter().any(|p| *p == "-D"));
             }
         }
         "break-pane" | "breakp" => {
             if let Some(port) = app.control_port {
                 let _ = send_control_to_port(port, "break-pane\n", &app.session_key);
+            } else {
+                crate::window_ops::break_pane_to_window(app);
             }
         }
         "respawn-pane" | "respawnp" => {
             if let Some(port) = app.control_port {
                 let _ = send_control_to_port(port, "respawn-pane\n", &app.session_key);
+            } else {
+                crate::window_ops::respawn_active_pane(app, None)?;
             }
         }
         "toggle-sync" => {
             app.sync_input = !app.sync_input;
         }
         "set-option" | "set" | "set-window-option" | "setw" => {
-            // Forward to server for option handling
             if let Some(port) = app.control_port {
                 let _ = send_control_to_port(port, &format!("{}\n", cmd), &app.session_key);
+            } else {
+                crate::config::parse_config_line(app, cmd);
             }
         }
         "bind-key" | "bind" => {
             if let Some(port) = app.control_port {
                 let _ = send_control_to_port(port, &format!("{}\n", cmd), &app.session_key);
+            } else {
+                crate::config::parse_config_line(app, cmd);
             }
         }
         "unbind-key" | "unbind" => {
             if let Some(port) = app.control_port {
                 let _ = send_control_to_port(port, &format!("{}\n", cmd), &app.session_key);
+            } else {
+                crate::config::parse_config_line(app, cmd);
             }
         }
         "source-file" | "source" => {
             if let Some(port) = app.control_port {
                 let _ = send_control_to_port(port, &format!("{}\n", cmd), &app.session_key);
+            } else if let Some(path) = parts.get(1) {
+                crate::config::source_file(app, path);
             }
         }
         "send-keys" | "send" => {
             if let Some(port) = app.control_port {
                 let _ = send_control_to_port(port, &format!("{}\n", cmd), &app.session_key);
+            } else {
+                // Local: write key text directly to active pane
+                let literal = parts.iter().any(|p| *p == "-l");
+                let key_parts: Vec<&str> = parts[1..].iter().filter(|p| !p.starts_with('-')).copied().collect();
+                let text = key_parts.join(" ");
+                if !text.is_empty() {
+                    if let Some(win) = app.windows.get_mut(app.active_idx) {
+                        if let Some(p) = crate::tree::active_pane_mut(&mut win.root, &win.active_path) {
+                            if literal {
+                                let _ = p.writer.write_all(text.as_bytes());
+                                let _ = p.writer.flush();
+                            } else {
+                                let expanded = match text.to_uppercase().as_str() {
+                                    "ENTER" => "\r".to_string(),
+                                    "SPACE" => " ".to_string(),
+                                    "ESCAPE" | "ESC" => "\x1b".to_string(),
+                                    "TAB" => "\t".to_string(),
+                                    "BSPACE" | "BACKSPACE" => "\x7f".to_string(),
+                                    _ => text,
+                                };
+                                let _ = p.writer.write_all(expanded.as_bytes());
+                                let _ = p.writer.flush();
+                            }
+                        }
+                    }
+                }
             }
         }
         "detach-client" | "detach" => {
@@ -859,11 +974,16 @@ pub fn execute_command_string(app: &mut AppState, cmd: &str) -> io::Result<()> {
         "select-layout" | "selectl" => {
             if let Some(port) = app.control_port {
                 let _ = send_control_to_port(port, &format!("{}\n", cmd), &app.session_key);
+            } else {
+                let layout = parts.get(1).unwrap_or(&"tiled");
+                crate::layout::apply_layout(app, layout);
             }
         }
         "next-layout" => {
             if let Some(port) = app.control_port {
                 let _ = send_control_to_port(port, "next-layout\n", &app.session_key);
+            } else {
+                crate::layout::cycle_layout(app);
             }
         }
         "pipe-pane" | "pipep" => {
@@ -914,6 +1034,13 @@ pub fn execute_command_string(app: &mut AppState, cmd: &str) -> io::Result<()> {
         "clear-history" | "clearhist" => {
             if let Some(port) = app.control_port {
                 let _ = send_control_to_port(port, "clear-history\n", &app.session_key);
+            } else {
+                let win = &mut app.windows[app.active_idx];
+                if let Some(p) = crate::tree::active_pane_mut(&mut win.root, &win.active_path) {
+                    if let Ok(mut parser) = p.term.lock() {
+                        *parser = vt100::Parser::new(p.last_rows, p.last_cols, app.history_limit);
+                    }
+                }
             }
         }
         "kill-session" | "kill-ses" => {
@@ -968,96 +1095,238 @@ pub fn execute_command_string(app: &mut AppState, cmd: &str) -> io::Result<()> {
         "show-options" | "show" | "show-window-options" | "showw" => {
             if let Some(port) = app.control_port {
                 let _ = send_control_to_port(port, &format!("{}\n", cmd), &app.session_key);
+            } else {
+                let output = generate_show_options(app);
+                show_output_popup(app, "show-options", output);
             }
         }
         "display-message" | "display" => {
             if let Some(port) = app.control_port {
                 let _ = send_control_to_port(port, &format!("{}\n", cmd), &app.session_key);
+            } else {
+                // Local: expand format string and show as status message
+                let msg = parts[1..].join(" ");
+                let msg = msg.trim_matches('"').trim_matches('\'');
+                let expanded = crate::format::expand_format(msg, app);
+                app.status_message = Some((expanded, Instant::now()));
             }
         }
         "show-messages" | "showmsgs" => {
             if let Some(port) = app.control_port {
                 let _ = send_control_to_port(port, &format!("{}\n", cmd), &app.session_key);
+            } else {
+                show_output_popup(app, "show-messages", "(no messages)\n".to_string());
             }
         }
         "set-environment" | "setenv" => {
             if let Some(port) = app.control_port {
                 let _ = send_control_to_port(port, &format!("{}\n", cmd), &app.session_key);
+            } else {
+                let has_u = parts.iter().any(|p| *p == "-u");
+                let non_flag: Vec<&str> = parts[1..].iter().filter(|p| !p.starts_with('-')).copied().collect();
+                if has_u {
+                    if let Some(key) = non_flag.first() {
+                        app.environment.remove(*key);
+                        std::env::remove_var(key);
+                    }
+                } else if non_flag.len() >= 2 {
+                    app.environment.insert(non_flag[0].to_string(), non_flag[1].to_string());
+                    std::env::set_var(non_flag[0], non_flag[1]);
+                } else if non_flag.len() == 1 {
+                    app.environment.insert(non_flag[0].to_string(), String::new());
+                    std::env::set_var(non_flag[0], "");
+                }
             }
         }
         "show-environment" | "showenv" => {
             if let Some(port) = app.control_port {
                 let _ = send_control_to_port(port, &format!("{}\n", cmd), &app.session_key);
+            } else {
+                let mut output = String::new();
+                for (key, value) in &app.environment {
+                    output.push_str(&format!("{}={}\n", key, value));
+                }
+                if output.is_empty() { output.push_str("(no environment variables)\n"); }
+                show_output_popup(app, "show-environment", output);
             }
         }
         "set-hook" => {
             if let Some(port) = app.control_port {
                 let _ = send_control_to_port(port, &format!("{}\n", cmd), &app.session_key);
+            } else {
+                let has_unset = parts.iter().any(|p| *p == "-u" || *p == "-gu" || *p == "-ug");
+                let has_append = parts.iter().any(|p| *p == "-a" || *p == "-ga" || *p == "-ag");
+                let non_flag: Vec<&str> = parts[1..].iter().filter(|p| !p.starts_with('-')).copied().collect();
+                if has_unset {
+                    if let Some(name) = non_flag.first() {
+                        app.hooks.remove(*name);
+                    }
+                } else if non_flag.len() >= 2 {
+                    let hook_cmd = non_flag[1..].join(" ");
+                    if has_append {
+                        app.hooks.entry(non_flag[0].to_string()).or_default().push(hook_cmd);
+                    } else {
+                        app.hooks.insert(non_flag[0].to_string(), vec![hook_cmd]);
+                    }
+                }
             }
         }
         "send-prefix" => {
             if let Some(port) = app.control_port {
                 let _ = send_control_to_port(port, "send-prefix\n", &app.session_key);
+            } else {
+                // Send the prefix key to the active pane as if typed
+                let prefix = app.prefix_key;
+                let encoded: Vec<u8> = match prefix.0 {
+                    crossterm::event::KeyCode::Char(c) if prefix.1.contains(crossterm::event::KeyModifiers::CONTROL) => {
+                        vec![(c.to_ascii_lowercase() as u8) & 0x1F]
+                    }
+                    crossterm::event::KeyCode::Char(c) => format!("{}", c).into_bytes(),
+                    _ => vec![],
+                };
+                if !encoded.is_empty() {
+                    if let Some(win) = app.windows.get_mut(app.active_idx) {
+                        if let Some(p) = crate::tree::active_pane_mut(&mut win.root, &win.active_path) {
+                            let _ = p.writer.write_all(&encoded);
+                            let _ = p.writer.flush();
+                        }
+                    }
+                }
             }
         }
         "if-shell" | "if" => {
             if let Some(port) = app.control_port {
                 let _ = send_control_to_port(port, &format!("{}\n", cmd), &app.session_key);
+            } else {
+                // Local if-shell execution
+                let format_mode = parts.iter().any(|p| *p == "-F" || *p == "-bF" || *p == "-Fb");
+                let positional: Vec<&str> = parts[1..].iter().filter(|p| !p.starts_with('-')).copied().collect();
+                if positional.len() >= 2 {
+                    let condition = positional[0];
+                    let true_cmd = positional[1];
+                    let false_cmd = positional.get(2).copied();
+                    let success = if format_mode {
+                        !condition.is_empty() && condition != "0"
+                    } else if condition == "true" || condition == "1" {
+                        true
+                    } else if condition == "false" || condition == "0" {
+                        false
+                    } else {
+                        std::process::Command::new(if cfg!(windows) { "pwsh" } else { "sh" })
+                            .args(if cfg!(windows) { vec!["-NoProfile", "-Command", condition] } else { vec!["-c", condition] })
+                            .stdout(std::process::Stdio::null())
+                            .stderr(std::process::Stdio::null())
+                            .status()
+                            .map(|s| s.success()).unwrap_or(false)
+                    };
+                    if let Some(chosen) = if success { Some(true_cmd) } else { false_cmd } {
+                        execute_command_string(app, chosen)?;
+                    }
+                }
             }
         }
         "wait-for" | "wait" => {
             if let Some(port) = app.control_port {
                 let _ = send_control_to_port(port, &format!("{}\n", cmd), &app.session_key);
             }
+            // Local wait-for is a no-op (requires server coordination)
         }
         "find-window" | "findw" => {
             if let Some(port) = app.control_port {
                 let _ = send_control_to_port(port, &format!("{}\n", cmd), &app.session_key);
+            } else {
+                let pattern = parts[1..].iter().find(|p| !p.starts_with('-')).unwrap_or(&"");
+                let mut output = String::new();
+                for (i, win) in app.windows.iter().enumerate() {
+                    if win.name.contains(pattern) {
+                        output.push_str(&format!("{}: {}\n", i + app.window_base_index, win.name));
+                    }
+                }
+                if output.is_empty() { output.push_str(&format!("(no windows matching '{}')\n", pattern)); }
+                show_output_popup(app, "find-window", output);
             }
         }
         "move-window" | "movew" => {
             if let Some(port) = app.control_port {
                 let _ = send_control_to_port(port, &format!("{}\n", cmd), &app.session_key);
+            } else {
+                let target = parts[1..].iter().find(|a| a.parse::<usize>().is_ok()).and_then(|s| s.parse().ok());
+                if let Some(t) = target {
+                    let t: usize = t;
+                    if t < app.windows.len() && app.active_idx != t {
+                        let win = app.windows.remove(app.active_idx);
+                        let insert_idx = if t > app.active_idx { t - 1 } else { t };
+                        app.windows.insert(insert_idx.min(app.windows.len()), win);
+                        app.active_idx = insert_idx.min(app.windows.len() - 1);
+                    }
+                }
             }
         }
         "swap-window" | "swapw" => {
             if let Some(port) = app.control_port {
                 let _ = send_control_to_port(port, &format!("{}\n", cmd), &app.session_key);
+            } else {
+                if let Some(target) = parts[1..].iter().find(|a| a.parse::<usize>().is_ok()).and_then(|s| s.parse::<usize>().ok()) {
+                    if target < app.windows.len() && app.active_idx != target {
+                        app.windows.swap(app.active_idx, target);
+                    }
+                }
             }
         }
         "link-window" | "linkw" => {
             if let Some(port) = app.control_port {
                 let _ = send_control_to_port(port, &format!("{}\n", cmd), &app.session_key);
             }
+            // link-window is not supported (single-session model)
+            app.status_message = Some(("link-window: not supported in psmux (single-session model)".to_string(), Instant::now()));
         }
         "unlink-window" | "unlinkw" => {
             if let Some(port) = app.control_port {
                 let _ = send_control_to_port(port, &format!("{}\n", cmd), &app.session_key);
+            } else if app.windows.len() > 1 {
+                let mut win = app.windows.remove(app.active_idx);
+                kill_all_children(&mut win.root);
+                if app.active_idx >= app.windows.len() {
+                    app.active_idx = app.windows.len() - 1;
+                }
             }
         }
         "move-pane" | "movep" => {
             if let Some(port) = app.control_port {
                 let _ = send_control_to_port(port, &format!("{}\n", cmd), &app.session_key);
+            } else {
+                // move-pane -t <window> (alias for join-pane)
+                if let Some(target) = parts[1..].iter().find(|a| a.parse::<usize>().is_ok()).and_then(|s| s.parse::<usize>().ok()) {
+                    join_pane_local(app, target);
+                }
             }
         }
         "join-pane" | "joinp" => {
             if let Some(port) = app.control_port {
                 let _ = send_control_to_port(port, &format!("{}\n", cmd), &app.session_key);
+            } else {
+                if let Some(target) = parts[1..].iter().find(|a| a.parse::<usize>().is_ok()).and_then(|s| s.parse::<usize>().ok()) {
+                    join_pane_local(app, target);
+                }
             }
         }
         "resize-window" | "resizew" => {
             if let Some(port) = app.control_port {
                 let _ = send_control_to_port(port, &format!("{}\n", cmd), &app.session_key);
             }
+            // resize-window depends on terminal size, only meaningful on server
         }
         "respawn-window" | "respawnw" => {
             if let Some(port) = app.control_port {
                 let _ = send_control_to_port(port, &format!("{}\n", cmd), &app.session_key);
             }
+            // respawn-window requires PTY system from server context
         }
         "previous-layout" | "prevl" => {
             if let Some(port) = app.control_port {
                 let _ = send_control_to_port(port, "previous-layout\n", &app.session_key);
+            } else {
+                crate::layout::cycle_layout_reverse(app);
             }
         }
         "attach-session" | "attach" | "a" | "at" => {
@@ -1069,6 +1338,10 @@ pub fn execute_command_string(app: &mut AppState, cmd: &str) -> io::Result<()> {
         "server-info" | "info" => {
             if let Some(port) = app.control_port {
                 let _ = send_control_to_port(port, "server-info\n", &app.session_key);
+            } else {
+                let output = format!("psmux {}\nSession: {}\nWindows: {}\nActive: {}\n",
+                    crate::types::VERSION, app.session_name, app.windows.len(), app.active_idx);
+                show_output_popup(app, "server-info", output);
             }
         }
         "new-session" | "new" => {
@@ -1079,23 +1352,28 @@ pub fn execute_command_string(app: &mut AppState, cmd: &str) -> io::Result<()> {
             if let Some(port) = app.control_port {
                 let _ = send_control_to_port(port, "lock-server\n", &app.session_key);
             }
+            app.status_message = Some(("lock: not available on Windows".to_string(), Instant::now()));
         }
         "refresh-client" | "refresh" => {
-            // Trigger a redraw; no explicit action needed in embedded mode
             if let Some(port) = app.control_port {
                 let _ = send_control_to_port(port, "refresh-client\n", &app.session_key);
             }
+            // Trigger redraw in all modes
+            app.status_message = Some(("client refreshed".to_string(), Instant::now()));
         }
         "suspend-client" | "suspendc" => {
             if let Some(port) = app.control_port {
                 let _ = send_control_to_port(port, "suspend-client\n", &app.session_key);
             }
+            app.status_message = Some(("suspend: not available on Windows".to_string(), Instant::now()));
         }
         "choose-client" => {
-            // Single-client model; no-op
+            app.status_message = Some(("choose-client: single-client model (you are the only client)".to_string(), Instant::now()));
         }
         "customize-mode" => {
-            // tmux 3.2+ customize-mode; stub for compatibility
+            // tmux 3.2+ customize-mode: show options as an interactive display
+            let output = generate_show_options(app);
+            show_output_popup(app, "customize-mode (options)", output);
         }
         "run-shell" | "run" => {
             // Parse with quote-aware parser to handle nested quotes properly
@@ -1107,13 +1385,8 @@ pub fn execute_command_string(app: &mut AppState, cmd: &str) -> io::Result<()> {
             }
             let shell_cmd = cmd_parts.join(" ");
             if !shell_cmd.is_empty() {
-                // Expand ~ to home directory
-                let shell_cmd = if shell_cmd.contains('~') {
-                    let home = std::env::var("USERPROFILE").or_else(|_| std::env::var("HOME")).unwrap_or_default();
-                    shell_cmd.replace("~/", &format!("{}/", home)).replace("~\\", &format!("{}\\", home))
-                } else {
-                    shell_cmd
-                };
+                // Expand ~ to home directory + XDG fallback for plugin paths
+                let shell_cmd = crate::util::expand_run_shell_path(&shell_cmd);
                 // Set PSMUX_TARGET_SESSION so child scripts connect to the correct server
                 let target_session = app.port_file_base();
                 #[cfg(windows)]
@@ -1161,3 +1434,7 @@ mod tests;
 #[cfg(test)]
 #[path = "../tests-rs/test_commands_new.rs"]
 mod tests_new_commands;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_commands_audit.rs"]
+mod tests_commands_audit;
