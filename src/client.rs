@@ -305,6 +305,8 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
     let mut command_cursor: usize = 0;
     let mut command_history: Vec<String> = Vec::new();
     let mut command_history_idx: usize = 0;
+    let mut window_idx_input = false;
+    let mut window_idx_buf = String::new();
 
     let mut tree_chooser = false;
     let mut tree_entries: Vec<(bool, usize, usize, String, String)> = Vec::new();  // (is_win, id, sub_id, label, session_name)
@@ -1158,6 +1160,7 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                                 KeyCode::Char('t') => { cmd_batch.push("clock-mode\n".into()); }
                                 KeyCode::Char('=') => { cmd_batch.push("choose-buffer\n".into()); }
                                 KeyCode::Char(':') => { command_input = true; command_buf.clear(); command_cursor = 0; command_history_idx = command_history.len(); }
+                                KeyCode::Char('\'') => { window_idx_input = true; window_idx_buf.clear(); }
                                 KeyCode::Char('w') => {
                                     tree_chooser = true;
                                     tree_entries.clear();
@@ -1480,9 +1483,11 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                                 }
                                 KeyCode::Char(c) if renaming && !key.modifiers.contains(KeyModifiers::CONTROL) => { rename_buf.push(c); }
                                 KeyCode::Char(c) if pane_renaming && !key.modifiers.contains(KeyModifiers::CONTROL) => { pane_title_buf.push(c); }
+                                KeyCode::Char(c) if window_idx_input && c.is_ascii_digit() => { window_idx_buf.push(c); }
                                 KeyCode::Char(c) if command_input && !key.modifiers.contains(KeyModifiers::CONTROL) => { command_buf.insert(command_cursor, c); command_cursor += 1; }
                                 KeyCode::Backspace if renaming => { let _ = rename_buf.pop(); }
                                 KeyCode::Backspace if pane_renaming => { let _ = pane_title_buf.pop(); }
+                                KeyCode::Backspace if window_idx_input => { let _ = window_idx_buf.pop(); }
                                 KeyCode::Backspace if command_input => { if command_cursor > 0 { command_buf.remove(command_cursor - 1); command_cursor -= 1; } }
                                 KeyCode::Enter if renaming => {
                                     if session_renaming {
@@ -1494,6 +1499,12 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                                     renaming = false;
                                 }
                                 KeyCode::Enter if pane_renaming => { cmd_batch.push(format!("set-pane-title {}\n", quote_arg(&pane_title_buf))); pane_renaming = false; }
+                                KeyCode::Enter if window_idx_input => {
+                                    if !window_idx_buf.is_empty() {
+                                        cmd_batch.push(format!("select-window -t :{}\n", window_idx_buf));
+                                    }
+                                    window_idx_input = false;
+                                }
                                 KeyCode::Enter if command_input => {
                                     let trimmed = command_buf.trim().to_string();
                                     if !trimmed.is_empty() {
@@ -1506,6 +1517,7 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                                 }
                                 KeyCode::Esc if renaming => { renaming = false; session_renaming = false; }
                                 KeyCode::Esc if pane_renaming => { pane_renaming = false; }
+                                KeyCode::Esc if window_idx_input => { window_idx_input = false; }
                                 KeyCode::Esc if command_input => { command_input = false; command_cursor = 0; }
 
                                 // Command prompt: cursor movement, history, and editing keys
@@ -2921,6 +2933,17 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                 f.render_widget(para, inner);
                 // Show cursor at the correct position within the prompt
                 let cx = inner.x + 2 + command_cursor as u16; // +2 for ": "
+                f.set_cursor_position((cx, inner.y));
+            }
+            if window_idx_input {
+                let overlay = Block::default().borders(Borders::ALL).title("select window");
+                let oa = centered_rect(50, 3, content_chunk);
+                f.render_widget(Clear, oa);
+                f.render_widget(&overlay, oa);
+                let inner = overlay.inner(oa);
+                let para = Paragraph::new(format!("index: {}", window_idx_buf));
+                f.render_widget(para, inner);
+                let cx = inner.x + 7 + window_idx_buf.len() as u16;
                 f.set_cursor_position((cx, inner.y));
             }
             if let Some(ref cmd) = confirm_cmd {

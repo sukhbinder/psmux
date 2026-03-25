@@ -17,6 +17,7 @@ pub const PREFIX_DEFAULTS: &[(&str, &str)] = &[
     ("w",       "choose-tree"),
     ("&",       "kill-window"),
     (",",       "rename-window"),
+    ("'",       "select-window-index"),
     ("0",       "select-window -t :0"),
     ("1",       "select-window -t :1"),
     ("2",       "select-window -t :2"),

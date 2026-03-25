@@ -457,6 +457,7 @@ pub fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<
                 Mode::ConfirmMode { .. } => "CONFIRM",
                 Mode::ClockMode => "CLOCK",
                 Mode::BufferChooser { .. } => "BUF",
+                Mode::WindowIndexPrompt { .. } => "WIN#",
             };
             let time_str = Local::now().format("%H:%M").to_string();
 
@@ -656,6 +657,17 @@ pub fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<
                 let oa = centered_rect(70, height, area);
                 f.render_widget(Clear, oa);
                 f.render_widget(overlay, oa);
+            }
+
+            if let Mode::WindowIndexPrompt { input } = &app.mode {
+                let msg_style = parse_tmux_style(&app.message_command_style);
+                let prompt_text = format!("index: {}", input);
+                let prompt_area = status_chunk;
+                let para = Paragraph::new(prompt_text).style(msg_style);
+                f.render_widget(Clear, prompt_area);
+                f.render_widget(para, prompt_area);
+                let cx = prompt_area.x + 7 + input.len() as u16; // 7 for "index: "
+                f.set_cursor_position((cx, prompt_area.y));
             }
 
             if let Mode::RenamePrompt { input } = &app.mode {

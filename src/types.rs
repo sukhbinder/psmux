@@ -207,6 +207,8 @@ pub enum Mode {
     ClockMode,
     /// Interactive buffer chooser (prefix =)
     BufferChooser { selected: usize },
+    /// Window index prompt (prefix ') — jump to window by number
+    WindowIndexPrompt { input: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]

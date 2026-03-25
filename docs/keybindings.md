@@ -15,6 +15,7 @@ Default prefix: `Ctrl+b` (same as tmux). Change with `set -g prefix C-a`.
 | `Prefix + w` | Interactive session/window/pane chooser |
 | `Prefix + &` | Kill current window (with confirmation) |
 | `Prefix + ,` | Rename current window |
+| `Prefix + '` | Prompt for window index (jump to any window) |
 | `Prefix + 0-9` | Select window by number |
 
 ### Pane Splitting

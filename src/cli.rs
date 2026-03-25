@@ -303,6 +303,7 @@ KEY BINDINGS (default prefix: Ctrl+B):
     prefix + :          Enter command mode
     prefix + ?          List keybindings
     prefix + ,          Rename current window
+    prefix + '          Select window by index
     prefix + $          Rename session
     prefix + w          Window/pane chooser
     prefix + s          Session chooser

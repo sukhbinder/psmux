@@ -187,6 +187,7 @@ pub fn handle_key(app: &mut AppState, key: KeyEvent) -> io::Result<bool> {
                     true
                 }
                 KeyCode::Char(',') => { app.mode = Mode::RenamePrompt { input: String::new() }; true }
+                KeyCode::Char('\'') => { app.mode = Mode::WindowIndexPrompt { input: String::new() }; true }
                 KeyCode::Char(' ') => { cycle_top_layout(app); true }
                 KeyCode::Char('[') => { enter_copy_mode(app); true }
                 KeyCode::Char(']') => { paste_latest(app)?; app.mode = Mode::Passthrough; true }
@@ -491,6 +492,31 @@ pub fn handle_key(app: &mut AppState, key: KeyEvent) -> io::Result<bool> {
                         if let Mode::WindowChooser { selected: s, .. } = &mut app.mode { *s = idx; }
                     }
                 }
+                _ => {}
+            }
+            Ok(false)
+        }
+        Mode::WindowIndexPrompt { .. } => {
+            match key.code {
+                KeyCode::Esc => { app.mode = Mode::Passthrough; }
+                KeyCode::Enter => {
+                    if let Mode::WindowIndexPrompt { input } = &app.mode {
+                        if let Ok(idx) = input.parse::<usize>() {
+                            if idx >= app.window_base_index {
+                                let internal_idx = idx - app.window_base_index;
+                                if internal_idx < app.windows.len() {
+                                    switch_with_copy_save(app, |app| {
+                                        app.last_window_idx = app.active_idx;
+                                        app.active_idx = internal_idx;
+                                    });
+                                }
+                            }
+                        }
+                    }
+                    app.mode = Mode::Passthrough;
+                }
+                KeyCode::Backspace => { if let Mode::WindowIndexPrompt { input } = &mut app.mode { let _ = input.pop(); } }
+                KeyCode::Char(c) if c.is_ascii_digit() => { if let Mode::WindowIndexPrompt { input } = &mut app.mode { input.push(c); } }
                 _ => {}
             }
             Ok(false)
