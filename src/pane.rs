@@ -666,7 +666,7 @@ const PROFILE_SOURCE: &str = concat!(
 /// Pop-Location.  This is invisible to prompt customizers and survives
 /// `. $PROFILE` reloads.
 const CWD_SYNC: &str = concat!(
-    "if (-not $Global:__psmux_cwd_hook) { ",
+    "if (-not (Test-Path variable:Global:__psmux_cwd_hook)) { ",
     "$Global:__psmux_cwd_hook = $true; ",
     "try { [System.IO.Directory]::SetCurrentDirectory($PWD.ProviderPath) } catch {}; ",
     "function Global:Set-Location { ",
