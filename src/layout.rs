@@ -21,6 +21,7 @@ pub fn serialize_screen_rows(screen: &vt100::Screen, rows: u16, cols: u16) -> Ve
     const FLAG_INVERSE: u8 = 16;
     const FLAG_BLINK: u8 = 32;
     const FLAG_HIDDEN: u8 = 64;
+    const FLAG_STRIKETHROUGH: u8 = 128;
 
     let mut result: Vec<RowRunsJson> = Vec::with_capacity(rows as usize);
     for r in 0..rows {
@@ -45,6 +46,7 @@ pub fn serialize_screen_rows(screen: &vt100::Screen, rows: u16, cols: u16) -> Ve
                 if cell.inverse() { fl |= FLAG_INVERSE; }
                 if cell.blink() { fl |= FLAG_BLINK; }
                 if cell.hidden() { fl |= FLAG_HIDDEN; }
+                if cell.strikethrough() { fl |= FLAG_STRIKETHROUGH; }
 
                 let merged = if let Some(last) = runs.last_mut() {
                     if prev_fg_raw == Some(cell_fg) && prev_bg_raw == Some(cell_bg) && prev_flags == fl {
@@ -98,7 +100,7 @@ pub fn cycle_top_layout(app: &mut AppState) {
 }
 
 #[derive(Serialize, Deserialize)]
-pub struct CellJson { pub text: String, pub fg: String, pub bg: String, pub bold: bool, pub italic: bool, pub underline: bool, pub inverse: bool, pub dim: bool, pub blink: bool, pub hidden: bool }
+pub struct CellJson { pub text: String, pub fg: String, pub bg: String, pub bold: bool, pub italic: bool, pub underline: bool, pub inverse: bool, pub dim: bool, pub blink: bool, pub hidden: bool, pub strikethrough: bool }
 
 #[derive(Serialize, Deserialize)]
 pub struct CellRunJson {
@@ -176,6 +178,7 @@ pub fn dump_layout_json(app: &mut AppState) -> io::Result<String> {
                 const FLAG_INVERSE: u8 = 16;
                 const FLAG_BLINK: u8 = 32;
                 const FLAG_HIDDEN: u8 = 64;
+                const FLAG_STRIKETHROUGH: u8 = 128;
 
                 // If the pane is squelched (hiding injected commands),
                 // return a blank leaf so the client never sees the flash.
@@ -303,6 +306,7 @@ pub fn dump_layout_json(app: &mut AppState) -> io::Result<String> {
                             if cell.inverse() { fl |= FLAG_INVERSE; }
                             if cell.blink() { fl |= FLAG_BLINK; }
                             if cell.hidden() { fl |= FLAG_HIDDEN; }
+                            if cell.strikethrough() { fl |= FLAG_STRIKETHROUGH; }
 
                             // Run merging — push &str directly, no String allocation
                             let merged = if let Some(last) = runs.last_mut() {
@@ -325,14 +329,14 @@ pub fn dump_layout_json(app: &mut AppState) -> io::Result<String> {
                                     text: t.to_string(), fg: fg_str.clone(), bg: bg_str.clone(),
                                     bold: cell.bold(), italic: cell.italic(),
                                     underline: cell.underline(), inverse: cell.inverse(), dim: cell.dim(),
-                                    blink: cell.blink(), hidden: cell.hidden(),
+                                    blink: cell.blink(), hidden: cell.hidden(), strikethrough: cell.strikethrough(),
                                 });
                                 for _ in 1..w {
                                     row.push(CellJson {
                                         text: String::new(), fg: fg_str.clone(), bg: bg_str.clone(),
                                         bold: cell.bold(), italic: cell.italic(),
                                         underline: cell.underline(), inverse: cell.inverse(), dim: cell.dim(),
-                                        blink: cell.blink(), hidden: cell.hidden(),
+                                        blink: cell.blink(), hidden: cell.hidden(), strikethrough: cell.strikethrough(),
                                     });
                                 }
                             }
@@ -354,7 +358,7 @@ pub fn dump_layout_json(app: &mut AppState) -> io::Result<String> {
                                 row.push(CellJson {
                                     text: " ".to_string(), fg: "default".to_string(), bg: "default".to_string(),
                                     bold: false, italic: false, underline: false, inverse: false, dim: false,
-                                    blink: false, hidden: false,
+                                    blink: false, hidden: false, strikethrough: false,
                                 });
                             }
                             (1u16, vt100::Color::Default, vt100::Color::Default, 0u8)
@@ -377,6 +381,7 @@ pub fn dump_layout_json(app: &mut AppState) -> io::Result<String> {
                                 dim: false,
                                 blink: false,
                                 hidden: false,
+                                strikethrough: false,
                             });
                         }
                         lines.push(row);
@@ -589,6 +594,7 @@ pub fn dump_layout_json_fast(app: &mut AppState) -> io::Result<String> {
                 const FLAG_INVERSE: u8  = 16;
                 const FLAG_BLINK: u8    = 32;
                 const FLAG_HIDDEN: u8   = 64;
+                const FLAG_STRIKETHROUGH: u8 = 128;
 
                 // If the pane is squelched, emit a blank leaf.
                 if p.squelch_until.is_some() {
@@ -628,7 +634,7 @@ pub fn dump_layout_json_fast(app: &mut AppState) -> io::Result<String> {
                 // in the ConPTY pipe while we build the JSON string.
                 struct Run { text: String, fg: vt100::Color, bg: vt100::Color, flags: u8, width: u16 }
                 struct RowSnap { runs: Vec<Run> }
-                struct CopyCell { text: String, fg: vt100::Color, bg: vt100::Color, bold: bool, italic: bool, underline: bool, inverse: bool, dim: bool, blink: bool, hidden: bool, width: u16 }
+                struct CopyCell { text: String, fg: vt100::Color, bg: vt100::Color, bold: bool, italic: bool, underline: bool, inverse: bool, dim: bool, blink: bool, hidden: bool, strikethrough: bool, width: u16 }
                 struct LeafSnap {
                     cr: u16, cc: u16, alt: bool,
                     hide_cursor: bool,
@@ -695,6 +701,7 @@ pub fn dump_layout_json_fast(app: &mut AppState) -> io::Result<String> {
                                 if cell.inverse()   { fl |= FLAG_INVERSE; }
                                 if cell.blink()     { fl |= FLAG_BLINK; }
                                 if cell.hidden()    { fl |= FLAG_HIDDEN; }
+                                if cell.strikethrough() { fl |= FLAG_STRIKETHROUGH; }
 
                                 if prev_fg == Some(cfg) && prev_bg == Some(cbg) && prev_fl == fl {
                                     if let Some(last) = runs.last_mut() {
@@ -743,13 +750,13 @@ pub fn dump_layout_json_fast(app: &mut AppState) -> io::Result<String> {
                                     row_cells.push(CopyCell {
                                         text: t.to_string(), fg: cell.fgcolor(), bg: cell.bgcolor(),
                                         bold: cell.bold(), italic: cell.italic(), underline: cell.underline(),
-                                        inverse: cell.inverse(), dim: cell.dim(), blink: cell.blink(), hidden: cell.hidden(), width: w,
+                                        inverse: cell.inverse(), dim: cell.dim(), blink: cell.blink(), hidden: cell.hidden(), strikethrough: cell.strikethrough(), width: w,
                                     });
                                     c += w;
                                 } else {
                                     row_cells.push(CopyCell {
                                         text: " ".to_string(), fg: vt100::Color::Default, bg: vt100::Color::Default,
-                                        bold: false, italic: false, underline: false, inverse: false, dim: false, blink: false, hidden: false, width: 1,
+                                        bold: false, italic: false, underline: false, inverse: false, dim: false, blink: false, hidden: false, strikethrough: false, width: 1,
                                     });
                                     c += 1;
                                 }
@@ -855,8 +862,8 @@ pub fn dump_layout_json_fast(app: &mut AppState) -> io::Result<String> {
                             out.push_str("\",\"bg\":\"");
                             push_color(cell.bg, out);
                             let _ = std::fmt::Write::write_fmt(out, format_args!(
-                                "\",\"bold\":{},\"italic\":{},\"underline\":{},\"inverse\":{},\"dim\":{},\"blink\":{},\"hidden\":{}}}",
-                                cell.bold, cell.italic, cell.underline, cell.inverse, cell.dim, cell.blink, cell.hidden,
+                                "\",\"bold\":{},\"italic\":{},\"underline\":{},\"inverse\":{},\"dim\":{},\"blink\":{},\"hidden\":{},\"strikethrough\":{}}}",
+                                cell.bold, cell.italic, cell.underline, cell.inverse, cell.dim, cell.blink, cell.hidden, cell.strikethrough,
                             ));
                             // Emit width-2 filler cells
                             for _ in 1..cell.width {
@@ -865,15 +872,15 @@ pub fn dump_layout_json_fast(app: &mut AppState) -> io::Result<String> {
                                 out.push_str("\",\"bg\":\"");
                                 push_color(cell.bg, out);
                                 let _ = std::fmt::Write::write_fmt(out, format_args!(
-                                    "\",\"bold\":{},\"italic\":{},\"underline\":{},\"inverse\":{},\"dim\":{},\"blink\":{},\"hidden\":{}}}",
-                                    cell.bold, cell.italic, cell.underline, cell.inverse, cell.dim, cell.blink, cell.hidden,
+                                    "\",\"bold\":{},\"italic\":{},\"underline\":{},\"inverse\":{},\"dim\":{},\"blink\":{},\"hidden\":{},\"strikethrough\":{}}}",
+                                    cell.bold, cell.italic, cell.underline, cell.inverse, cell.dim, cell.blink, cell.hidden, cell.strikethrough,
                                 ));
                             }
                         }
                         // pad to full column width
                         let total_w: u16 = row.iter().map(|c| c.width).sum();
                         for _ in total_w..p.last_cols {
-                            out.push_str(",{\"text\":\" \",\"fg\":\"default\",\"bg\":\"default\",\"bold\":false,\"italic\":false,\"underline\":false,\"inverse\":false,\"dim\":false,\"blink\":false,\"hidden\":false}");
+                            out.push_str(",{\"text\":\" \",\"fg\":\"default\",\"bg\":\"default\",\"bold\":false,\"italic\":false,\"underline\":false,\"inverse\":false,\"dim\":false,\"blink\":false,\"hidden\":false,\"strikethrough\":false}");
                         }
                         out.push(']');
                     }

@@ -2346,7 +2346,16 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                                     if cell.bold { style = style.add_modifier(Modifier::BOLD); }
                                     if cell.italic { style = style.add_modifier(Modifier::ITALIC); }
                                     if cell.underline { style = style.add_modifier(Modifier::UNDERLINED); }
-                                    let text: &str = if cell.text.is_empty() { " " } else { &cell.text };
+                                    if cell.blink { style = style.add_modifier(Modifier::SLOW_BLINK); }
+                                    if cell.strikethrough { style = style.add_modifier(Modifier::CROSSED_OUT); }
+                                    // ratatui-crossterm omits SGR 8 (HIDDEN), render as spaces
+                                    let text: &str = if cell.hidden {
+                                        " "
+                                    } else if cell.text.is_empty() {
+                                        " "
+                                    } else {
+                                        &cell.text
+                                    };
                                     let char_width = unicode_width::UnicodeWidthStr::width(text) as u16;
                                     if char_width >= 2 && c + char_width > max_c {
                                         // Wide char at boundary would overflow
@@ -2397,8 +2406,15 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                                     if run.flags & 4 != 0 { style = style.add_modifier(Modifier::ITALIC); }
                                     if run.flags & 8 != 0 { style = style.add_modifier(Modifier::UNDERLINED); }
                                     if run.flags & 32 != 0 { style = style.add_modifier(Modifier::SLOW_BLINK); }
-                                    if run.flags & 64 != 0 { style = style.add_modifier(Modifier::HIDDEN); }
-                                    let text: &str = if run.text.is_empty() { " " } else { &run.text };
+                                    if run.flags & 128 != 0 { style = style.add_modifier(Modifier::CROSSED_OUT); }
+                                    // ratatui-crossterm omits SGR 8 (HIDDEN), render as spaces
+                                    let text: &str = if run.flags & 64 != 0 {
+                                        " "
+                                    } else if run.text.is_empty() {
+                                        " "
+                                    } else {
+                                        &run.text
+                                    };
                                     // Truncate run text if it extends past the pane width
                                     let run_w = run.width.max(1);
                                     if c + run_w > inner.width {
@@ -2994,8 +3010,15 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                             if run.flags & 8  != 0 { style = style.add_modifier(Modifier::UNDERLINED); }
                             if run.flags & 16 != 0 { style = style.add_modifier(Modifier::REVERSED); }
                             if run.flags & 32 != 0 { style = style.add_modifier(Modifier::SLOW_BLINK); }
-                            if run.flags & 64 != 0 { style = style.add_modifier(Modifier::HIDDEN); }
-                            let text: &str = if run.text.is_empty() { " " } else { &run.text };
+                            if run.flags & 128 != 0 { style = style.add_modifier(Modifier::CROSSED_OUT); }
+                            // ratatui-crossterm omits SGR 8 (HIDDEN), render as spaces
+                            let text: &str = if run.flags & 64 != 0 {
+                                " "
+                            } else if run.text.is_empty() {
+                                " "
+                            } else {
+                                &run.text
+                            };
                             let run_w = run.width.max(1);
                             if col + run_w > inner_w {
                                 let avail = (inner_w - col) as usize;
