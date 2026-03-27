@@ -34,6 +34,10 @@ path = "tests-rs/test_vt100_mouse.rs"
 name = "test_issue155_sgr_attrs"
 path = "tests-rs/test_issue155_sgr_attrs.rs"
 
+[[test]]
+name = "test_issue155_rendering"
+path = "tests-rs/test_issue155_rendering.rs"
+
 # Windows only
 [target.'cfg(not(windows))'.dependencies]
 [target.'cfg(windows)'.dependencies]
