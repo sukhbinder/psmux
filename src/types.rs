@@ -776,6 +776,18 @@ pub enum CtrlReq {
     MouseMove(u64,u16,u16),
     ScrollUp(u64,u16, u16),
     ScrollDown(u64,u16, u16),
+    /// Client-side semantic mouse event: pane-relative coordinates, targeted by pane ID.
+    /// Fields: client_id, pane_id, sgr_button, col_0based, row_0based, press
+    PaneMouse(u64, usize, u8, i16, i16, bool),
+    /// Client-side semantic scroll: targeted by pane ID.
+    /// Fields: client_id, pane_id, up (true=up, false=down)
+    PaneScroll(u64, usize, bool),
+    /// Client-side semantic split resize: set sizes at a tree path.
+    /// Fields: client_id, path, new sizes
+    SplitSetSizes(u64, Vec<usize>, Vec<u16>),
+    /// Client signals border drag is complete — trigger PTY resize.
+    /// Fields: client_id
+    SplitResizeDone(u64),
     NextWindow,
     PrevWindow,
     RenameWindow(String),

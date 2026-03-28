@@ -658,6 +658,40 @@ match cmd {
         let y = args.get(1).and_then(|s| s.parse::<u16>().ok()).unwrap_or(0);
         let _ = tx.send(CtrlReq::ScrollDown(client_id, x, y));
     }
+    "pane-mouse" => {
+        // pane-mouse PANE_ID BUTTON COL ROW M|m
+        if args.len() >= 5 {
+            if let (Ok(pane_id), Ok(button), Ok(col), Ok(row)) = (
+                args[0].parse::<usize>(), args[1].parse::<u8>(),
+                args[2].parse::<i16>(), args[3].parse::<i16>()
+            ) {
+                let press = args[4] != "m";
+                let _ = tx.send(CtrlReq::PaneMouse(client_id, pane_id, button, col, row, press));
+            }
+        }
+    }
+    "pane-scroll" => {
+        // pane-scroll PANE_ID up|down
+        if args.len() >= 2 {
+            if let Ok(pane_id) = args[0].parse::<usize>() {
+                let up = args[1] == "up";
+                let _ = tx.send(CtrlReq::PaneScroll(client_id, pane_id, up));
+            }
+        }
+    }
+    "split-sizes" => {
+        // split-sizes PATH SIZE1,SIZE2,...
+        if args.len() >= 2 {
+            let path: Vec<usize> = args[0].split('.').filter_map(|s| s.parse().ok()).collect();
+            let sizes: Vec<u16> = args[1].split(',').filter_map(|s| s.parse().ok()).collect();
+            if !path.is_empty() && sizes.len() >= 2 {
+                let _ = tx.send(CtrlReq::SplitSetSizes(client_id, path, sizes));
+            }
+        }
+    }
+    "split-resize-done" => {
+        let _ = tx.send(CtrlReq::SplitResizeDone(client_id));
+    }
     "next-window" | "next" => { let _ = tx.send(CtrlReq::NextWindow); }
     "previous-window" | "prev" => { let _ = tx.send(CtrlReq::PrevWindow); }
     "rename-window" | "renamew" => { if let Some(name) = args.get(0) { let _ = tx.send(CtrlReq::RenameWindow((*name).to_string())); } }
