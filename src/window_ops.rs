@@ -47,6 +47,30 @@ fn pane_inner_cell(area: Rect, abs_x: u16, abs_y: u16) -> (u16, u16) {
     (col, row)
 }
 
+/// Map mouse coordinates from a client's terminal space to the server's effective
+/// layout space.  When a client's terminal is larger or smaller than the effective
+/// size used for layout computation, raw pixel coordinates don't match pane boundaries.
+/// This ratio-based mapping is a "good enough" fallback for any interaction not yet
+/// handled by client-side semantic commands.
+fn map_client_coords(app: &AppState, x: u16, y: u16) -> (u16, u16) {
+    let cid = match app.latest_client_id {
+        Some(id) => id,
+        None => return (x, y),
+    };
+    let (cw, ch) = match app.client_sizes.get(&cid) {
+        Some(&size) => size,
+        None => return (x, y),
+    };
+    let ew = app.last_window_area.width;
+    let eh = app.last_window_area.height;
+    if cw == ew && ch == eh {
+        return (x, y);
+    }
+    let mx = if cw > 0 { ((x as u32) * (ew as u32) / (cw as u32)) as u16 } else { x };
+    let my = if ch > 0 { ((y as u32) * (eh as u32) / (ch as u32)) as u16 } else { y };
+    (mx.min(ew.saturating_sub(1)), my.min(eh.saturating_sub(1)))
+}
+
 /// Write a mouse event to the child PTY using the encoding the child requested.
 pub fn write_mouse_event_remote(master: &mut dyn std::io::Write, button: u8, col: u16, row: u16, press: bool, enc: vt100::MouseProtocolEncoding) {
     match enc {
@@ -426,6 +450,9 @@ pub fn toggle_zoom(app: &mut AppState) {
 
 /// Compute tab positions on the server side to match the client's status bar layout.
 /// The client renders: "[session_name] idx: window_name idx: window_name ..."
+/// NOTE: No longer called — tab clicks are now handled client-side with exact
+/// rendered positions.  Kept for reference / potential embedded-mode use.
+#[allow(dead_code)]
 pub fn update_tab_positions(app: &mut AppState) {
     let mut tab_pos: Vec<(usize, u16, u16)> = Vec::new();
     let mut cursor_x: u16 = 0;
@@ -444,24 +471,11 @@ pub fn update_tab_positions(app: &mut AppState) {
 }
 
 pub fn remote_mouse_down(app: &mut AppState, x: u16, y: u16) {
-    // Recompute tab positions to match client rendering
-    update_tab_positions(app);
-
-    // Check tab click on status bar
+    let (x, y) = map_client_coords(app, x, y);
+    // Status bar tab clicks are handled client-side via select-window.
+    // Only handle pane focus and border resize here.
     let status_row = app.last_window_area.y + app.last_window_area.height;
     if y == status_row {
-        for &(win_idx, x_start, x_end) in app.tab_positions.iter() {
-            if x >= x_start && x < x_end && win_idx < app.windows.len() {
-                if win_idx != app.active_idx {
-                    crate::debug_log::server_log("switch", &format!(
-                        "TAB CLICK: active_idx {} -> {} x={} y={} status_row={} tab_range={}..{}",
-                        app.active_idx, win_idx, x, y, status_row, x_start, x_end));
-                }
-                app.last_window_idx = app.active_idx;
-                app.active_idx = win_idx;
-                return;
-            }
-        }
         return;
     }
 
@@ -525,6 +539,7 @@ pub fn remote_mouse_down(app: &mut AppState, x: u16, y: u16) {
 }
 
 pub fn remote_mouse_drag(app: &mut AppState, x: u16, y: u16) {
+    let (x, y) = map_client_coords(app, x, y);
     let win = &mut app.windows[app.active_idx];
     let mut rects: Vec<(Vec<usize>, Rect)> = Vec::new();
     compute_rects(&win.root, app.last_window_area, &mut rects);
@@ -561,6 +576,7 @@ pub fn remote_mouse_drag(app: &mut AppState, x: u16, y: u16) {
 }
 
 pub fn remote_mouse_up(app: &mut AppState, x: u16, y: u16) {
+    let (x, y) = map_client_coords(app, x, y);
     let win = &mut app.windows[app.active_idx];
     let mut rects: Vec<(Vec<usize>, Rect)> = Vec::new();
     compute_rects(&win.root, app.last_window_area, &mut rects);
@@ -607,6 +623,7 @@ pub fn remote_mouse_up(app: &mut AppState, x: u16, y: u16) {
 
 /// Forward a non-left mouse button press/release to the child.
 pub fn remote_mouse_button(app: &mut AppState, x: u16, y: u16, button: u8, press: bool) {
+    let (x, y) = map_client_coords(app, x, y);
     let win = &mut app.windows[app.active_idx];
     let mut rects: Vec<(Vec<usize>, Rect)> = Vec::new();
     compute_rects(&win.root, app.last_window_area, &mut rects);
@@ -649,6 +666,7 @@ pub fn remote_mouse_button(app: &mut AppState, x: u16, y: u16, button: u8, press
 /// Same-coordinate events are suppressed (Windows Terminal parity: the
 /// terminal only sends motion when coordinates actually change).
 pub fn remote_mouse_motion(app: &mut AppState, x: u16, y: u16) {
+    let (x, y) = map_client_coords(app, x, y);
     // WT parity: suppress same-coordinate duplicates
     if app.last_hover_pos == Some((x, y)) {
         return;
@@ -691,6 +709,7 @@ fn copy_cell_for_area(area: Rect, x: u16, y: u16) -> (u16, u16) {
 }
 
 fn remote_scroll_wheel(app: &mut AppState, x: u16, y: u16, up: bool) {
+    let (x, y) = map_client_coords(app, x, y);
     let mode_str = match &app.mode {
         Mode::Passthrough => "Passthrough",
         Mode::CopyMode => "CopyMode",
