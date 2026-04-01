@@ -47,6 +47,30 @@ fn pane_inner_cell(area: Rect, abs_x: u16, abs_y: u16) -> (u16, u16) {
     (col, row)
 }
 
+/// Map mouse coordinates from a client's terminal space to the server's effective
+/// layout space.  When a client's terminal is larger or smaller than the effective
+/// size used for layout computation, raw pixel coordinates don't match pane boundaries.
+/// This ratio-based mapping is a "good enough" fallback for any interaction not yet
+/// handled by client-side semantic commands.
+fn map_client_coords(app: &AppState, x: u16, y: u16) -> (u16, u16) {
+    let cid = match app.latest_client_id {
+        Some(id) => id,
+        None => return (x, y),
+    };
+    let (cw, ch) = match app.client_sizes.get(&cid) {
+        Some(&size) => size,
+        None => return (x, y),
+    };
+    let ew = app.last_window_area.width;
+    let eh = app.last_window_area.height;
+    if cw == ew && ch == eh {
+        return (x, y);
+    }
+    let mx = if cw > 0 { ((x as u32) * (ew as u32) / (cw as u32)) as u16 } else { x };
+    let my = if ch > 0 { ((y as u32) * (eh as u32) / (ch as u32)) as u16 } else { y };
+    (mx.min(ew.saturating_sub(1)), my.min(eh.saturating_sub(1)))
+}
+
 /// Write a mouse event to the child PTY using the encoding the child requested.
 pub fn write_mouse_event_remote(master: &mut dyn std::io::Write, button: u8, col: u16, row: u16, press: bool, enc: vt100::MouseProtocolEncoding) {
     match enc {
@@ -426,6 +450,9 @@ pub fn toggle_zoom(app: &mut AppState) {
 
 /// Compute tab positions on the server side to match the client's status bar layout.
 /// The client renders: "[session_name] idx: window_name idx: window_name ..."
+/// NOTE: No longer called — tab clicks are now handled client-side with exact
+/// rendered positions.  Kept for reference / potential embedded-mode use.
+#[allow(dead_code)]
 pub fn update_tab_positions(app: &mut AppState) {
     let mut tab_pos: Vec<(usize, u16, u16)> = Vec::new();
     let mut cursor_x: u16 = 0;
@@ -444,24 +471,11 @@ pub fn update_tab_positions(app: &mut AppState) {
 }
 
 pub fn remote_mouse_down(app: &mut AppState, x: u16, y: u16) {
-    // Recompute tab positions to match client rendering
-    update_tab_positions(app);
-
-    // Check tab click on status bar
+    let (x, y) = map_client_coords(app, x, y);
+    // Status bar tab clicks are handled client-side via select-window.
+    // Only handle pane focus and border resize here.
     let status_row = app.last_window_area.y + app.last_window_area.height;
     if y == status_row {
-        for &(win_idx, x_start, x_end) in app.tab_positions.iter() {
-            if x >= x_start && x < x_end && win_idx < app.windows.len() {
-                if win_idx != app.active_idx {
-                    crate::debug_log::server_log("switch", &format!(
-                        "TAB CLICK: active_idx {} -> {} x={} y={} status_row={} tab_range={}..{}",
-                        app.active_idx, win_idx, x, y, status_row, x_start, x_end));
-                }
-                app.last_window_idx = app.active_idx;
-                app.active_idx = win_idx;
-                return;
-            }
-        }
         return;
     }
 
@@ -525,6 +539,7 @@ pub fn remote_mouse_down(app: &mut AppState, x: u16, y: u16) {
 }
 
 pub fn remote_mouse_drag(app: &mut AppState, x: u16, y: u16) {
+    let (x, y) = map_client_coords(app, x, y);
     let win = &mut app.windows[app.active_idx];
     let mut rects: Vec<(Vec<usize>, Rect)> = Vec::new();
     compute_rects(&win.root, app.last_window_area, &mut rects);
@@ -561,6 +576,7 @@ pub fn remote_mouse_drag(app: &mut AppState, x: u16, y: u16) {
 }
 
 pub fn remote_mouse_up(app: &mut AppState, x: u16, y: u16) {
+    let (x, y) = map_client_coords(app, x, y);
     let win = &mut app.windows[app.active_idx];
     let mut rects: Vec<(Vec<usize>, Rect)> = Vec::new();
     compute_rects(&win.root, app.last_window_area, &mut rects);
@@ -607,6 +623,7 @@ pub fn remote_mouse_up(app: &mut AppState, x: u16, y: u16) {
 
 /// Forward a non-left mouse button press/release to the child.
 pub fn remote_mouse_button(app: &mut AppState, x: u16, y: u16, button: u8, press: bool) {
+    let (x, y) = map_client_coords(app, x, y);
     let win = &mut app.windows[app.active_idx];
     let mut rects: Vec<(Vec<usize>, Rect)> = Vec::new();
     compute_rects(&win.root, app.last_window_area, &mut rects);
@@ -649,6 +666,7 @@ pub fn remote_mouse_button(app: &mut AppState, x: u16, y: u16, button: u8, press
 /// Same-coordinate events are suppressed (Windows Terminal parity: the
 /// terminal only sends motion when coordinates actually change).
 pub fn remote_mouse_motion(app: &mut AppState, x: u16, y: u16) {
+    let (x, y) = map_client_coords(app, x, y);
     // WT parity: suppress same-coordinate duplicates
     if app.last_hover_pos == Some((x, y)) {
         return;
@@ -691,6 +709,7 @@ fn copy_cell_for_area(area: Rect, x: u16, y: u16) -> (u16, u16) {
 }
 
 fn remote_scroll_wheel(app: &mut AppState, x: u16, y: u16, up: bool) {
+    let (x, y) = map_client_coords(app, x, y);
     let mode_str = match &app.mode {
         Mode::Passthrough => "Passthrough",
         Mode::CopyMode => "CopyMode",
@@ -793,6 +812,166 @@ fn remote_scroll_wheel(app: &mut AppState, x: u16, y: u16, up: bool) {
 
 pub fn remote_scroll_up(app: &mut AppState, x: u16, y: u16) { remote_scroll_wheel(app, x, y, true); }
 pub fn remote_scroll_down(app: &mut AppState, x: u16, y: u16) { remote_scroll_wheel(app, x, y, false); }
+
+/// Handle a semantic mouse event from the client.
+/// The client has already determined the target pane and computed pane-relative
+/// coordinates, so no coordinate translation is needed.
+pub fn handle_pane_mouse(app: &mut AppState, pane_id: usize, button: u8, col: i16, row: i16, press: bool) {
+    // Find the pane by ID and focus it
+    let win = &mut app.windows[app.active_idx];
+    let mut found_path: Option<Vec<usize>> = None;
+    let mut rects: Vec<(Vec<usize>, Rect)> = Vec::new();
+    compute_rects(&win.root, app.last_window_area, &mut rects);
+    for (path, _area) in &rects {
+        if let Some(pid) = crate::tree::get_active_pane_id(&win.root, path) {
+            if pid == pane_id {
+                found_path = Some(path.clone());
+                break;
+            }
+        }
+    }
+
+    let Some(path) = found_path else { return; };
+
+    // Focus the target pane only on actual clicks (not drag/hover).
+    // tmux behavior: click-to-focus, not focus-follows-mouse.
+    let is_click = matches!(button, 0 | 1 | 2) && press;
+    if is_click && win.active_path != path {
+        win.active_path = path.clone();
+        if let Some(pid) = crate::tree::get_active_pane_id(&win.root, &path) {
+            crate::tree::touch_mru(&mut win.pane_mru, pid);
+        }
+    }
+
+    // Handle copy mode: position cursor with pane-relative coordinates
+    if matches!(app.mode, Mode::CopyMode | Mode::CopySearch { .. }) {
+        let r = row.max(0) as u16;
+        let c = col.max(0) as u16;
+        if button == 0 && press {
+            // Left press: position cursor, clear selection
+            app.copy_anchor = None;
+            app.copy_pos = Some((r, c));
+        } else if button == 32 {
+            // Left drag: extend selection
+            if app.copy_anchor.is_none() {
+                app.copy_anchor = Some((r, c));
+                app.copy_anchor_scroll_offset = app.copy_scroll_offset;
+                app.copy_selection_mode = crate::types::SelectionMode::Char;
+            }
+            app.copy_pos = Some((r, c));
+        } else if button == 0 && !press {
+            // Left release: finalize, auto-yank if selection exists
+            if app.copy_anchor.is_none() {
+                app.copy_anchor = Some((r, c));
+                app.copy_anchor_scroll_offset = app.copy_scroll_offset;
+            }
+            app.copy_pos = Some((r, c));
+            if let (Some(a), Some(p)) = (app.copy_anchor, app.copy_pos) {
+                if a != p { let _ = yank_selection(app); }
+            }
+        }
+        return;
+    }
+
+    // Forward mouse event to PTY if pane wants it
+    let win = &mut app.windows[app.active_idx];
+    let win_name = win.name.clone();
+    if let Some(pane) = active_pane_mut(&mut win.root, &win.active_path) {
+        if pane_wants_mouse(pane) {
+            let button_state = match (button, press) {
+                (0, true) => mouse_inject::FROM_LEFT_1ST_BUTTON_PRESSED,
+                (1, true) => mouse_inject::FROM_LEFT_2ND_BUTTON_PRESSED,
+                (2, true) => mouse_inject::RIGHTMOST_BUTTON_PRESSED,
+                _ => 0,
+            };
+            let event_flags = if button == 32 || button == 35 { mouse_inject::MOUSE_MOVED } else { 0 };
+            inject_mouse_combined(pane, col, row, button, press, button_state, event_flags, &win_name);
+        }
+    }
+}
+
+/// Handle a semantic scroll event targeted at a specific pane.
+pub fn handle_pane_scroll(app: &mut AppState, pane_id: usize, up: bool) {
+    // Ignore scroll in popup mode (#110)
+    if matches!(app.mode, Mode::PopupMode { .. }) { return; }
+
+    // Handle scroll while already in copy mode (coordinates irrelevant)
+    if matches!(app.mode, Mode::CopyMode | Mode::CopySearch { .. }) {
+        if up {
+            scroll_copy_up(app, 3);
+        } else {
+            scroll_copy_down(app, 3);
+            if app.copy_scroll_offset == 0 && app.copy_anchor.is_none() {
+                exit_copy_mode(app);
+            }
+        }
+        return;
+    }
+
+    // Focus the target pane
+    let win = &mut app.windows[app.active_idx];
+    let mut rects: Vec<(Vec<usize>, Rect)> = Vec::new();
+    compute_rects(&win.root, app.last_window_area, &mut rects);
+    for (path, _area) in &rects {
+        if let Some(pid) = crate::tree::get_active_pane_id(&win.root, path) {
+            if pid == pane_id {
+                win.active_path = path.clone();
+                break;
+            }
+        }
+    }
+
+    // Check if target pane is in alternate screen (TUI app)
+    let alt = active_pane(&win.root, &win.active_path)
+        .map_or(false, |p| {
+            p.term.lock().ok().map_or(false, |t| t.screen().alternate_screen())
+        });
+
+    if alt {
+        // Forward scroll to TUI app
+        let win = &mut app.windows[app.active_idx];
+        let win_name = win.name.clone();
+        let sgr_btn: u8 = if up { 64 } else { 65 };
+        let wheel_delta: i16 = if up { 120 } else { -120 };
+        let button_state = ((wheel_delta as i32) << 16) as u32;
+        if let Some(pane) = active_pane_mut(&mut win.root, &win.active_path) {
+            inject_mouse_combined(pane, 0, 0, sgr_btn, true,
+                button_state, mouse_inject::MOUSE_WHEELED, &win_name);
+        }
+    } else if up {
+        // Shell prompt — enter copy mode and scroll
+        enter_copy_mode(app);
+        scroll_copy_up(app, 3);
+    }
+}
+
+/// Set split sizes at a given tree path during border drag.
+pub fn handle_split_set_sizes(app: &mut AppState, path: &[usize], sizes: &[u16]) {
+    let win = &mut app.windows[app.active_idx];
+    let mut cur: &mut Node = &mut win.root;
+    for &idx in path.iter() {
+        match cur {
+            Node::Split { children, .. } => {
+                if idx < children.len() {
+                    cur = &mut children[idx];
+                } else {
+                    return;
+                }
+            }
+            Node::Leaf(_) => return,
+        }
+    }
+    if let Node::Split { sizes: node_sizes, children, .. } = cur {
+        if sizes.len() == children.len() && sizes.len() == node_sizes.len() {
+            *node_sizes = sizes.to_vec();
+        }
+    }
+}
+
+/// Finalize a border resize: apply PTY resizes to match the new layout.
+pub fn handle_split_resize_done(app: &mut AppState) {
+    resize_all_panes(app);
+}
 
 pub fn swap_pane(app: &mut AppState, dir: FocusDir) {
     let win = &mut app.windows[app.active_idx];

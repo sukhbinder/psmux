@@ -475,6 +475,8 @@ pub struct AppState {
     pub pane_border_style: String,
     /// pane-active-border-style: style for active pane borders
     pub pane_active_border_style: String,
+    /// pane-border-hover-style: style for border hover highlight
+    pub pane_border_hover_style: String,
     /// window-status-format: format for inactive window tabs
     pub window_status_format: String,
     /// window-status-current-format: format for active window tab
@@ -694,6 +696,7 @@ impl AppState {
             user_options: std::collections::HashMap::new(),
             pane_border_style: String::new(),
             pane_active_border_style: "fg=green".to_string(),
+            pane_border_hover_style: "fg=yellow".to_string(),
             window_status_format: "#I:#W#{?window_flags,#{window_flags}, }".to_string(),
             window_status_current_format: "#I:#W#{?window_flags,#{window_flags}, }".to_string(),
             window_status_separator: " ".to_string(),
@@ -845,6 +848,18 @@ pub enum CtrlReq {
     MouseMove(u64,u16,u16),
     ScrollUp(u64,u16, u16),
     ScrollDown(u64,u16, u16),
+    /// Client-side semantic mouse event: pane-relative coordinates, targeted by pane ID.
+    /// Fields: client_id, pane_id, sgr_button, col_0based, row_0based, press
+    PaneMouse(u64, usize, u8, i16, i16, bool),
+    /// Client-side semantic scroll: targeted by pane ID.
+    /// Fields: client_id, pane_id, up (true=up, false=down)
+    PaneScroll(u64, usize, bool),
+    /// Client-side semantic split resize: set sizes at a tree path.
+    /// Fields: client_id, path, new sizes
+    SplitSetSizes(u64, Vec<usize>, Vec<u16>),
+    /// Client signals border drag is complete — trigger PTY resize.
+    /// Fields: client_id
+    SplitResizeDone(u64),
     NextWindow,
     PrevWindow,
     RenameWindow(String),

@@ -194,6 +194,66 @@ fn is_on_separator(layout: &LayoutJson, area: Rect, x: u16, y: u16) -> bool {
     }
 }
 
+/// Collect all leaf pane IDs and their absolute rects from a LayoutJson tree.
+fn collect_pane_rects(node: &LayoutJson, area: Rect, out: &mut Vec<(usize, Rect)>) {
+    match node {
+        LayoutJson::Leaf { id, .. } => {
+            out.push((*id, area));
+        }
+        LayoutJson::Split { kind, sizes, children } => {
+            let effective_sizes: Vec<u16> = if sizes.len() == children.len() {
+                sizes.clone()
+            } else {
+                vec![(100 / children.len().max(1)) as u16; children.len()]
+            };
+            let is_horizontal = kind == "Horizontal";
+            let rects = split_with_gaps(is_horizontal, &effective_sizes, area);
+            for (i, child) in children.iter().enumerate() {
+                if i < rects.len() {
+                    collect_pane_rects(child, rects[i], out);
+                }
+            }
+        }
+    }
+}
+
+/// Collect all split border positions from a LayoutJson tree.
+/// Returns: (tree_path_to_parent, kind, child_index, border_pixel_pos, total_pixels, sizes_snapshot)
+fn collect_layout_borders(
+    node: &LayoutJson,
+    area: Rect,
+    path: &mut Vec<usize>,
+    out: &mut Vec<(Vec<usize>, String, usize, u16, u16, Vec<u16>, Rect)>,
+) {
+    if let LayoutJson::Split { kind, sizes, children } = node {
+        let effective_sizes: Vec<u16> = if sizes.len() == children.len() {
+            sizes.clone()
+        } else {
+            vec![(100 / children.len().max(1)) as u16; children.len()]
+        };
+        let is_horizontal = kind == "Horizontal";
+        let rects = split_with_gaps(is_horizontal, &effective_sizes, area);
+        let total_px = if is_horizontal { area.width } else { area.height };
+        for i in 0..children.len().saturating_sub(1) {
+            if i < rects.len() {
+                let pos = if is_horizontal {
+                    rects[i].x + rects[i].width
+                } else {
+                    rects[i].y + rects[i].height
+                };
+                out.push((path.clone(), kind.clone(), i, pos, total_px, effective_sizes.clone(), area));
+            }
+        }
+        for (i, child) in children.iter().enumerate() {
+            if i < rects.len() {
+                path.push(i);
+                collect_layout_borders(child, rects[i], path, out);
+                path.pop();
+            }
+        }
+    }
+}
+
 /// Check if any leaf in a LayoutJson subtree is the active pane.
 /// Compute the rectangle of the active pane by searching the LayoutJson tree.
 fn compute_active_rect_json(node: &LayoutJson, area: Rect) -> Option<Rect> {
@@ -219,6 +279,16 @@ fn compute_active_rect_json(node: &LayoutJson, area: Rect) -> Option<Rect> {
             None
         }
     }
+}
+
+/// Client-side border drag state — tracks an in-progress separator resize.
+struct ClientDragState {
+    path: Vec<usize>,
+    kind: String,
+    index: usize,
+    start_pos: u16,
+    initial_sizes: Vec<u16>,
+    total_pixels: u16,
 }
 
 pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::PsmuxWriter>>, input: &crate::ssh_input::InputSource) -> io::Result<()> {
@@ -337,6 +407,7 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
     let mut custom_status_right: Option<String> = None;
     let mut pane_border_fg: Color = Color::DarkGray;
     let mut pane_active_border_fg: Color = Color::Green;
+    let mut pane_border_hover_fg: Color = Color::Yellow;
     let mut win_status_fmt: String = "#I:#W#{?window_flags,#{window_flags}, }".to_string();
     let mut win_status_current_fmt: String = "#I:#W#{?window_flags,#{window_flags}, }".to_string();
     let mut win_status_sep: String = " ".to_string();
@@ -508,6 +579,8 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
         pane_border_style: Option<String>,
         #[serde(default)]
         pane_active_border_style: Option<String>,
+        #[serde(default)]
+        pane_border_hover_style: Option<String>,
         /// window-status-format (short key to save bandwidth)
         #[serde(default)]
         wsf: Option<String>,
@@ -655,6 +728,20 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
     let mut rsel_dragged = false;
     let mut selection_changed = false; // forces redraw for selection overlay
     let mut border_drag = false; // true when dragging a pane separator (resize)
+    // Client-side tab position tracking for accurate mouse click detection.
+    // The server's update_tab_positions() uses a different algorithm than what
+    // the client actually renders, so we track positions at render time.
+    let mut client_tab_positions: Vec<(usize, u16, u16)> = Vec::new(); // (window_array_idx, x_start, x_end)
+    let mut client_status_row: u16 = u16::MAX; // row where status bar tabs are rendered
+    let mut client_base_index: usize = 0; // base-index for window numbering
+    let mut client_pane_rects: Vec<(usize, Rect)> = Vec::new();
+    let mut client_borders: Vec<(Vec<usize>, String, usize, u16, u16, Vec<u16>, Rect)> = Vec::new();
+    let mut client_content_area: Rect = Rect::default();
+    let mut client_copy_mode: bool = false;
+    let mut client_zoomed: bool = false;
+    let mut client_drag: Option<ClientDragState> = None;
+    // Border hover highlight: (position, kind, area) of the border under the cursor.
+    let mut hovered_border: Option<(u16, String, Rect)> = None;
     // Buffered OSC 52 clipboard text — written AFTER terminal.draw() to
     // avoid corrupting ratatui's output buffer.
     let mut pending_osc52: Option<String> = None;
@@ -1791,45 +1878,80 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                         use crossterm::event::{MouseEventKind, MouseButton};
                         match me.kind {
                             MouseEventKind::Down(MouseButton::Left) => {
-                                // Check if server-side copy mode is active
-                                let server_copy = if !prev_dump_buf.is_empty() {
-                                    serde_json::from_str::<DumpState>(&prev_dump_buf)
-                                        .map(|s| active_pane_in_copy_mode(&s.layout))
-                                        .unwrap_or(false)
-                                } else { false };
-
-                                // Detect if click is on a separator line (for border resize)
-                                // Skip when zoomed — no borders to drag (#82)
-                                let on_sep = if !prev_dump_buf.is_empty() {
-                                    if let Ok(state) = serde_json::from_str::<DumpState>(&prev_dump_buf) {
-                                        if state.zoomed { false } else {
-                                            let content_area = Rect { x: 0, y: 0, width: last_sent_size.0, height: last_sent_size.1 };
-                                            is_on_separator(&state.layout, content_area, me.column, me.row)
+                                // Status bar tab click
+                                if me.row == client_status_row {
+                                    let mut clicked_tab: Option<usize> = None;
+                                    for &(win_idx, x_start, x_end) in &client_tab_positions {
+                                        if me.column >= x_start && me.column < x_end {
+                                            clicked_tab = Some(win_idx);
+                                            break;
                                         }
-                                    } else { false }
-                                } else { false };
-
-                                // Always forward to server for pane focus, tab clicks, border resize, copy-mode cursor positioning
-                                cmd_batch.push(format!("mouse-down {} {}\n", me.column, me.row));
-
-                                if server_copy {
-                                    // Server handles copy-mode selection — suppress client-side selection
-                                    rsel_start = None;
-                                    rsel_end = None;
-                                    selection_changed = true;
-                                } else if on_sep {
-                                    // Border resize mode — server handles drag
-                                    border_drag = true;
-                                    rsel_start = None;
-                                    rsel_end = None;
-                                    selection_changed = true;
+                                    }
+                                    if let Some(idx) = clicked_tab {
+                                        let display_idx = idx + client_base_index;
+                                        cmd_batch.push(format!("select-window -t :{}\n", display_idx));
+                                    }
                                 } else {
-                                    // Text selection mode
-                                    border_drag = false;
-                                    rsel_start = Some((me.column, me.row));
-                                    rsel_end = Some((me.column, me.row));
-                                    rsel_dragged = false;
-                                    selection_changed = true;
+                                    // Border detection
+                                    let mut on_border = false;
+                                    if !client_zoomed {
+                                        let tol = 0u16;
+                                        for (bpath, bkind, bidx, bpos, btotal, bsizes, barea) in &client_borders {
+                                            let hit = if bkind == "Horizontal" {
+                                                me.column >= bpos.saturating_sub(tol) && me.column <= bpos + tol
+                                                && me.row >= barea.y && me.row < barea.y + barea.height
+                                            } else {
+                                                me.row >= bpos.saturating_sub(tol) && me.row <= bpos + tol
+                                                && me.column >= barea.x && me.column < barea.x + barea.width
+                                            };
+                                            if hit {
+                                                client_drag = Some(ClientDragState {
+                                                    path: bpath.clone(),
+                                                    kind: bkind.clone(),
+                                                    index: *bidx,
+                                                    start_pos: if bkind == "Horizontal" { me.column } else { me.row },
+                                                    initial_sizes: bsizes.clone(),
+                                                    total_pixels: *btotal,
+                                                });
+                                                border_drag = true;
+                                                on_border = true;
+                                                rsel_start = None;
+                                                rsel_end = None;
+                                                selection_changed = true;
+                                                break;
+                                            }
+                                        }
+                                    }
+
+                                    if !on_border {
+                                        let clicked_pane = client_pane_rects.iter().find(|(_, rect)| {
+                                            rect.contains(ratatui::layout::Position { x: me.column, y: me.row })
+                                        });
+
+                                        if let Some(&(pane_id, pane_rect)) = clicked_pane {
+                                            cmd_batch.push(format!("select-pane -t %{}\n", pane_id));
+                                            let rel_col = me.column as i16 - pane_rect.x as i16;
+                                            let rel_row = me.row as i16 - pane_rect.y as i16;
+
+                                            if client_copy_mode {
+                                                cmd_batch.push(format!("pane-mouse {} 0 {} {} M\n",
+                                                    pane_id, rel_col, rel_row));
+                                                rsel_start = None;
+                                                rsel_end = None;
+                                                selection_changed = true;
+                                            } else {
+                                                cmd_batch.push(format!("pane-mouse {} 0 {} {} M\n",
+                                                    pane_id, rel_col, rel_row));
+                                                border_drag = false;
+                                                rsel_start = Some((me.column, me.row));
+                                                rsel_end = Some((me.column, me.row));
+                                                rsel_dragged = false;
+                                                selection_changed = true;
+                                            }
+                                        } else {
+                                            cmd_batch.push(format!("mouse-down {} {}\n", me.column, me.row));
+                                        }
+                                    }
                                 }
                             }
                             MouseEventKind::Down(MouseButton::Right) => {
@@ -1843,9 +1965,15 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                                 } else { false };
 
                                 if tui_active {
-                                    // Forward right-click to server → inject_mouse_combined
-                                    // handles Win32 MOUSE_EVENT injection to ConPTY.
-                                    cmd_batch.push(format!("mouse-down-right {} {}\n", me.column, me.row));
+                                    // Forward right-click as pane-relative mouse event
+                                    if let Some(&(pane_id, pane_rect)) = client_pane_rects.iter().find(|(_, r)| {
+                                        r.contains(ratatui::layout::Position { x: me.column, y: me.row })
+                                    }) {
+                                        let rel_col = me.column as i16 - pane_rect.x as i16;
+                                        let rel_row = me.row as i16 - pane_rect.y as i16;
+                                        cmd_batch.push(format!("pane-mouse {} 2 {} {} M\n",
+                                            pane_id, rel_col, rel_row));
+                                    }
                                     rsel_start = None;
                                     rsel_end = None;
                                     selection_changed = true;
@@ -1885,17 +2013,53 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                                     }
                                 }
                             }
-                            MouseEventKind::Down(MouseButton::Middle) => { cmd_batch.push(format!("mouse-down-middle {} {}\n", me.column, me.row)); }
+                            MouseEventKind::Down(MouseButton::Middle) => {
+                                if let Some(&(pane_id, pane_rect)) = client_pane_rects.iter().find(|(_, r)| {
+                                    r.contains(ratatui::layout::Position { x: me.column, y: me.row })
+                                }) {
+                                    let rel_col = me.column as i16 - pane_rect.x as i16;
+                                    let rel_row = me.row as i16 - pane_rect.y as i16;
+                                    cmd_batch.push(format!("pane-mouse {} 1 {} {} M\n",
+                                        pane_id, rel_col, rel_row));
+                                } else {
+                                    cmd_batch.push(format!("mouse-down-middle {} {}\n", me.column, me.row));
+                                }
+                            }
                             MouseEventKind::Drag(MouseButton::Left) => {
                                 if border_drag {
-                                    // Forward drag to server for border resize
-                                    cmd_batch.push(format!("mouse-drag {} {}\n", me.column, me.row));
+                                    if let Some(ref d) = client_drag {
+                                        let current_pos = if d.kind == "Horizontal" { me.column } else { me.row };
+                                        let pixel_delta = current_pos as i32 - d.start_pos as i32;
+                                        let total_pct: i32 = d.initial_sizes.iter().map(|&s| s as i32).sum();
+                                        let total_px = d.total_pixels.max(1) as i32;
+                                        let pct_delta = (pixel_delta * total_pct) / total_px;
+                                        let min_pct = 5i32;
+
+                                        let mut new_sizes = d.initial_sizes.clone();
+                                        let left = (d.initial_sizes[d.index] as i32 + pct_delta)
+                                            .clamp(min_pct, d.initial_sizes[d.index] as i32 + d.initial_sizes[d.index + 1] as i32 - min_pct) as u16;
+                                        let right = d.initial_sizes[d.index] + d.initial_sizes[d.index + 1] - left;
+                                        new_sizes[d.index] = left;
+                                        new_sizes[d.index + 1] = right;
+
+                                        let path_str = if d.path.is_empty() { "_".to_string() } else { d.path.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(".") };
+                                        let sizes_str = new_sizes.iter().map(|s| s.to_string()).collect::<Vec<_>>().join(",");
+                                        cmd_batch.push(format!("split-sizes {} {}\n", path_str, sizes_str));
+                                    }
                                 } else if rsel_start.is_none() {
-                                    // No client selection in progress (copy mode or suppressed)
-                                    // — forward to server for copy-mode drag selection
-                                    cmd_batch.push(format!("mouse-drag {} {}\n", me.column, me.row));
+                                    if client_copy_mode {
+                                        if let Some(&(pane_id, pane_rect)) = client_pane_rects.iter().find(|(_, r)| {
+                                            r.contains(ratatui::layout::Position { x: me.column, y: me.row })
+                                        }) {
+                                            let rel_col = me.column as i16 - pane_rect.x as i16;
+                                            let rel_row = me.row as i16 - pane_rect.y as i16;
+                                            cmd_batch.push(format!("pane-mouse {} 32 {} {} M\n",
+                                                pane_id, rel_col, rel_row));
+                                        }
+                                    } else {
+                                        cmd_batch.push(format!("mouse-drag {} {}\n", me.column, me.row));
+                                    }
                                 } else {
-                                    // Left-drag: extend text selection (pwsh behavior)
                                     if rsel_start.is_some() {
                                         rsel_end = Some((me.column, me.row));
                                         rsel_dragged = true;
@@ -1906,11 +2070,10 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                             MouseEventKind::Drag(MouseButton::Right) => {}
                             MouseEventKind::Up(MouseButton::Left) => {
                                 if border_drag {
-                                    // Forward mouse-up to server to finalize border resize
-                                    cmd_batch.push(format!("mouse-up {} {}\n", me.column, me.row));
+                                    cmd_batch.push(format!("split-resize-done\n"));
                                     border_drag = false;
+                                    client_drag = None;
                                 } else if rsel_dragged {
-                                    // Left-drag completed — copy selected text to clipboard
                                     rsel_end = Some((me.column, me.row));
                                     if let (Some(s), Some(e)) = (rsel_start, rsel_end) {
                                         if let Ok(state) = serde_json::from_str::<DumpState>(&prev_dump_buf) {
@@ -1926,49 +2089,90 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                                             }
                                         }
                                     }
-                                    // Keep selection visible (clears on next click or Escape)
+                                    rsel_start = None;
+                                    rsel_end = None;
+                                    rsel_dragged = false;
+                                    selection_changed = true;
                                 } else {
-                                    // Plain left-click (no drag) — clear any old selection, forward mouse-up
                                     rsel_start = None;
                                     rsel_end = None;
                                     selection_changed = true;
-                                    // Always forward to server (finalises copy-mode click)
-                                    cmd_batch.push(format!("mouse-up {} {}\n", me.column, me.row));
+                                    if client_copy_mode {
+                                        if let Some(&(pane_id, pane_rect)) = client_pane_rects.iter().find(|(_, r)| {
+                                            r.contains(ratatui::layout::Position { x: me.column, y: me.row })
+                                        }) {
+                                            let rel_col = me.column as i16 - pane_rect.x as i16;
+                                            let rel_row = me.row as i16 - pane_rect.y as i16;
+                                            cmd_batch.push(format!("pane-mouse {} 0 {} {} m\n",
+                                                pane_id, rel_col, rel_row));
+                                        }
+                                    } else {
+                                        cmd_batch.push(format!("mouse-up {} {}\n", me.column, me.row));
+                                    }
                                 }
                             }
                             MouseEventKind::Up(MouseButton::Right) => {}
                             MouseEventKind::Up(MouseButton::Middle) => {}
                             MouseEventKind::Moved => {
-                                // Forward bare mouse motion (hover) to server unconditionally.
-                                // SGR button 35 (bare motion) is harmless to shells —
-                                // PSReadLine ignores bare motion MOUSE_EVENT records, and
-                                // ReadFile-based apps (opencode) receive no data when
-                                // ENABLE_VIRTUAL_TERMINAL_INPUT is not set.
-                                // Same-coordinate dedup on the server prevents flooding.
-                                cmd_batch.push(format!("mouse-move {} {}\n", me.column, me.row));
+                                // Detect border hover for visual preview
+                                let mut new_hover: Option<(u16, String, Rect)> = None;
+                                if !client_zoomed {
+                                    let tol = 0u16;
+                                    for (_, bkind, _, bpos, _, _, barea) in &client_borders {
+                                        let hit = if bkind == "Horizontal" {
+                                            me.column >= bpos.saturating_sub(tol) && me.column <= bpos + tol
+                                            && me.row >= barea.y && me.row < barea.y + barea.height
+                                        } else {
+                                            me.row >= bpos.saturating_sub(tol) && me.row <= bpos + tol
+                                            && me.column >= barea.x && me.column < barea.x + barea.width
+                                        };
+                                        if hit {
+                                            new_hover = Some((*bpos, bkind.clone(), *barea));
+                                            break;
+                                        }
+                                    }
+                                }
+                                if new_hover != hovered_border {
+                                    hovered_border = new_hover;
+                                    selection_changed = true; // trigger redraw
+                                }
+                                // Forward hover to PTY
+                                if let Some(&(pane_id, pane_rect)) = client_pane_rects.iter().find(|(_, r)| {
+                                    r.contains(ratatui::layout::Position { x: me.column, y: me.row })
+                                }) {
+                                    let rel_col = me.column as i16 - pane_rect.x as i16;
+                                    let rel_row = me.row as i16 - pane_rect.y as i16;
+                                    cmd_batch.push(format!("pane-mouse {} 35 {} {} M\n",
+                                        pane_id, rel_col, rel_row));
+                                } else {
+                                    cmd_batch.push(format!("mouse-move {} {}\n", me.column, me.row));
+                                }
                             }
                             MouseEventKind::ScrollUp => {
-                                // Clear client-side selection when scrolling — server may
-                                // enter copy mode, and the blue overlay would hide it.
-                                crate::debug_log::client_log("scroll", &format!(
-                                    "ScrollUp col={} row={} rsel_start={:?} rsel_end={:?} rsel_dragged={}",
-                                    me.column, me.row, rsel_start, rsel_end, rsel_dragged));
-                                if rsel_start.is_some() {
-                                    rsel_start = None;
-                                    rsel_end = None;
-                                    rsel_dragged = false;
-                                    selection_changed = true;
+                                rsel_start = None;
+                                rsel_end = None;
+                                rsel_dragged = false;
+                                selection_changed = true;
+                                if let Some(&(pane_id, _)) = client_pane_rects.iter().find(|(_, r)| {
+                                    r.contains(ratatui::layout::Position { x: me.column, y: me.row })
+                                }) {
+                                    cmd_batch.push(format!("pane-scroll {} up\n", pane_id));
+                                } else {
+                                    cmd_batch.push(format!("scroll-up {} {}\n", me.column, me.row));
                                 }
-                                cmd_batch.push(format!("scroll-up {} {}\n", me.column, me.row));
                             }
                             MouseEventKind::ScrollDown => {
-                                if rsel_start.is_some() {
-                                    rsel_start = None;
-                                    rsel_end = None;
-                                    rsel_dragged = false;
-                                    selection_changed = true;
+                                rsel_start = None;
+                                rsel_end = None;
+                                rsel_dragged = false;
+                                selection_changed = true;
+                                if let Some(&(pane_id, _)) = client_pane_rects.iter().find(|(_, r)| {
+                                    r.contains(ratatui::layout::Position { x: me.column, y: me.row })
+                                }) {
+                                    cmd_batch.push(format!("pane-scroll {} down\n", pane_id));
+                                } else {
+                                    cmd_batch.push(format!("scroll-down {} {}\n", me.column, me.row));
                                 }
-                                cmd_batch.push(format!("scroll-down {} {}\n", me.column, me.row));
                             }
                             _ => {}
                         }
@@ -2119,6 +2323,9 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
         let windows = state.windows;
         last_tree = state.tree;
         let base_index = state.base_index;
+        client_base_index = base_index;
+        client_copy_mode = active_pane_in_copy_mode(&root);
+        client_zoomed = state.zoomed;
         let dim_preds = state.prediction_dimming;
         clock_active = state.clock_mode;
         clock_colour_str = state.clock_colour;
@@ -2285,6 +2492,12 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                 if let Some(c) = fg { pane_active_border_fg = c; }
             }
         }
+        if let Some(ref pbhs) = state.pane_border_hover_style {
+            if !pbhs.is_empty() {
+                let (fg, _bg, _bold) = parse_tmux_style_components(pbhs);
+                if let Some(c) = fg { pane_border_hover_fg = c; }
+            }
+        }
         // Update window-status-format strings
         if let Some(ref f) = state.wsf { if !f.is_empty() { win_status_fmt = f.clone(); } }
         if let Some(ref f) = state.wscf { if !f.is_empty() { win_status_current_fmt = f.clone(); } }
@@ -2333,6 +2546,13 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
             } else {
                 (chunks[0], chunks[1])
             };
+
+            client_content_area = content_chunk;
+            client_pane_rects.clear();
+            collect_pane_rects(&root, content_chunk, &mut client_pane_rects);
+            client_borders.clear();
+            let mut border_path = Vec::new();
+            collect_layout_borders(&root, content_chunk, &mut border_path, &mut client_borders);
 
             /// Render a large ASCII clock overlay (tmux clock-mode)
             fn render_clock_overlay(f: &mut Frame, area: Rect, colour: Color) {
@@ -2733,6 +2953,62 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
             let clock_col = clock_colour_str.as_deref().map(|s| map_color(s)).unwrap_or(Color::Cyan);
             render_json(f, &root, content_chunk, dim_preds, pane_border_fg, pane_active_border_fg, clock_active, clock_col, active_rect, &mode_style_str, state.zoomed);
             fix_border_intersections(f.buffer_mut());
+            // Re-color all border characters based on adjacency to the active pane.
+            // render_json and fix_border_intersections can leave inconsistent styles
+            // at intersections and along edges shared by nested splits.
+            if let Some(ar) = active_rect {
+                let buf = f.buffer_mut();
+                let w = buf.area.width as usize;
+                let h = buf.area.height as usize;
+                let border_style = Style::default().fg(pane_border_fg);
+                let active_style = Style::default().fg(pane_active_border_fg);
+                for row in 0..h {
+                    for col in 0..w {
+                        let idx = row * w + col;
+                        if idx >= buf.content.len() { continue; }
+                        let ch = buf.content[idx].symbol().chars().next().unwrap_or(' ');
+                        if !matches!(ch, '│' | '─' | '┼' | '├' | '┤' | '┬' | '┴') { continue; }
+                        let x = buf.area.x + col as u16;
+                        let y = buf.area.y + row as u16;
+                        let adj = (x + 1 == ar.x && y >= ar.y && y < ar.y + ar.height)
+                            || (x == ar.x + ar.width && y >= ar.y && y < ar.y + ar.height)
+                            || (y + 1 == ar.y && x >= ar.x && x < ar.x + ar.width)
+                            || (y == ar.y + ar.height && x >= ar.x && x < ar.x + ar.width)
+                            || ((x + 1 == ar.x || x == ar.x + ar.width) && (y + 1 == ar.y || y == ar.y + ar.height));
+                        buf.content[idx].set_style(if adj { active_style } else { border_style });
+                    }
+                }
+            }
+
+            // Highlight the border under the cursor to preview what a drag would move.
+            if let Some((hpos, ref hkind, harea)) = hovered_border {
+                let buf = f.buffer_mut();
+                let w = buf.area.width as usize;
+                let hover_style = Style::default().fg(pane_border_hover_fg);
+                if hkind == "Horizontal" {
+                    // Vertical separator line at column hpos, spanning harea's height
+                    let col = hpos as usize;
+                    if col >= buf.area.x as usize && col < (buf.area.x + buf.area.width) as usize {
+                        for y in harea.y..harea.y + harea.height {
+                            let idx = (y - buf.area.y) as usize * w + (col - buf.area.x as usize);
+                            if idx < buf.content.len() {
+                                buf.content[idx].set_style(hover_style);
+                            }
+                        }
+                    }
+                } else {
+                    // Horizontal separator line at row hpos, spanning harea's width
+                    let row = hpos as usize;
+                    if row >= buf.area.y as usize && row < (buf.area.y + buf.area.height) as usize {
+                        for x in harea.x..harea.x + harea.width {
+                            let idx = (row - buf.area.y as usize) * w + (x - buf.area.x) as usize;
+                            if idx < buf.content.len() {
+                                buf.content[idx].set_style(hover_style);
+                            }
+                        }
+                    }
+                }
+            }
 
             // ── Left-click drag text selection overlay ────────────────
             // Suppress the client-side blue selection overlay when the
@@ -2893,6 +3169,8 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
 
             // Window tabs (the window list)
             let mut tab_spans_all: Vec<Span> = Vec::new();
+            let mut tab_rel_positions: Vec<(usize, u16, u16)> = Vec::new();
+            let mut tab_cursor: u16 = 0;
             for (i, w) in windows.iter().enumerate() {
                 let tab_text = if !w.tab_text.is_empty() {
                     w.tab_text.clone()
@@ -2906,7 +3184,9 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                 if i > 0 {
                     // Parse inline styles in separator (e.g. "#[fg=#44475a]|")
                     let sep_spans = crate::rendering::parse_inline_styles(&win_status_sep, sb_base);
+                    let sep_w: u16 = sep_spans.iter().map(|s| UnicodeWidthStr::width(s.content.as_ref()) as u16).sum();
                     tab_spans_all.extend(sep_spans);
+                    tab_cursor += sep_w;
                 }
                 let fallback_style = if w.active {
                     if let Some((fg, bg, bold)) = win_status_current_style {
@@ -2935,6 +3215,10 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                     }
                 };
                 let parsed = crate::rendering::parse_inline_styles(&tab_text, fallback_style);
+                let tab_start = tab_cursor;
+                let tab_w: u16 = parsed.iter().map(|s| UnicodeWidthStr::width(s.content.as_ref()) as u16).sum();
+                tab_cursor += tab_w;
+                tab_rel_positions.push((i, tab_start, tab_cursor));
                 tab_spans_all.extend(parsed);
             }
 
@@ -3002,6 +3286,26 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                     status_spans.extend(right_spans);
                 }
             }
+            // Compute absolute tab positions based on status-justify layout
+            let tabs_x_offset: u16 = status_chunk.x + match status_justify_str.as_str() {
+                "centre" | "center" => {
+                    let avail = total_width.saturating_sub(left_w).saturating_sub(right_w);
+                    let pad_before = avail.saturating_sub(tabs_w) / 2;
+                    (left_w + pad_before) as u16
+                }
+                "absolute-centre" | "absolute-center" => {
+                    let tabs_start = total_width.saturating_sub(tabs_w) / 2;
+                    tabs_start as u16
+                }
+                "right" => {
+                    let used = left_w + tabs_w + right_w;
+                    let pad = total_width.saturating_sub(used);
+                    (left_w + pad) as u16
+                }
+                _ => left_w as u16, // "left" default
+            };
+            client_tab_positions = tab_rel_positions.iter().map(|&(idx, s, e)| (idx, s + tabs_x_offset, e + tabs_x_offset)).collect();
+            client_status_row = status_chunk.y;
             // Truncate overall status line to fit the available width
             crate::style::truncate_spans_to_width(&mut status_spans, total_width);
             // If a display-message is active, show it on the status bar

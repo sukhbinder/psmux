@@ -34,7 +34,8 @@ use crate::layout::{dump_layout_json, dump_layout_json_fast, apply_layout, cycle
 use crate::window_ops::{toggle_zoom, remote_mouse_down, remote_mouse_drag, remote_mouse_up,
     remote_mouse_button, remote_mouse_motion, remote_scroll_up, remote_scroll_down,
     swap_pane, break_pane_to_window, unzoom_if_zoomed, resize_pane_vertical,
-    resize_pane_horizontal, resize_pane_absolute, rotate_panes, respawn_active_pane};
+    resize_pane_horizontal, resize_pane_absolute, rotate_panes, respawn_active_pane,
+    handle_pane_mouse, handle_pane_scroll, handle_split_set_sizes, handle_split_resize_done};
 use crate::config::{load_config, parse_key_string, format_key_binding, normalize_key_for_binding,
     parse_config_content};
 use crate::commands::{parse_command_to_action, format_action, parse_menu_definition, execute_command_string};
@@ -1166,6 +1167,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     let sr_expanded = json_escape_string(&expand_format(&app.status_right, &app));
                     let pbs_escaped = json_escape_string(&app.pane_border_style);
                     let pabs_escaped = json_escape_string(&app.pane_active_border_style);
+                    let pbhs_escaped = json_escape_string(&app.pane_border_hover_style);
                     let wsf_escaped = json_escape_string(&app.window_status_format);
                     let wscf_escaped = json_escape_string(&app.window_status_current_format);
                     let wss_escaped = json_escape_string(&app.window_status_separator);
@@ -1188,8 +1190,8 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     };
                     let cursor_style_code = crate::rendering::configured_cursor_code();
                     let _ = std::fmt::Write::write_fmt(&mut combined_buf, format_args!(
-                        "{{\"layout\":{},\"windows\":{},\"prefix\":\"{}\",\"prefix2\":\"{}\",\"tree\":{},\"base_index\":{},\"prediction_dimming\":{},\"status_style\":\"{}\",\"status_left\":\"{}\",\"status_right\":\"{}\",\"pane_border_style\":\"{}\",\"pane_active_border_style\":\"{}\",\"wsf\":\"{}\",\"wscf\":\"{}\",\"wss\":\"{}\",\"ws_style\":\"{}\",\"wsc_style\":\"{}\",\"clock_mode\":{},\"bindings\":{},\"status_left_length\":{},\"status_right_length\":{},\"status_lines\":{},\"status_format\":{},\"mode_style\":\"{}\",\"status_position\":\"{}\",\"status_justify\":\"{}\",\"cursor_style_code\":{},\"status_visible\":{},\"repeat_time\":{},\"zoomed\":{}}}",
-                        layout_json, cached_windows_json, cached_prefix_str, cached_prefix2_str, cached_tree_json, cached_base_index, cached_pred_dim, ss_escaped, sl_expanded, sr_expanded, pbs_escaped, pabs_escaped, wsf_escaped, wscf_escaped, wss_escaped, ws_style_escaped, wsc_style_escaped,
+                        "{{\"layout\":{},\"windows\":{},\"prefix\":\"{}\",\"prefix2\":\"{}\",\"tree\":{},\"base_index\":{},\"prediction_dimming\":{},\"status_style\":\"{}\",\"status_left\":\"{}\",\"status_right\":\"{}\",\"pane_border_style\":\"{}\",\"pane_active_border_style\":\"{}\",\"pane_border_hover_style\":\"{}\",\"wsf\":\"{}\",\"wscf\":\"{}\",\"wss\":\"{}\",\"ws_style\":\"{}\",\"wsc_style\":\"{}\",\"clock_mode\":{},\"bindings\":{},\"status_left_length\":{},\"status_right_length\":{},\"status_lines\":{},\"status_format\":{},\"mode_style\":\"{}\",\"status_position\":\"{}\",\"status_justify\":\"{}\",\"cursor_style_code\":{},\"status_visible\":{},\"repeat_time\":{},\"zoomed\":{}}}",
+                        layout_json, cached_windows_json, cached_prefix_str, cached_prefix2_str, cached_tree_json, cached_base_index, cached_pred_dim, ss_escaped, sl_expanded, sr_expanded, pbs_escaped, pabs_escaped, pbhs_escaped, wsf_escaped, wscf_escaped, wss_escaped, ws_style_escaped, wsc_style_escaped,
                         matches!(app.mode, Mode::ClockMode), cached_bindings_json,
                         app.status_left_length, app.status_right_length, app.status_lines, status_format_json,
                         mode_style_escaped, status_position_escaped, status_justify_escaped,
@@ -1338,6 +1340,10 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 CtrlReq::MouseMove(cid,x,y) => { if app.mouse_enabled { app.latest_client_id = Some(cid); remote_mouse_motion(&mut app, x, y); state_dirty = true; echo_pending_until = Some(Instant::now()); } }
                 CtrlReq::ScrollUp(cid, x, y) => { if app.mouse_enabled { app.latest_client_id = Some(cid); remote_scroll_up(&mut app, x, y); state_dirty = true; echo_pending_until = Some(Instant::now()); } }
                 CtrlReq::ScrollDown(cid, x, y) => { if app.mouse_enabled { app.latest_client_id = Some(cid); remote_scroll_down(&mut app, x, y); state_dirty = true; echo_pending_until = Some(Instant::now()); } }
+                CtrlReq::PaneMouse(cid, pane_id, button, col, row, press) => { if app.mouse_enabled { app.latest_client_id = Some(cid); handle_pane_mouse(&mut app, pane_id, button, col, row, press); state_dirty = true; meta_dirty = true; echo_pending_until = Some(Instant::now()); } }
+                CtrlReq::PaneScroll(cid, pane_id, up) => { if app.mouse_enabled { app.latest_client_id = Some(cid); handle_pane_scroll(&mut app, pane_id, up); state_dirty = true; meta_dirty = true; echo_pending_until = Some(Instant::now()); } }
+                CtrlReq::SplitSetSizes(cid, path, sizes) => { if app.mouse_enabled { app.latest_client_id = Some(cid); handle_split_set_sizes(&mut app, &path, &sizes); state_dirty = true; meta_dirty = true; echo_pending_until = Some(Instant::now()); } }
+                CtrlReq::SplitResizeDone(cid) => { if app.mouse_enabled { app.latest_client_id = Some(cid); handle_split_resize_done(&mut app); state_dirty = true; meta_dirty = true; } }
                 CtrlReq::NextWindow => {
                     if let Some(cmds) = app.hooks.get("before-select-window") { let cmds = cmds.clone(); for cmd in &cmds { let _ = execute_command_string(&mut app, cmd); } }
                     if !app.windows.is_empty() { switch_with_copy_save(&mut app, |app| { app.last_window_idx = app.active_idx; app.active_idx = (app.active_idx + 1) % app.windows.len(); }); resize_all_panes(&mut app); } meta_dirty = true; hook_event = Some("after-select-window");
@@ -2365,6 +2371,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                             "automatic-rename" => { app.automatic_rename = true; }
                             "pane-border-style" => { app.pane_border_style = String::new(); }
                             "pane-active-border-style" => { app.pane_active_border_style = "fg=green".to_string(); }
+                            "pane-border-hover-style" => { app.pane_border_hover_style = "fg=yellow".to_string(); }
                             "window-status-format" => { app.window_status_format = "#I:#W#{?window_flags,#{window_flags}, }".to_string(); }
                             "window-status-current-format" => { app.window_status_current_format = "#I:#W#{?window_flags,#{window_flags}, }".to_string(); }
                             "window-status-separator" => { app.window_status_separator = " ".to_string(); }
@@ -2386,6 +2393,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                             "status-style" => { app.status_style.push_str(&value); }
                             "pane-border-style" => { app.pane_border_style.push_str(&value); }
                             "pane-active-border-style" => { app.pane_active_border_style.push_str(&value); }
+                            "pane-border-hover-style" => { app.pane_border_hover_style.push_str(&value); }
                             "window-status-format" => { app.window_status_format.push_str(&value); }
                             "window-status-current-format" => { app.window_status_current_format.push_str(&value); }
                             _ => {}
@@ -2438,6 +2446,9 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     }
                     if !app.pane_active_border_style.is_empty() {
                         output.push_str(&format!("pane-active-border-style \"{}\"\n", app.pane_active_border_style));
+                    }
+                    if !app.pane_border_hover_style.is_empty() {
+                        output.push_str(&format!("pane-border-hover-style \"{}\"\n", app.pane_border_hover_style));
                     }
                     if !app.status_style.is_empty() {
                         output.push_str(&format!("status-style \"{}\"\n", app.status_style));
@@ -3585,6 +3596,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
             let sr_expanded = json_escape_string(&expand_format(&app.status_right, &app));
             let pbs_escaped = json_escape_string(&app.pane_border_style);
             let pabs_escaped = json_escape_string(&app.pane_active_border_style);
+            let pbhs_escaped = json_escape_string(&app.pane_border_hover_style);
             let wsf_escaped = json_escape_string(&app.window_status_format);
             let wscf_escaped = json_escape_string(&app.window_status_current_format);
             let wss_escaped = json_escape_string(&app.window_status_separator);
@@ -3606,8 +3618,8 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
             };
             let cursor_style_code = crate::rendering::configured_cursor_code();
             let _ = std::fmt::Write::write_fmt(&mut combined_buf, format_args!(
-                "{{\"layout\":{},\"windows\":{},\"prefix\":\"{}\",\"prefix2\":\"{}\",\"tree\":{},\"base_index\":{},\"prediction_dimming\":{},\"status_style\":\"{}\",\"status_left\":\"{}\",\"status_right\":\"{}\",\"pane_border_style\":\"{}\",\"pane_active_border_style\":\"{}\",\"wsf\":\"{}\",\"wscf\":\"{}\",\"wss\":\"{}\",\"ws_style\":\"{}\",\"wsc_style\":\"{}\",\"clock_mode\":{},\"bindings\":{},\"status_left_length\":{},\"status_right_length\":{},\"status_lines\":{},\"status_format\":{},\"mode_style\":\"{}\",\"status_position\":\"{}\",\"status_justify\":\"{}\",\"cursor_style_code\":{},\"status_visible\":{},\"repeat_time\":{},\"zoomed\":{}}}",
-                layout_json, cached_windows_json, cached_prefix_str, cached_prefix2_str, cached_tree_json, cached_base_index, cached_pred_dim, ss_escaped, sl_expanded, sr_expanded, pbs_escaped, pabs_escaped, wsf_escaped, wscf_escaped, wss_escaped, ws_style_escaped, wsc_style_escaped,
+                "{{\"layout\":{},\"windows\":{},\"prefix\":\"{}\",\"prefix2\":\"{}\",\"tree\":{},\"base_index\":{},\"prediction_dimming\":{},\"status_style\":\"{}\",\"status_left\":\"{}\",\"status_right\":\"{}\",\"pane_border_style\":\"{}\",\"pane_active_border_style\":\"{}\",\"pane_border_hover_style\":\"{}\",\"wsf\":\"{}\",\"wscf\":\"{}\",\"wss\":\"{}\",\"ws_style\":\"{}\",\"wsc_style\":\"{}\",\"clock_mode\":{},\"bindings\":{},\"status_left_length\":{},\"status_right_length\":{},\"status_lines\":{},\"status_format\":{},\"mode_style\":\"{}\",\"status_position\":\"{}\",\"status_justify\":\"{}\",\"cursor_style_code\":{},\"status_visible\":{},\"repeat_time\":{},\"zoomed\":{}}}",
+                layout_json, cached_windows_json, cached_prefix_str, cached_prefix2_str, cached_tree_json, cached_base_index, cached_pred_dim, ss_escaped, sl_expanded, sr_expanded, pbs_escaped, pabs_escaped, pbhs_escaped, wsf_escaped, wscf_escaped, wss_escaped, ws_style_escaped, wsc_style_escaped,
                 matches!(app.mode, Mode::ClockMode), cached_bindings_json,
                 app.status_left_length, app.status_right_length, app.status_lines, status_format_json,
                 mode_style_escaped, status_position_escaped, status_justify_escaped,
