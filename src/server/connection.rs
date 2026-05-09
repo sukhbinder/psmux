@@ -334,10 +334,6 @@ if control_echo || control_noecho {
     let notif_thread = std::thread::spawn(move || {
         while let Ok(notif) = notif_rx.recv() {
             let is_exit = matches!(notif, ControlNotification::Exit { .. });
-            // Skip %exit here: the CLIENT writes %exit + ST to stdout
-            // (matching real tmux's client.c). The server just closes the
-            // TCP connection to signal exit.
-            if is_exit { break; }
             let formatted = control::format_notification(&notif);
             let mut ws = match ws_notif.lock() {
                 Ok(ws) => ws,
@@ -345,6 +341,11 @@ if control_echo || control_noecho {
             };
             if writeln!(ws, "{}", formatted).is_err() { break; }
             if ws.flush().is_err() { break; }
+            // Exit notification written — now signal the client to exit.
+            // Writing %exit through the DCS stream (before TCP close) lets
+            // iTerm2 receive it as a DCS message and close native windows
+            // immediately.  Then we break so the server can close the TCP.
+            if is_exit { break; }
         }
     });
 
