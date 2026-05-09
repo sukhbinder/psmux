@@ -4638,6 +4638,17 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 crate::commands::fire_hooks(&mut app, "pane-exited");
             }
             if app.exit_empty && all_empty {
+                // Notify CC clients that the session is ending so iTerm2
+                // closes the native window cleanly (same path as KillServer).
+                if !app.control_clients.is_empty() {
+                    control::emit_notification(
+                        &app,
+                        crate::types::ControlNotification::Exit { reason: None },
+                    );
+                    // Give notification threads time to flush %exit through
+                    // the DCS stream before we tear down the process.
+                    std::thread::sleep(std::time::Duration::from_millis(80));
+                }
                 let home = env::var("USERPROFILE").or_else(|_| env::var("HOME")).unwrap_or_default();
                 let regpath = format!("{}\\.psmux\\{}.port", home, app.port_file_base());
                 let keypath = format!("{}\\.psmux\\{}.key", home, app.port_file_base());
