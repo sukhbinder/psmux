@@ -193,38 +193,37 @@ pub(crate) fn is_fullscreen_tui(pane: &Pane) -> bool {
     false
 }
 
-/// Check if the child process in this pane has enabled mouse tracking
-/// (DECSET 1000/1002/1003) and therefore wants to receive scroll wheel events.
+/// Check if the child process in this pane wants to receive mouse events.
 ///
-/// This is the same logic tmux uses: if mouse_protocol_mode != None, the
-/// child app (vim, htop, less -R, etc.) handles mouse itself, so psmux
-/// forwards scroll events to it.  If None (shell prompt), psmux enters
-/// copy mode on scroll-up, matching tmux behavior with `set -g mouse on`.
+/// Uses a three-tier detection strategy:
 ///
-/// Note: ConPTY strips DECSET mouse mode escape sequences from the output
-/// stream, so for native Windows console apps `mouse_protocol_mode()` is
-/// always `None`.  This is correct: native Windows TUI apps receive mouse
-/// via Win32 MOUSE_EVENT injection (separate path), and shell prompts
-/// (PowerShell, cmd) don't want scroll events at all — scrollback is the
-/// right behavior.
+///   1. **mouse_protocol_mode** (DECSET 1000/1002/1003) — authoritative for
+///      VT bridge children (WSL, SSH) where escape sequences pass through.
+///   2. **alternate_screen** (DECSET 1049h) — works on Windows 11+ where
+///      ConPTY passes DECSET 1049h to the output stream.
+///   3. **is_fullscreen_tui heuristic** — fallback for older Windows 10
+///      builds where ConPTY strips both DECSET 1000 and DECSET 1049h.
+///      Detects fullscreen TUI apps (nvim, htop, vim) by checking that the
+///      last rows are filled and the cursor is near the bottom.
 ///
-/// For apps running through a VT bridge (WSL, SSH), the VT escape sequences
-/// DO pass through, so `mouse_protocol_mode()` correctly reflects the
-/// child's actual mouse tracking state.
+/// Without tier 3, native TUI apps on older Windows never receive mouse
+/// events because ConPTY makes both tier 1 and tier 2 return false.
+/// (fixes #285, regression from commit 719e604)
 pub(crate) fn pane_wants_mouse(pane: &Pane) -> bool {
     if let Ok(parser) = pane.term.lock() {
         let screen = parser.screen();
-        // Primary check (tmux parity): did the child enable mouse protocol?
+        // Tier 1: did the child enable mouse protocol? (VT bridge children)
         if screen.mouse_protocol_mode() != vt100::MouseProtocolMode::None {
             return true;
         }
-        // Secondary check: alternate screen active (ConPTY may strip DECSET
-        // 1000 but some builds pass DECSET 1049h through).
+        // Tier 2: alternate screen active (newer ConPTY passes DECSET 1049h)
         if screen.alternate_screen() {
             return true;
         }
     }
-    false
+    // Tier 3: heuristic for older ConPTY that strips DECSET 1049h —
+    // detect fullscreen TUI apps by screen content analysis.
+    is_fullscreen_tui(pane)
 }
 
 /// Detect whether a pane has a VT bridge descendant (wsl.exe, ssh.exe, etc.)
@@ -775,21 +774,18 @@ fn remote_scroll_wheel(app: &mut AppState, x: u16, y: u16, up: bool) {
         return;
     }
 
-    // Determine target pane, switch focus, and check if child is in alternate screen.
+    // Determine target pane, switch focus, and check if child is a TUI app
+    // that should receive scroll events.
     //
-    // IMPORTANT (tmux parity): For scroll events, we ONLY check alternate_screen()
-    // to decide whether to forward to the child or enter copy mode.
+    // Detection strategy (same as pane_wants_mouse, fixes #285):
+    //   1. alternate_screen() — authoritative on newer Windows 11+ ConPTY
+    //   2. is_fullscreen_tui() heuristic — fallback for older Windows 10
+    //      builds where ConPTY strips DECSET 1049h.
     //
-    // We do NOT use:
-    //   - pane_wants_mouse() / mouse_protocol_mode(): PSReadLine on ConPTY
-    //     spuriously enables AnyMotion mouse tracking.
-    //   - is_fullscreen_tui() heuristic: A shell prompt after `ls` / `dir` can
-    //     fill the last rows + leave the cursor at the bottom, causing a false
-    //     positive that prevents scroll-to-copy-mode.
-    //
-    // alternate_screen() is reliable: all modern TUI apps (nvim, htop, vim,
-    // opencode) correctly report alternate screen through ConPTY.  Testing
-    // confirms nvim shows alternate_on=1.  Shell prompts always show 0.
+    // Note: is_fullscreen_tui() may false-positive after `ls`/`dir` fills
+    // the screen (preventing scroll-to-copy-mode briefly), but this is far
+    // less harmful than completely breaking scroll in TUI apps like Neovim
+    // on older Windows.
     let (child_in_alt_screen, target_area_opt, sgr_btn, button_state) = {
         let win = &mut app.windows[app.active_idx];
         let mut rects: Vec<(Vec<usize>, Rect)> = Vec::new();
@@ -811,12 +807,7 @@ fn remote_scroll_wheel(app: &mut AppState, x: u16, y: u16, up: bool) {
         }
 
         let alt = active_pane(&win.root, &win.active_path)
-            .map_or(false, |p| {
-                if let Ok(parser) = p.term.lock() {
-                    return parser.screen().alternate_screen();
-                }
-                false
-            });
+            .map_or(false, |p| pane_wants_mouse(p));
         let sgr_btn: u8 = if up { 64 } else { 65 };
         let wheel_delta: i16 = if up { 120 } else { -120 };
         let bs = ((wheel_delta as i32) << 16) as u32;
@@ -971,11 +962,9 @@ pub fn handle_pane_scroll(app: &mut AppState, pane_id: usize, up: bool) {
         }
     }
 
-    // Check if target pane is in alternate screen (TUI app)
+    // Check if target pane is a TUI app (uses same heuristic as pane_wants_mouse, fixes #285)
     let alt = active_pane(&win.root, &win.active_path)
-        .map_or(false, |p| {
-            p.term.lock().ok().map_or(false, |t| t.screen().alternate_screen())
-        });
+        .map_or(false, |p| pane_wants_mouse(p));
 
     if alt {
         // Forward scroll to TUI app
