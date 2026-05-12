@@ -243,8 +243,13 @@ pub fn resize_all_panes(app: &mut AppState) {
     if app.windows.is_empty() { return; }
     let area = app.last_window_area;
     if area.width == 0 || area.height == 0 { return; }
+    // Reserve 1 row per leaf pane when pane-border-status is enabled (#288)
+    let border_status_rows: u16 = match app.user_options.get("pane-border-status").map(|s| s.as_str()) {
+        Some("top") | Some("bottom") => 1,
+        _ => 0,
+    };
     
-    fn resize_node(node: &mut Node, rects: &[(Vec<usize>, Rect)], path: &mut Vec<usize>) {
+    fn resize_node(node: &mut Node, rects: &[(Vec<usize>, Rect)], path: &mut Vec<usize>, border_rows: u16) {
         match node {
             Node::Leaf(pane) => {
                 if let Some((_, rect)) = rects.iter().find(|(p, _)| p == path) {
@@ -257,7 +262,7 @@ pub fn resize_all_panes(app: &mut AppState) {
                     }
                     // Clamp to MIN_PANE_DIM so ConPTY never receives a
                     // dimension small enough to crash the child process.
-                    let inner_height = rect.height.max(crate::pane::MIN_PANE_DIM);
+                    let inner_height = rect.height.saturating_sub(border_rows).max(crate::pane::MIN_PANE_DIM);
                     let inner_width = rect.width.max(crate::pane::MIN_PANE_DIM);
                     
                     if pane.last_rows != inner_height || pane.last_cols != inner_width {
@@ -278,7 +283,7 @@ pub fn resize_all_panes(app: &mut AppState) {
             Node::Split { children, .. } => {
                 for (i, child) in children.iter_mut().enumerate() {
                     path.push(i);
-                    resize_node(child, rects, path);
+                    resize_node(child, rects, path, border_rows);
                     path.pop();
                 }
             }
@@ -293,7 +298,7 @@ pub fn resize_all_panes(app: &mut AppState) {
         let mut rects: Vec<(Vec<usize>, Rect)> = Vec::new();
         compute_rects(&win.root, area, &mut rects);
         let mut path = Vec::new();
-        resize_node(&mut win.root, &rects, &mut path);
+        resize_node(&mut win.root, &rects, &mut path, border_status_rows);
     }
 }
 

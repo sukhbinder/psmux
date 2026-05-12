@@ -212,7 +212,18 @@ pub fn render_node(
     match node {
         Node::Leaf(pane) => {
             let is_active = *cur_path == *active_path;
-            let inner = area;
+            // When pane-border-status is enabled, reserve 1 row for the
+            // border label so it doesn't overlap pane content (#288).
+            let has_border_label = border_status != "off" && !border_format.is_empty() && area.height > 1;
+            let inner = if has_border_label {
+                if border_status == "top" {
+                    Rect::new(area.x, area.y + 1, area.width, area.height - 1)
+                } else {
+                    Rect::new(area.x, area.y, area.width, area.height - 1)
+                }
+            } else {
+                area
+            };
             let target_rows = inner.height.max(1);
             let target_cols = inner.width.max(1);
             if pane.last_rows != target_rows || pane.last_cols != target_cols {
@@ -306,7 +317,7 @@ pub fn render_node(
                 }
             }
             // Pane border format/status overlay
-            if border_status != "off" && !border_format.is_empty() && area.height > 1 {
+            if has_border_label {
                 let pane_label = border_format.replace("#{pane_index}", &pane_idx.to_string())
                     .replace("#P", &pane_idx.to_string())
                     .replace("#{pane_title}", &pane.title);

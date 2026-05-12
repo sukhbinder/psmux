@@ -215,6 +215,10 @@ fn drain_plugin_req(
                     *map = app.command_aliases.clone();
                 }
             }
+            // pane-border-status changes the effective content height (#288)
+            if option == "pane-border-status" {
+                resize_all_panes(app);
+            }
         }
         CtrlReq::SetOptionQuiet(option, value, quiet) => {
             apply_set_option(app, &option, &value, quiet);
@@ -223,6 +227,9 @@ fn drain_plugin_req(
                 if let Ok(mut map) = shared_aliases.write() {
                     *map = app.command_aliases.clone();
                 }
+            }
+            if option == "pane-border-status" {
+                resize_all_panes(app);
             }
         }
         CtrlReq::SetOptionAppend(option, value) => {
@@ -298,6 +305,8 @@ fn drain_plugin_req(
             app.key_tables.clear();
             crate::config::populate_default_bindings(app);
             crate::config::source_file(app, &path);
+            // source-file may change pane-border-status (#288)
+            resize_all_panes(app);
         }
         CtrlReq::UnbindAll => {
             app.key_tables.clear();
@@ -548,6 +557,8 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
 
     crate::config::populate_default_bindings(&mut app);
     load_config(&mut app);
+    // Config may set pane-border-status which changes content height (#288)
+    resize_all_panes(&mut app);
 
     // Execute queued plugin .ps1 scripts (e.g. theme plugins that use
     // PowerShell variables and call back to psmux via CLI).  We spawn
@@ -643,6 +654,9 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
         return Err(e);
     }
     if let Some(prev) = saved_dir { env::set_current_dir(prev).ok(); }
+    // Resize panes now that the initial window exists and config is loaded.
+    // pane-border-status needs 1 row per pane for the border label (#288).
+    resize_all_panes(&mut app);
     // Apply window name if specified via -n.  Setting `manual_rename = true`
     // is critical (issue #266) — it implicitly disables automatic-rename for
     // the initial window of a `new-session -n NAME`, matching tmux semantics
@@ -1567,12 +1581,19 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 CtrlReq::PrefixEnd => { app.client_prefix_active = false; state_dirty = true; }
                 CtrlReq::CopyEnter => { enter_copy_mode(&mut app); hook_event = Some("pane-mode-changed"); }
                 CtrlReq::CopyEnterPageUp => {
-                    enter_copy_mode(&mut app);
-                    let half = app.windows.get(app.active_idx)
-                        .and_then(|w| active_pane(&w.root, &w.active_path))
-                        .map(|p| p.last_rows as usize).unwrap_or(20);
-                    scroll_copy_up(&mut app, half);
-                    hook_event = Some("pane-mode-changed");
+                    if app.scroll_enter_copy_mode {
+                        enter_copy_mode(&mut app);
+                        let half = app.windows.get(app.active_idx)
+                            .and_then(|w| active_pane(&w.root, &w.active_path))
+                            .map(|p| p.last_rows as usize).unwrap_or(20);
+                        scroll_copy_up(&mut app, half);
+                        hook_event = Some("pane-mode-changed");
+                    } else {
+                        // scroll-enter-copy-mode is off: forward PageUp to the
+                        // active pane so apps like less/vim/WSL receive it (#284).
+                        send_text_to_active(&mut app, "\x1b[5~")?;
+                        echo_pending_until = Some(Instant::now());
+                    }
                 }
                 CtrlReq::ClockMode => { app.mode = Mode::ClockMode; state_dirty = true; hook_event = Some("pane-mode-changed"); }
                 CtrlReq::CopyMove(dx, dy) => { move_copy_cursor(&mut app, dx, dy); }
@@ -2411,6 +2432,8 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     app.defaults_suppressed = false;
                     crate::config::populate_default_bindings(&mut app);
                     load_config(&mut app);
+                    // Config may set pane-border-status (#288)
+                    resize_all_panes(&mut app);
                     // Update shared aliases after config reload
                     if let Ok(mut w) = shared_aliases_main.write() {
                         *w = app.command_aliases.clone();
@@ -2787,6 +2810,10 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                             *map = app.command_aliases.clone();
                         }
                     }
+                    // pane-border-status changes the effective content height (#288)
+                    if option == "pane-border-status" {
+                        resize_all_panes(&mut app);
+                    }
                     meta_dirty = true;
                     state_dirty = true;
                 }
@@ -2805,6 +2832,10 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         if let Ok(mut map) = shared_aliases_main.write() {
                             *map = app.command_aliases.clone();
                         }
+                    }
+                    // pane-border-status changes the effective content height (#288)
+                    if option == "pane-border-status" {
+                        resize_all_panes(&mut app);
                     }
                     meta_dirty = true;
                     state_dirty = true;
@@ -3032,6 +3063,9 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     } else {
                         crate::config::source_file(&mut app, &path);
                     }
+                    // source-file may change pane-border-status which
+                    // affects pane content height (#288)
+                    resize_all_panes(&mut app);
                     // Mark dirty so the client receives updated config
                     // (status bar, bindings, styles, etc.) on the next
                     // dump-state instead of getting an NC fast-path reply.

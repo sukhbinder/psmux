@@ -526,7 +526,18 @@ pub fn render_layout_json(
             rows_v2,
             title,
         } => {
-            let inner = area;
+            // When pane-border-status is enabled, reserve 1 row for the
+            // border label so it doesn't overlap pane content (#288).
+            let has_border_label = border_status != "off" && !border_format.is_empty() && area.height > 1;
+            let inner = if has_border_label {
+                if border_status == "top" {
+                    Rect::new(area.x, area.y + 1, area.width, area.height - 1)
+                } else {
+                    Rect::new(area.x, area.y, area.width, area.height - 1)
+                }
+            } else {
+                area
+            };
             let mut lines: Vec<Line> = Vec::new();
             let use_full_cells = *copy_mode && *active && !content.is_empty();
             // If the source pane is larger than the preview area, reflow
@@ -734,7 +745,7 @@ pub fn render_layout_json(
                 }
             }
 
-            if border_status != "off" && !border_format.is_empty() && area.height > 1 {
+            if has_border_label {
                 let pane_title_str = title.as_deref().unwrap_or("");
                 let pane_label = border_format
                     .replace("#{pane_title}", pane_title_str)
