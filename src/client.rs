@@ -2460,6 +2460,12 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                                 cmd_batch.push("prefix-end\n".into());
                             }
                         } else {
+                            // True briefly after an Event::Paste consumed by an
+                            // overlay (issue #290).  On Windows, crossterm emits
+                            // Event::Paste AND per-char Event::Key for one
+                            // Ctrl+V — this gates the duplicate Char inserts
+                            // into the overlay buffers below.
+                            let paste_burst_active = paste_suppress_until.map_or(false, |t| Instant::now() < t);
                             match key.code {
                                 KeyCode::Up if session_chooser => { if session_selected > 0 { session_selected -= 1; } }
                                 KeyCode::Down if session_chooser => { if session_selected + 1 < session_entries.len() { session_selected += 1; } }
@@ -2722,10 +2728,10 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                                 KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc if confirm_cmd.is_some() => {
                                     confirm_cmd = None;
                                 }
-                                KeyCode::Char(c) if renaming && !key.modifiers.contains(KeyModifiers::CONTROL) => { rename_buf.push(c); }
-                                KeyCode::Char(c) if pane_renaming && !key.modifiers.contains(KeyModifiers::CONTROL) => { pane_title_buf.push(c); }
-                                KeyCode::Char(c) if window_idx_input && c.is_ascii_digit() => { window_idx_buf.push(c); }
-                                KeyCode::Char(c) if command_input && !key.modifiers.contains(KeyModifiers::CONTROL) => { command_buf.insert(command_cursor, c); command_cursor += 1; }
+                                KeyCode::Char(c) if renaming && !key.modifiers.contains(KeyModifiers::CONTROL) && !paste_burst_active => { rename_buf.push(c); }
+                                KeyCode::Char(c) if pane_renaming && !key.modifiers.contains(KeyModifiers::CONTROL) && !paste_burst_active => { pane_title_buf.push(c); }
+                                KeyCode::Char(c) if window_idx_input && c.is_ascii_digit() && !paste_burst_active => { window_idx_buf.push(c); }
+                                KeyCode::Char(c) if command_input && !key.modifiers.contains(KeyModifiers::CONTROL) && !paste_burst_active => { command_buf.insert(command_cursor, c); command_cursor += 1; }
                                 KeyCode::Backspace if renaming => { let _ = rename_buf.pop(); }
                                 KeyCode::Backspace if pane_renaming => { let _ = pane_title_buf.pop(); }
                                 KeyCode::Backspace if window_idx_input => { let _ = window_idx_buf.pop(); }
@@ -3080,13 +3086,28 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                         }
                     }
                     Event::Paste(data) => {
-                        let encoded = base64_encode(&data);
-                        cmd_batch.push(format!("send-paste {}\n", encoded));
+                        // Route paste into the active client-side text overlay
+                        // (issue #290) so it does not leak past the command
+                        // prompt / rename prompts into the underlying pane.
+                        let consumed = route_paste_to_overlay(
+                            &data,
+                            command_input, &mut command_buf, &mut command_cursor,
+                            renaming, &mut rename_buf,
+                            pane_renaming, &mut pane_title_buf,
+                            window_idx_input, &mut window_idx_buf,
+                        );
+                        if !consumed {
+                            let encoded = base64_encode(&data);
+                            cmd_batch.push(format!("send-paste {}\n", encoded));
+                        }
                         // On Windows, crossterm with EnableBracketedPaste may
                         // emit Event::Paste AND individual Event::Key events
                         // for the same Ctrl+V paste.  Suppress the duplicate
                         // Key events by clearing any partially accumulated
                         // paste_pend chars and blocking accumulation briefly.
+                        // The same paste_suppress_until window also gates the
+                        // overlay Char arms so the duplicate Key events do
+                        // not double-insert when an overlay consumed the paste.
                         #[cfg(windows)]
                         {
                             paste_pend.clear();
@@ -5409,6 +5430,43 @@ fn flush_paste_pend_as_text(
 #[cfg(windows)]
 fn paste_buffer_has_non_ascii(buf: &str) -> bool {
     buf.chars().any(|c| !c.is_ascii())
+}
+
+/// Route a clipboard paste into the active client-side text overlay
+/// (command prompt, rename prompt, pane title, window-index prompt).
+/// Returns `true` when an overlay consumed the paste — callers must skip
+/// the `send-paste` forwarding in that case so the text does not also leak
+/// into the underlying pane (fixes issue #290).
+fn route_paste_to_overlay(
+    data: &str,
+    command_input: bool,
+    command_buf: &mut String,
+    command_cursor: &mut usize,
+    renaming: bool,
+    rename_buf: &mut String,
+    pane_renaming: bool,
+    pane_title_buf: &mut String,
+    window_idx_input: bool,
+    window_idx_buf: &mut String,
+) -> bool {
+    if command_input {
+        command_buf.insert_str(*command_cursor, data);
+        *command_cursor += data.len();
+        true
+    } else if renaming {
+        rename_buf.push_str(data);
+        true
+    } else if pane_renaming {
+        pane_title_buf.push_str(data);
+        true
+    } else if window_idx_input {
+        for c in data.chars() {
+            if c.is_ascii_digit() { window_idx_buf.push(c); }
+        }
+        true
+    } else {
+        false
+    }
 }
 
 #[cfg(test)]
