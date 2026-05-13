@@ -358,3 +358,146 @@ fn pwsh_mouse_selection_option_default_off() {
     let state = crate::types::AppState::new("test-session".to_string());
     assert!(!state.pwsh_mouse_selection, "pwsh_mouse_selection should default to off");
 }
+
+// ── Issue #290: paste must not leak past the command prompt ─────────────
+// route_paste_to_overlay is the helper that the Event::Paste branch in the
+// client loop delegates to.  When an overlay returns true, the loop skips
+// the `send-paste` forwarding, so paste content cannot reach the shell.
+
+#[test]
+fn paste_into_command_prompt_inserts_and_advances_cursor() {
+    let mut command_buf = String::new();
+    let mut command_cursor = 0;
+    let mut rename_buf = String::new();
+    let mut pane_title_buf = String::new();
+    let mut window_idx_buf = String::new();
+    let consumed = super::route_paste_to_overlay(
+        "hello",
+        true, &mut command_buf, &mut command_cursor,
+        false, &mut rename_buf,
+        false, &mut pane_title_buf,
+        false, &mut window_idx_buf,
+    );
+    assert!(consumed, "command_input overlay must consume paste");
+    assert_eq!(command_buf, "hello");
+    assert_eq!(command_cursor, 5);
+}
+
+#[test]
+fn paste_into_command_prompt_inserts_at_cursor_position() {
+    // User typed "abdef", moved cursor between b and d, then pastes "c".
+    let mut command_buf = String::from("abdef");
+    let mut command_cursor = 2;
+    let mut rename_buf = String::new();
+    let mut pane_title_buf = String::new();
+    let mut window_idx_buf = String::new();
+    let consumed = super::route_paste_to_overlay(
+        "c",
+        true, &mut command_buf, &mut command_cursor,
+        false, &mut rename_buf,
+        false, &mut pane_title_buf,
+        false, &mut window_idx_buf,
+    );
+    assert!(consumed);
+    assert_eq!(command_buf, "abcdef");
+    assert_eq!(command_cursor, 3);
+}
+
+#[test]
+fn paste_with_no_overlay_active_is_not_consumed() {
+    // Caller must forward via send-paste when this returns false.
+    let mut command_buf = String::new();
+    let mut command_cursor = 0;
+    let mut rename_buf = String::new();
+    let mut pane_title_buf = String::new();
+    let mut window_idx_buf = String::new();
+    let consumed = super::route_paste_to_overlay(
+        "hello",
+        false, &mut command_buf, &mut command_cursor,
+        false, &mut rename_buf,
+        false, &mut pane_title_buf,
+        false, &mut window_idx_buf,
+    );
+    assert!(!consumed);
+    assert!(command_buf.is_empty());
+    assert!(rename_buf.is_empty());
+    assert!(pane_title_buf.is_empty());
+    assert!(window_idx_buf.is_empty());
+}
+
+#[test]
+fn paste_into_rename_prompt_appends() {
+    let mut command_buf = String::new();
+    let mut command_cursor = 0;
+    let mut rename_buf = String::from("foo");
+    let mut pane_title_buf = String::new();
+    let mut window_idx_buf = String::new();
+    let consumed = super::route_paste_to_overlay(
+        "bar",
+        false, &mut command_buf, &mut command_cursor,
+        true, &mut rename_buf,
+        false, &mut pane_title_buf,
+        false, &mut window_idx_buf,
+    );
+    assert!(consumed);
+    assert_eq!(rename_buf, "foobar");
+}
+
+#[test]
+fn paste_into_pane_title_appends() {
+    let mut command_buf = String::new();
+    let mut command_cursor = 0;
+    let mut rename_buf = String::new();
+    let mut pane_title_buf = String::from("title");
+    let mut window_idx_buf = String::new();
+    let consumed = super::route_paste_to_overlay(
+        "-suffix",
+        false, &mut command_buf, &mut command_cursor,
+        false, &mut rename_buf,
+        true, &mut pane_title_buf,
+        false, &mut window_idx_buf,
+    );
+    assert!(consumed);
+    assert_eq!(pane_title_buf, "title-suffix");
+}
+
+#[test]
+fn paste_into_window_idx_prompt_keeps_only_digits() {
+    let mut command_buf = String::new();
+    let mut command_cursor = 0;
+    let mut rename_buf = String::new();
+    let mut pane_title_buf = String::new();
+    let mut window_idx_buf = String::new();
+    let consumed = super::route_paste_to_overlay(
+        "1a2b3",
+        false, &mut command_buf, &mut command_cursor,
+        false, &mut rename_buf,
+        false, &mut pane_title_buf,
+        true, &mut window_idx_buf,
+    );
+    assert!(consumed);
+    assert_eq!(window_idx_buf, "123");
+}
+
+#[test]
+fn paste_command_prompt_takes_precedence_over_other_overlays() {
+    // If multiple overlay flags are accidentally true, command_input wins
+    // (matches the if/else-if order in the helper).
+    let mut command_buf = String::new();
+    let mut command_cursor = 0;
+    let mut rename_buf = String::new();
+    let mut pane_title_buf = String::new();
+    let mut window_idx_buf = String::new();
+    let consumed = super::route_paste_to_overlay(
+        "x",
+        true, &mut command_buf, &mut command_cursor,
+        true, &mut rename_buf,
+        true, &mut pane_title_buf,
+        true, &mut window_idx_buf,
+    );
+    assert!(consumed);
+    assert_eq!(command_buf, "x");
+    assert!(rename_buf.is_empty());
+    assert!(pane_title_buf.is_empty());
+    assert!(window_idx_buf.is_empty());
+}
