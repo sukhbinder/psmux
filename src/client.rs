@@ -1060,6 +1060,7 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
     // Synced bindings from server (updated each frame from DumpState)
     let mut synced_bindings: Vec<BindingEntry> = Vec::new();
     let mut defaults_suppressed: bool = false;
+    let mut scroll_enter_copy_mode: bool = true;
     // When false, Ctrl+V is forwarded to the child app instead of being
     // intercepted for paste detection.
     #[cfg(windows)]
@@ -1172,6 +1173,7 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
     fn default_repeat_time() -> u64 { 500 }
     fn default_paste_detection() -> bool { true }
     fn default_mouse_selection() -> bool { true }
+    fn default_scroll_enter_copy_mode() -> bool { true }
 
     /// A single key binding synced from the server.
     #[derive(serde::Deserialize, Clone, Debug)]
@@ -1268,6 +1270,11 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
         /// When true, hardcoded default keybindings are suppressed (set by unbind-key -a)
         #[serde(default)]
         defaults_suppressed: bool,
+        /// scroll-enter-copy-mode option (mirror of server-side AppState field).
+        /// When false, root key bindings that enter copy mode (e.g. PageUp ->
+        /// copy-mode -u) are skipped so the key reaches the PTY (#284).
+        #[serde(default = "default_scroll_enter_copy_mode")]
+        scroll_enter_copy_mode: bool,
         /// pwsh-mouse-selection option (mirror of server-side AppState field)
         #[serde(default)]
         pwsh_mouse_selection: bool,
@@ -2079,11 +2086,16 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                         // These fire without prefix, before keys are forwarded to PTY
                         else if !command_input && !renaming && !pane_renaming && !tree_chooser && !buffer_chooser && !session_chooser && !keys_viewer && confirm_cmd.is_none() && {
                             let key_tuple = normalize_key_for_binding((key.code, key.modifiers));
-                            synced_bindings.iter().any(|b| b.t == "root" && parse_key_string(&b.k).map_or(false, |k| normalize_key_for_binding(k) == key_tuple))
+                            synced_bindings.iter().any(|b| {
+                                b.t == "root" && parse_key_string(&b.k).map_or(false, |k| normalize_key_for_binding(k) == key_tuple)
+                                // Skip scroll-triggered copy mode bindings when option is off (#284)
+                                && !(b.c.starts_with("copy-mode") && b.c.contains("-u") && !scroll_enter_copy_mode)
+                            })
                         } {
                             let key_tuple = normalize_key_for_binding((key.code, key.modifiers));
                             if let Some(entry) = synced_bindings.iter().find(|b| {
                                 b.t == "root" && parse_key_string(&b.k).map_or(false, |k| normalize_key_for_binding(k) == key_tuple)
+                                && !(b.c.starts_with("copy-mode") && b.c.contains("-u") && !scroll_enter_copy_mode)
                             }) {
                                 if entry.c == "detach-client" || entry.c == "detach" {
                                     quit = true;
@@ -4032,6 +4044,7 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
             synced_bindings = state.bindings;
         }
         defaults_suppressed = state.defaults_suppressed;
+        scroll_enter_copy_mode = state.scroll_enter_copy_mode;
         // Sync repeat-time from server
         repeat_time_ms = state.repeat_time;
         // Update status-left / status-right from server (already format-expanded)

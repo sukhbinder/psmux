@@ -1122,12 +1122,23 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
             toggle_zoom(app);
         }
         "copy-mode" => {
-            enter_copy_mode(app);
             if parts.iter().any(|a| *a == "-u") {
-                let half = app.windows.get(app.active_idx)
-                    .and_then(|w| crate::tree::active_pane(&w.root, &w.active_path))
-                    .map(|p| p.last_rows as usize).unwrap_or(20);
-                scroll_copy_up(app, half);
+                if app.scroll_enter_copy_mode {
+                    enter_copy_mode(app);
+                    let half = app.windows.get(app.active_idx)
+                        .and_then(|w| crate::tree::active_pane(&w.root, &w.active_path))
+                        .map(|p| p.last_rows as usize).unwrap_or(20);
+                    scroll_copy_up(app, half);
+                } else {
+                    // scroll-enter-copy-mode off: forward PageUp to PTY (#284)
+                    if let Some(win) = app.windows.get_mut(app.active_idx) {
+                        if let Some(pane) = crate::tree::active_pane_mut(&mut win.root, &win.active_path) {
+                            let _ = pane.writer.write_all(b"\x1b[5~");
+                        }
+                    }
+                }
+            } else {
+                enter_copy_mode(app);
             }
         }
         "display-panes" | "displayp" => {
