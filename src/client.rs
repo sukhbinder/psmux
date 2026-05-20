@@ -967,6 +967,13 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
     let mut command_cursor: usize = 0;
     let mut command_history: Vec<String> = Vec::new();
     let mut command_history_idx: usize = 0;
+    // Template for command-prompt -I '#W' 'rename-window "%%"' style bindings.
+    // When set, Enter substitutes %% with user input and executes the template.
+    let mut command_template: Option<String> = None;
+    // Custom prompt label from command-prompt -p 'prompt:'
+    let mut command_prompt_label: Option<String> = None;
+    // Track active window name from last dump-state for #W expansion
+    let mut active_window_name = String::new();
     let mut window_idx_input = false;
     let mut window_idx_buf = String::new();
 
@@ -2122,8 +2129,54 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                                     renaming = true; rename_buf.clear();
                                 } else if cmd == "rename-session" {
                                     renaming = true; rename_buf.clear(); session_renaming = true;
-                                } else if cmd == "command-prompt" {
-                                    command_input = true; command_buf.clear(); command_cursor = 0; command_history_idx = command_history.len();
+                                } else if cmd == "command-prompt" || cmd.starts_with("command-prompt ") {
+                                    command_input = true;
+                                    command_cursor = 0;
+                                    command_history_idx = command_history.len();
+                                    command_template = None;
+                                    command_prompt_label = None;
+                                    if cmd.starts_with("command-prompt ") {
+                                        // Parse -I initial_text, -p prompt, and template argument
+                                        let cp_args = &cmd["command-prompt ".len()..];
+                                        let tokens = crate::config::shell_words(cp_args);
+                                        let mut initial = String::new();
+                                        let mut prompt_text: Option<String> = None;
+                                        let mut positional: Vec<String> = Vec::new();
+                                        let mut i = 0;
+                                        while i < tokens.len() {
+                                            if tokens[i] == "-I" && i + 1 < tokens.len() {
+                                                initial = tokens[i + 1].clone();
+                                                i += 2;
+                                            } else if tokens[i] == "-p" && i + 1 < tokens.len() {
+                                                prompt_text = Some(tokens[i + 1].clone());
+                                                i += 2;
+                                            } else if tokens[i] == "-1" || tokens[i] == "-N" || tokens[i] == "-W" {
+                                                i += 1; // skip flags
+                                            } else if tokens[i].starts_with('-') {
+                                                i += 1; // skip unknown flags
+                                            } else {
+                                                positional.push(tokens[i].clone());
+                                                i += 1;
+                                            }
+                                        }
+                                        // Expand format variables in initial text
+                                        let initial = initial
+                                            .replace("#W", &active_window_name)
+                                            .replace("#{window_name}", &active_window_name)
+                                            .replace("#S", &current_session)
+                                            .replace("#{session_name}", &current_session);
+                                        command_buf = initial.clone();
+                                        command_cursor = command_buf.len();
+                                        // Join all positional args to form the template
+                                        // e.g. 'rename-window "%%"' → single arg, or
+                                        //       rename-window %%    → two args joined
+                                        if !positional.is_empty() {
+                                            command_template = Some(positional.join(" "));
+                                        }
+                                        command_prompt_label = prompt_text;
+                                    } else {
+                                        command_buf.clear();
+                                    }
                                 } else if cmd == "list-keys" {
                                     keys_viewer_scroll = 0;
                                     let user_binds: Vec<(bool, String, String, String)> = synced_bindings
@@ -2782,11 +2835,20 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                                 }
                                 KeyCode::Enter if command_input => {
                                     let trimmed = command_buf.trim().to_string();
-                                    if !trimmed.is_empty() {
-                                        command_history.push(trimmed.clone());
-                                        command_history_idx = command_history.len();
+                                    if !trimmed.is_empty() || command_template.is_some() {
+                                        if !trimmed.is_empty() {
+                                            command_history.push(trimmed.clone());
+                                            command_history_idx = command_history.len();
+                                        }
+                                        // If we have a template (from command-prompt -I ... 'cmd "%%"'),
+                                        // substitute %% with user input and send that command instead.
+                                        let final_cmd = if let Some(ref tmpl) = command_template {
+                                            tmpl.replace("%%", &trimmed)
+                                        } else {
+                                            trimmed.clone()
+                                        };
                                         // Intercept client-side UI commands from command prompt
-                                        let first_word = trimmed.split_whitespace().next().unwrap_or("");
+                                        let first_word = final_cmd.split_whitespace().next().unwrap_or("");
                                         if first_word == "choose-buffer" || first_word == "chooseb" {
                                             // Open interactive buffer chooser instead of sending to server
                                             buffer_chooser = true;
@@ -2834,7 +2896,7 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                                             if buffer_entries.is_empty() { buffer_chooser = false; }
                                         } else {
                                             // Split on \; or ; to support command chaining (issue #192)
-                                            let sub_cmds = crate::config::split_chained_commands_pub(&trimmed);
+                                            let sub_cmds = crate::config::split_chained_commands_pub(&final_cmd);
                                             // detach-client typed at the prompt must also quit
                                             // THIS client unless `-a` (detach others) or
                                             // `-t %<id>`/`-t <tty>` (target someone else) is
@@ -3813,6 +3875,10 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
 
         let root = state.layout;
         let windows = state.windows;
+        // Track the active window name for command-prompt -I '#W' expansion
+        if let Some(aw) = windows.iter().find(|w| w.active) {
+            active_window_name = aw.name.clone();
+        }
         last_tree = state.tree;
         let base_index = state.base_index;
         client_base_index = base_index;
@@ -4909,7 +4975,8 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                 f.render_widget(para, overlay.inner(oa));
             }
             if command_input {
-                let overlay = Block::default().borders(Borders::ALL).title("command");
+                let title = command_prompt_label.as_deref().unwrap_or("command");
+                let overlay = Block::default().borders(Borders::ALL).title(title);
                 let oa = centered_rect(60, 3, content_chunk);
                 f.render_widget(Clear, oa);
                 f.render_widget(&overlay, oa);

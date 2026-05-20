@@ -858,6 +858,38 @@ pub fn parse_option_value(app: &mut AppState, rest: &str, _is_global: bool) {
     }
 }
 
+/// Split a string into tokens respecting single and double quotes.
+/// `command-prompt -I '#W' 'rename-window "%%"'` → ["-I", "#W", "rename-window \"%%\""]
+pub fn shell_words(s: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\\' && !in_single {
+            if let Some(&next) = chars.peek() {
+                current.push(next);
+                chars.next();
+            }
+        } else if c == '\'' && !in_double {
+            in_single = !in_single;
+        } else if c == '"' && !in_single {
+            in_double = !in_double;
+        } else if c.is_whitespace() && !in_single && !in_double {
+            if !current.is_empty() {
+                tokens.push(std::mem::take(&mut current));
+            }
+        } else {
+            current.push(c);
+        }
+    }
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+    tokens
+}
+
 /// Split a bind-key command string on `\;` or bare `;` to produce sub-commands.
 /// Handles: `split-window \; select-pane -D` → ["split-window", "select-pane -D"]
 pub fn split_chained_commands_pub(command: &str) -> Vec<String> {
