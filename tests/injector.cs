@@ -170,6 +170,22 @@ class Injector
                     {
                         if (SendKey(handle, 0x27, '\0', 0, log)) injected++;
                     }
+                    else if (token == "HOME")
+                    {
+                        if (SendKey(handle, 0x24, '\0', 0, log)) injected++;
+                    }
+                    else if (token == "END")
+                    {
+                        if (SendKey(handle, 0x23, '\0', 0, log)) injected++;
+                    }
+                    else if (token == "PGUP" || token == "PAGEUP")
+                    {
+                        if (SendKey(handle, 0x21, '\0', 0, log)) injected++;
+                    }
+                    else if (token == "PGDN" || token == "PAGEDOWN")
+                    {
+                        if (SendKey(handle, 0x22, '\0', 0, log)) injected++;
+                    }
                     else if (token.StartsWith("SLEEP:"))
                     {
                         int ms = int.Parse(token.Substring(6));

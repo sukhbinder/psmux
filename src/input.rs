@@ -64,6 +64,13 @@ pub fn handle_key(app: &mut AppState, key: KeyEvent) -> io::Result<bool> {
             // Check root key table for bindings (bind-key -n / bind-key -T root)
             let key_tuple = normalize_key_for_binding((key.code, key.modifiers));
             if let Some(bind) = app.key_tables.get("root").and_then(|t| t.iter().find(|b| b.key == key_tuple)).cloned() {
+                // Skip scroll-triggered copy mode entry when the option is
+                // off so the key (PageUp) reaches the PTY instead (#284).
+                let is_scroll_copy = matches!(&bind.action, crate::types::Action::Command(cmd) if cmd.starts_with("copy-mode") && cmd.contains("-u"));
+                if is_scroll_copy && !app.scroll_enter_copy_mode {
+                    forward_key_to_active(app, key)?;
+                    return Ok(false);
+                }
                 return execute_action(app, &bind.action);
             }
             forward_key_to_active(app, key)?;
