@@ -1935,6 +1935,72 @@ pub fn forward_key_to_active(app: &mut AppState, key: KeyEvent) -> io::Result<()
             }
             // Shift/Alt+Enter (no Ctrl): fall through to VT encoding below.
         }
+
+        // Ctrl+letter: ConPTY cannot reconstruct Ctrl+key from raw control
+        // bytes (0x01..0x1A).  PSReadLine reads KEY_EVENT records, so it
+        // needs the actual VK code + LEFT_CTRL_PRESSED flag.  Use Win32
+        // input mode escape sequences through the ConPTY pipe (#305).
+        //
+        // crossterm may report Ctrl+K two ways:
+        //   1. KeyCode::Char('k') with KeyModifiers::CONTROL
+        //   2. KeyCode::Char('\x0b') with NO modifiers (raw control byte)
+        // We handle both variants here.
+        if let KeyCode::Char(c) = key.code {
+            let (inject_char, is_ctrl_letter) = if key.modifiers.contains(KeyModifiers::CONTROL)
+                && !key.modifiers.contains(KeyModifiers::ALT)
+                && c.is_ascii_alphabetic()
+            {
+                (c, true)
+            } else if !key.modifiers.contains(KeyModifiers::ALT)
+                && (c as u32) >= 0x01
+                && (c as u32) <= 0x1A
+            {
+                // Raw control byte → map back to the letter (0x01='a', 0x0B='k', etc.)
+                let letter = (c as u8 + b'a' - 1) as char;
+                (letter, true)
+            } else {
+                (c, false)
+            };
+
+            if is_ctrl_letter {
+                let vk = crate::platform::mouse_inject::char_to_vk(inject_char);
+                let scan = crate::platform::mouse_inject::vk_to_scan(vk);
+                let u_char = (inject_char.to_ascii_lowercase() as u16) & 0x1F;
+                const LEFT_CTRL_PRESSED: u32 = 0x0008;
+                let seq = format!(
+                    "\x1b[{};{};{};1;{};1_\x1b[{};{};{};0;{};1_",
+                    vk, scan, u_char, LEFT_CTRL_PRESSED,
+                    vk, scan, u_char, LEFT_CTRL_PRESSED
+                );
+                let seq_bytes = seq.as_bytes();
+
+                if app.sync_input {
+                    let win = &mut app.windows[app.active_idx];
+                    fn write_ctrl_all(node: &mut Node, data: &[u8]) {
+                        match node {
+                            Node::Leaf(p) if !p.dead => {
+                                let _ = p.writer.write_all(data);
+                                let _ = p.writer.flush();
+                            }
+                            Node::Leaf(_) => {}
+                            Node::Split { children, .. } => {
+                                for ch in children { write_ctrl_all(ch, data); }
+                            }
+                        }
+                    }
+                    write_ctrl_all(&mut win.root, seq_bytes);
+                } else {
+                    let win = &mut app.windows[app.active_idx];
+                    if let Some(active) = active_pane_mut(&mut win.root, &win.active_path) {
+                        if !active.dead {
+                            let _ = active.writer.write_all(seq_bytes);
+                            let _ = active.writer.flush();
+                        }
+                    }
+                }
+                return Ok(());
+            }
+        }
     }
 
     let encoded = match encode_key_event(&key) {
@@ -3081,8 +3147,9 @@ pub fn send_key_to_active(app: &mut AppState, k: &str) -> io::Result<()> {
         return Ok(());
     }
     
-    let win = &mut app.windows[app.active_idx];
-    if let Some(p) = active_pane_mut(&mut win.root, &win.active_path) {
+    // Write a named key to a single pane (extracted for sync_input support).
+    fn write_named_key_to_pane(p: &mut crate::types::Pane, k: &str) {
+        use std::io::Write as _;
         match k {
             "enter" => { let _ = write!(p.writer, "\r"); }
             "tab" => { let _ = write!(p.writer, "\t"); }
@@ -3122,9 +3189,33 @@ pub fn send_key_to_active(app: &mut AppState, k: &str) -> io::Result<()> {
             }
             s if s.starts_with("C-") && s.len() == 3 => {
                 let c = s.chars().nth(2).unwrap_or('c');
-                let ctrl_char = (c.to_ascii_lowercase() as u8) & 0x1F;
-                let _ = p.writer.write_all(&[ctrl_char]);
-
+                // Use Win32 input mode escape sequence so ConPTY generates a
+                // proper KEY_EVENT with VK code + LEFT_CTRL_PRESSED (#305).
+                // Format: ESC [ Vk ; Sc ; Uc ; Kd ; Cs ; Rc _
+                #[cfg(windows)]
+                if c.is_ascii_alphabetic() {
+                    let vk = crate::platform::mouse_inject::char_to_vk(c);
+                    let scan = crate::platform::mouse_inject::vk_to_scan(vk);
+                    let u_char = (c.to_ascii_lowercase() as u16) & 0x1F;
+                    const LEFT_CTRL_PRESSED: u32 = 0x0008;
+                    // Key down
+                    let seq_down = format!("\x1b[{};{};{};1;{};1_",
+                        vk, scan, u_char, LEFT_CTRL_PRESSED);
+                    // Key up
+                    let seq_up = format!("\x1b[{};{};{};0;{};1_",
+                        vk, scan, u_char, LEFT_CTRL_PRESSED);
+                    let _ = p.writer.write_all(seq_down.as_bytes());
+                    let _ = p.writer.write_all(seq_up.as_bytes());
+                    let _ = p.writer.flush();
+                } else {
+                    let ctrl_char = (c.to_ascii_lowercase() as u8) & 0x1F;
+                    let _ = p.writer.write_all(&[ctrl_char]);
+                }
+                #[cfg(not(windows))]
+                {
+                    let ctrl_char = (c.to_ascii_lowercase() as u8) & 0x1F;
+                    let _ = p.writer.write_all(&[ctrl_char]);
+                }
             }
             s if (s.starts_with("M-") || s.starts_with("m-")) && s.len() == 3 => {
                 let c = s.chars().nth(2).unwrap_or('a');
@@ -3200,6 +3291,25 @@ pub fn send_key_to_active(app: &mut AppState, k: &str) -> io::Result<()> {
             _ => {}
         }
         let _ = p.writer.flush();
+    }
+
+    // Distribute the key to all panes (sync) or just the active pane.
+    if app.sync_input {
+        let win = &mut app.windows[app.active_idx];
+        fn send_key_all_panes(node: &mut crate::types::Node, k: &str) {
+            match node {
+                crate::types::Node::Leaf(p) => write_named_key_to_pane(p, k),
+                crate::types::Node::Split { children, .. } => {
+                    for c in children { send_key_all_panes(c, k); }
+                }
+            }
+        }
+        send_key_all_panes(&mut win.root, k);
+    } else {
+        let win = &mut app.windows[app.active_idx];
+        if let Some(p) = active_pane_mut(&mut win.root, &win.active_path) {
+            write_named_key_to_pane(p, k);
+        }
     }
     Ok(())
 }

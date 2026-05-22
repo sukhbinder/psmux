@@ -1808,6 +1808,27 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                                 s if s.starts_with("C-") => {
                                     if let Some(c) = s.chars().nth(2) {
                                         let Some(ctrl) = crate::input::ctrl_char_send_keys_byte(c) else { continue };
+                                        // On Windows with Win32 input mode, write the key as
+                                        // a Win32 input mode escape sequence so ConPTY generates
+                                        // a proper KEY_EVENT with VK + LEFT_CTRL_PRESSED (#305).
+                                        #[cfg(windows)]
+                                        {
+                                            if c.is_ascii_alphabetic() {
+                                                let vk = crate::platform::mouse_inject::char_to_vk(c);
+                                                let scan = crate::platform::mouse_inject::vk_to_scan(vk);
+                                                let u_char = (c.to_ascii_lowercase() as u16) & 0x1F;
+                                                const LEFT_CTRL_PRESSED: u32 = 0x0008;
+                                                let seq = format!(
+                                                    "\x1b[{};{};{};1;{};1_\x1b[{};{};{};0;{};1_",
+                                                    vk, scan, u_char, LEFT_CTRL_PRESSED,
+                                                    vk, scan, u_char, LEFT_CTRL_PRESSED
+                                                );
+                                                send_text_to_active(&mut app, &seq)?;
+                                            } else {
+                                                send_text_to_active(&mut app, &String::from(ctrl as char))?;
+                                            }
+                                        }
+                                        #[cfg(not(windows))]
                                         send_text_to_active(&mut app, &String::from(ctrl as char))?;
                                         // On Windows, writing 0x03 to the PTY pipe doesn't
                                         // generate CTRL_C_EVENT when ENABLE_PROCESSED_INPUT
