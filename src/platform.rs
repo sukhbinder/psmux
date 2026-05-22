@@ -1152,6 +1152,28 @@ pub mod mouse_inject {
     /// ESC + control-char is not reassembled.
     ///
     /// For Ctrl+key: `u_char` = control character (ch & 0x1F), matching the
+    /// Map a character to its Windows virtual key code.
+    pub fn char_to_vk(ch: char) -> u16 {
+        #[link(name = "user32")]
+        extern "system" {
+            fn VkKeyScanW(ch: u16) -> i16;
+        }
+        let mut buf = [0u16; 2];
+        let wch = ch.to_ascii_lowercase().encode_utf16(&mut buf)[0];
+        let result = unsafe { VkKeyScanW(wch) };
+        if result == -1 { 0u16 } else { (result & 0xFF) as u16 }
+    }
+
+    /// Map a virtual key code to its scan code.
+    pub fn vk_to_scan(vk: u16) -> u16 {
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn MapVirtualKeyW(code: u32, map_type: u32) -> u32;
+        }
+        // MAPVK_VK_TO_VSC = 0
+        unsafe { MapVirtualKeyW(vk as u32, 0) as u16 }
+    }
+
     /// Windows console convention.  For Alt+key: `u_char` = the plain char.
     /// For Ctrl+Alt: `u_char` = control character.
     ///
@@ -1443,6 +1465,8 @@ pub mod mouse_inject {
     pub fn send_modified_key_event(_pid: u32, _ch: char, _ctrl: bool, _alt: bool, _shift: bool) -> bool { false }
     pub fn send_alt_key_event(_pid: u32, _ch: char) -> bool { false }
     pub fn send_modified_enter_event(_pid: u32, _ctrl: bool, _alt: bool, _shift: bool) -> bool { false }
+    pub fn char_to_vk(_ch: char) -> u16 { 0 }
+    pub fn vk_to_scan(_vk: u16) -> u16 { 0 }
 }
 
 // ---------------------------------------------------------------------------
