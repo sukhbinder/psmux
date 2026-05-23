@@ -310,6 +310,23 @@ In addition to the 83 standard tmux commands, psmux provides extra commands usef
 | `set-pane-title <title>` | Set pane title directly |
 | `toggle-sync` | Toggle synchronized input for all panes in a window |
 
+### Live human-input signal (`#{pane_last_input}`)
+
+A read-only format variable: **milliseconds since the last printable human
+keystroke** routed into that pane (empty until the first one).
+
+```powershell
+psmux display-message -t dev -p '#{pane_last_input}'   # e.g. "740", or "" if none yet
+```
+
+It reflects **human typing only** — `send-keys` / `send-paste` (injected input)
+and the app's own output do **not** update it, a distinction `capture-pane`
+can't make. Only printable text counts; Enter, navigation, shortcuts and
+`Ctrl`/`Alt` chords are excluded. Useful when a tool drives a pane
+programmatically and must yield the moment a human starts typing. Consumers
+own all policy (treat "value < N ms" as "typing now"); psmux just exposes the
+timestamp, kept on the pane (no file, freed with the pane).
+
 ## Named Paste Buffers
 
 psmux supports named paste buffers for structured inter-pane data exchange:

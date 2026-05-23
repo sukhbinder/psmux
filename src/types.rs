@@ -106,6 +106,13 @@ pub struct Pane {
     pub last_infer_title: Instant,
     /// True when the child process has exited but remain-on-exit keeps the pane visible.
     pub dead: bool,
+    /// Timestamp of the last printable HUMAN keystroke routed into this pane
+    /// (set in `forward_key_to_active`; `None` until the first one). Exposed
+    /// read-only as the `#{pane_last_input}` format variable so external tools
+    /// can tell live human typing apart from injected input / app output —
+    /// something `capture-pane` can't. Lives on the pane, so it's freed with it
+    /// (no separate lifecycle / file to clean up).
+    pub last_human_input: Option<Instant>,
     /// Cached VT bridge detection result (for mouse injection).
     /// Updated on first mouse event and refreshed every 2 seconds.
     pub vt_bridge_cache: Option<(Instant, bool)>,
