@@ -1136,6 +1136,15 @@ pub fn expand_var(var: &str, app: &AppState, win_idx: usize) -> String {
         "pane_height" => {
             if let Some(p) = target_pane() { p.last_rows.to_string() } else { "24".into() }
         }
+        // Milliseconds since the last printable HUMAN keystroke into this pane;
+        // empty if none yet. Read-only signal for tools that need live
+        // human-typing detection (distinct from injected input / app output).
+        "pane_last_input" => {
+            match target_pane().and_then(|p| p.last_human_input) {
+                Some(t) => t.elapsed().as_millis().to_string(),
+                None => String::new(),
+            }
+        }
         "pane_active" => if fmt_pane_is_active { "1".into() } else { "0".into() },
         "pane_current_command" => {
             if let Some(p) = target_pane() {

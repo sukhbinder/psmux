@@ -1869,7 +1869,33 @@ pub fn encode_key_event(key: &KeyEvent) -> Option<Vec<u8>> {
     Some(encoded)
 }
 
+/// A printable human text keystroke (drives `#{pane_last_input}`). Excludes
+/// control codes and any Ctrl/Alt-modified key, so navigation, shortcuts,
+/// Enter, Tab, etc. don't count as "typing". Shift is fine (capitals).
+pub(crate) fn is_human_text_key(key: &KeyEvent) -> bool {
+    matches!(
+        key.code,
+        KeyCode::Char(c)
+            if !c.is_control()
+                && !key.modifiers.contains(KeyModifiers::CONTROL)
+                && !key.modifiers.contains(KeyModifiers::ALT)
+    )
+}
+
 pub fn forward_key_to_active(app: &mut AppState, key: KeyEvent) -> io::Result<()> {
+    // Record live human text input on the active pane, exposed read-only as
+    // `#{pane_last_input}`. This is the ONLY path real client keystrokes take
+    // to a pane (handle_key -> forward_key_to_active); send-keys / paste-buffer
+    // go through send_text_to_active, so the signal reflects HUMAN typing, not
+    // injected input. Printable chars only (no control / Ctrl / Alt), so
+    // Enter, navigation and shortcuts don't count.
+    if is_human_text_key(&key) {
+        let win = &mut app.windows[app.active_idx];
+        if let Some(p) = active_pane_mut(&mut win.root, &win.active_path) {
+            p.last_human_input = Some(Instant::now());
+        }
+    }
+
     // On Windows, modified Enter delivery depends on the modifier:
     //
     // Shift/Alt+Enter (no Ctrl): Use VT encoding ONLY (\x1b\r).  Native
@@ -3325,3 +3351,7 @@ mod tests_issue226_ctrl_slash;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue284_pageup_wsl.rs"]
 mod tests_issue284_pageup_wsl;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_pane_last_input.rs"]
+mod tests_pane_last_input;
