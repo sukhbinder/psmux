@@ -596,6 +596,22 @@ fn run_main() -> io::Result<()> {
                             s.clone()
                         }
                     })
+                    .or_else(|| {
+                        // Accept positional argument as target session name
+                        // (e.g. "psmux attach work" without -t flag)
+                        let t_val_idx = args.iter().position(|a| a == "-t").map(|i| i + 1);
+                        args.iter().enumerate().find_map(|(i, a)| {
+                            if !a.starts_with('-') && Some(i) != t_val_idx {
+                                Some(if let Some(ref l) = l_socket_name {
+                                    format!("{}__{}", l, a)
+                                } else {
+                                    a.clone()
+                                })
+                            } else {
+                                None
+                            }
+                        })
+                    })
                     .or_else(resolve_default_session_name)
                     .or_else(|| crate::session::resolve_last_session_name_ns(l_socket_name.as_deref()))
                     .unwrap_or_else(|| {
