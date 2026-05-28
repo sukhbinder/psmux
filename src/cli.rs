@@ -425,8 +425,9 @@ For more information: https://github.com/psmux/psmux
 }
 
 pub fn print_version() {
-    let prog = get_program_name();
-    println!("{} {}", prog, VERSION);
+    // Always print "tmux <version>" for compatibility with tools like
+    // libtmux/tmuxp that parse the "tmux " prefix from `-V` output.
+    println!("tmux {}", VERSION);
 }
 
 pub fn print_commands() {

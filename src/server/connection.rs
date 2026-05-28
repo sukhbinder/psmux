@@ -2549,15 +2549,38 @@ match cmd {
     }
     "if-shell" | "if" => {
         let format_mode = args.iter().any(|a| *a == "-F" || *a == "-bF" || *a == "-Fb");
-        // Collect positional args (skip flags like -b, -F, -bF)
-        let positional: Vec<&str> = args.iter()
-            .filter(|a| !a.starts_with('-'))
-            .copied()
-            .collect();
+        // Collect positional args (skip flags like -b, -F, -bF),
+        // collapsing brace blocks { ... } into single tokens.
+        let mut positional: Vec<String> = Vec::new();
+        {
+            let non_flags: Vec<&str> = args.iter()
+                .filter(|a| !a.starts_with('-'))
+                .copied()
+                .collect();
+            let mut j = 0;
+            while j < non_flags.len() {
+                if non_flags[j] == "{" {
+                    // Collect everything between { and } as a single command
+                    let mut depth = 1;
+                    let mut block = Vec::new();
+                    j += 1;
+                    while j < non_flags.len() && depth > 0 {
+                        if non_flags[j] == "{" { depth += 1; }
+                        else if non_flags[j] == "}" { depth -= 1; if depth == 0 { break; } }
+                        block.push(non_flags[j]);
+                        j += 1;
+                    }
+                    positional.push(block.join(" "));
+                } else {
+                    positional.push(non_flags[j].to_string());
+                }
+                j += 1;
+            }
+        }
         if positional.len() >= 2 {
-            let condition = positional[0];
-            let true_cmd = positional[1];
-            let false_cmd = positional.get(2).copied();
+            let condition = &positional[0];
+            let true_cmd = &positional[1];
+            let false_cmd = positional.get(2);
             let success = if format_mode {
                 let (rtx, rrx) = std::sync::mpsc::channel::<String>();
                 let _ = tx.send(CtrlReq::DisplayMessage(rtx, condition.to_string(), None, false, None));
@@ -2572,7 +2595,7 @@ match cmd {
                 let (shell_prog, shell_args) = crate::commands::resolve_run_shell();
                 let mut c = std::process::Command::new(&shell_prog);
                 for a in &shell_args { c.arg(a); }
-                c.arg(condition);
+                c.arg(condition.as_str());
                 c.stdout(std::process::Stdio::null());
                 c.stderr(std::process::Stdio::null());
                 { use crate::platform::HideWindowCommandExt; c.hide_window(); }
