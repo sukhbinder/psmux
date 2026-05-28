@@ -801,6 +801,21 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 for win in &mut app.windows {
                     helpers::drain_cpr_pending(&mut win.root);
                 }
+                // Also answer CPR queries for the warm pane — it is not in
+                // any window yet, but pwsh / PSReadLine blocks on the ESC[6n
+                // response during shell startup.  Without this, the warm
+                // pane's shell never finishes loading.
+                if let Some(ref mut wp) = app.warm_pane {
+                    if wp.cpr_pending.swap(false, std::sync::atomic::Ordering::AcqRel) {
+                        let (r, c) = wp.term.lock()
+                            .map(|g| g.screen().cursor_position())
+                            .unwrap_or((0, 0));
+                        let response = format!("\x1b[{};{}R", r + 1, c + 1);
+                        use std::io::Write as _;
+                        let _ = wp.writer.write_all(response.as_bytes());
+                        let _ = wp.writer.flush();
+                    }
+                }
             }
         }
         // When a popup PTY is active, always push frames so interactive

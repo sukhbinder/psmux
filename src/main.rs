@@ -1195,6 +1195,28 @@ fn run_main() -> io::Result<()> {
                             if a.contains('e') { cmd.push_str(" -e"); }
                             if a.contains('J') { cmd.push_str(" -J"); }
                         }
+                        // Cluster ending in a value-taking flag: -pt <target>,
+                        // -pet <target>, -pS <start>, etc.
+                        a if a.len() > 2
+                            && a.starts_with('-')
+                            && !a.starts_with("--")
+                            && {
+                                let last = a.chars().last().unwrap_or(' ');
+                                matches!(last, 't' | 'S' | 'E' | 'b')
+                                    && a[1..a.len()-1].chars().all(|c| matches!(c, 'p' | 'e' | 'J'))
+                            } =>
+                        {
+                            let last = a.chars().last().unwrap();
+                            // Expand boolean flags in the cluster
+                            if a.contains('p') { cmd.push_str(" -p"); print_stdout = true; }
+                            if a.contains('e') { cmd.push_str(" -e"); }
+                            if a.contains('J') { cmd.push_str(" -J"); }
+                            // Consume the next arg as the value for the trailing flag
+                            if let Some(val) = cmd_args.get(i + 1) {
+                                cmd.push_str(&format!(" -{} {}", last, val));
+                                i += 1;
+                            }
+                        }
                         _ => {}
                     }
                     i += 1;
@@ -2020,6 +2042,27 @@ fn run_main() -> io::Result<()> {
                             i += 1;
                         }
                         "-I" => { i += 1; } // consume -I <input>, skip value
+                        // POSIX cluster ending in value-taking flag: -pt <target>
+                        a if a.len() > 2
+                            && a.starts_with('-')
+                            && !a.starts_with("--")
+                            && {
+                                let last = a.chars().last().unwrap_or(' ');
+                                matches!(last, 't' | 'd' | 'I')
+                                    && a[1..a.len()-1].chars().all(|c| matches!(c, 'p'))
+                            } =>
+                        {
+                            let last = a.chars().last().unwrap();
+                            if a.contains('p') { print_to_stdout = true; }
+                            if let Some(val) = cmd_args.get(i + 1) {
+                                match last {
+                                    't' => { target = Some(val.to_string()); }
+                                    'd' => { duration_ms = val.parse::<u64>().ok(); }
+                                    _ => {}
+                                }
+                                i += 1;
+                            }
+                        }
                         s => { message.push(s.to_string()); }
                     }
                     i += 1;
