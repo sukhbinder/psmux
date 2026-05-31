@@ -3686,12 +3686,32 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                                     client_drag = None;
                                 } else if rsel_dragged {
                                     if client_pwsh_selection {
-                                        // Windows 11 style: keep the selection
-                                        // visible until the user right-clicks to
-                                        // copy. Do not overwrite rsel_end here —
-                                        // the drag handler already tracks it,
-                                        // and double-click word bounds must not
-                                        // be replaced by the release-position.
+                                        // tmux-like copy-on-release for
+                                        // pwsh-mouse-selection: use the drag
+                                        // endpoint tracked by MouseDrag so
+                                        // double/triple-click bounds remain
+                                        // intact, then clear transient state.
+                                        if let (Some(s), Some(e)) = (rsel_start, rsel_end) {
+                                            if let Ok(state) = serde_json::from_str::<DumpState>(&prev_dump_buf) {
+                                                let text = extract_selection_text(
+                                                    &state.layout,
+                                                    last_sent_size.0,
+                                                    last_sent_size.1,
+                                                    s, e,
+                                                    rsel_block,
+                                                    rsel_pane_rect,
+                                                );
+                                                if !text.is_empty() {
+                                                    copy_to_system_clipboard(&text);
+                                                    pending_osc52 = Some(text);
+                                                }
+                                            }
+                                        }
+                                        rsel_start = None;
+                                        rsel_end = None;
+                                        rsel_pane_rect = None;
+                                        rsel_block = false;
+                                        rsel_dragged = false;
                                         selection_changed = true;
                                     } else {
                                         // Legacy: copy-on-release.
