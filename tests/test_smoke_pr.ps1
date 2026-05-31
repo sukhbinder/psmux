@@ -1,5 +1,13 @@
 $ErrorActionPreference = "Continue"
-$PSMUX = (Get-Command psmux -EA Stop).Source
+$PSMUX = $env:PSMUX_EXE
+if (-not $PSMUX) {
+    $cmd = Get-Command psmux -EA Stop
+    $PSMUX = if ($cmd.Path) { $cmd.Path } elseif ($cmd.Source) { $cmd.Source } else { $cmd.Definition }
+}
+if (-not $PSMUX) {
+    Write-Host "FATAL: could not resolve psmux executable path" -ForegroundColor Red
+    exit 1
+}
 $SESSION = "smoke_pr"
 $psmuxDir = "$env:USERPROFILE\.psmux"
 $script:TestsPassed = 0
