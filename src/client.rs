@@ -5512,7 +5512,7 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                 .unwrap_or_else(|| state_cursor_style_code.unwrap_or_else(crate::rendering::configured_cursor_code));
             // Compute the active pane's screen Rect so we can translate
             // pane-local cursor coords to terminal-global coords.
-            fn find_active_rect(node: &LayoutJson, area: Rect) -> Option<Rect> {
+            fn find_active_rect(node: &LayoutJson, area: Rect, zoomed: bool) -> Option<Rect> {
                 match node {
                     LayoutJson::Leaf { active, .. } => {
                         if *active { Some(area) } else { None }
@@ -5523,10 +5523,18 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                         } else {
                             vec![(100 / children.len().max(1)) as u16; children.len()]
                         };
+                        if zoomed {
+                            if let Some(i) = eff.iter().position(|&s| s != 0) {
+                                if let Some(child) = children.get(i) {
+                                    return find_active_rect(child, area, zoomed);
+                                }
+                            }
+                            return None;
+                        }
                         let rects = crate::tree::split_with_gaps(kind == "Horizontal", &eff, area);
                         for (i, child) in children.iter().enumerate() {
                             if i < rects.len() {
-                                if let Some(r) = find_active_rect(child, rects[i]) { return Some(r); }
+                                if let Some(r) = find_active_rect(child, rects[i], zoomed) { return Some(r); }
                             }
                         }
                         None
@@ -5543,7 +5551,7 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                 let chunks = Layout::default().direction(Direction::Vertical)
                     .constraints(constraints).split(sz.into());
                 let content_chunk = if status_at_top { chunks[1] } else { chunks[0] };
-                find_active_rect(&root, content_chunk)
+                find_active_rect(&root, content_chunk, client_zoomed)
             };
             // Compute screen-global cursor position from pane-local coords.
             let cursor_visible = if let (Some((cc, cr)), Some(inner)) = (post_draw_cursor, active_pane_area) {
