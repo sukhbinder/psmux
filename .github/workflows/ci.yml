@@ -40,3 +40,28 @@ jobs:
 
       - name: Build
         run: cargo build --release --target ${{ matrix.target }}
+
+  test:
+    name: Test Windows x64
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Build x64 release binary
+        run: cargo build --release --target x86_64-pc-windows-msvc
+
+      - name: Run Rust input tests
+        run: cargo test --test test_input
+
+      - name: Run issue #338 Ctrl+C regression test
+        shell: pwsh
+        run: |
+          $exe = (Resolve-Path "target\release\psmux.exe").Path
+          Set-Alias psmux $exe
+          .\tests\test_issue338_ctrlc_line_cancel.ps1
