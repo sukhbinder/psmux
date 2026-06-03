@@ -43,6 +43,8 @@ pub fn exit_copy_mode(app: &mut AppState) {
     app.copy_pos = None;
     app.copy_mouse_down_cell = None;
     app.copy_scroll_offset = 0;
+    // Clear the search prompt if it was lingering from CopySearch (#335).
+    app.status_message = None;
     let win = &mut app.windows[app.active_idx];
     if let Some(p) = active_pane_mut(&mut win.root, &win.active_path) {
         // Clear the pane-local copy state so re-entering this pane won't

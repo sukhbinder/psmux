@@ -154,6 +154,14 @@ pub(crate) fn combined_data_version(app: &AppState) -> u64 {
     if let Some((ar, ac)) = app.copy_anchor {
         v = v.wrapping_add((ar as u64).wrapping_mul(0x30007).wrapping_add(ac as u64));
     }
+    // Include status_message content so the search prompt refreshes per
+    // keystroke while the user is typing in copy-mode search (#335).
+    if let Some((ref msg, _, _)) = app.status_message {
+        v = v.wrapping_add((msg.len() as u64).wrapping_mul(0x40009));
+        if let Some(b) = msg.as_bytes().last() {
+            v = v.wrapping_add(*b as u64);
+        }
+    }
     v
 }
 

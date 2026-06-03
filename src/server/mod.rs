@@ -2032,9 +2032,13 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         "scroll-down" => { scroll_copy_down(&mut app, 1); }
                         "search-forward" | "search-forward-incremental" => {
                             app.mode = Mode::CopySearch { input: String::new(), forward: true };
+                            let prompt = "(search down) ".to_string();
+                            app.status_message = Some((prompt, std::time::Instant::now(), Some(0)));
                         }
                         "search-backward" | "search-backward-incremental" => {
                             app.mode = Mode::CopySearch { input: String::new(), forward: false };
+                            let prompt = "(search up) ".to_string();
+                            app.status_message = Some((prompt, std::time::Instant::now(), Some(0)));
                         }
                         "search-again" => { crate::copy_mode::search_next(&mut app); }
                         "search-reverse" => { crate::copy_mode::search_prev(&mut app); }
