@@ -17,6 +17,18 @@ use crate::copy_mode::{enter_copy_mode, exit_copy_mode, switch_with_copy_save, m
 use crate::layout::{cycle_top_layout, apply_layout};
 use crate::window_ops::{toggle_zoom, swap_pane, break_pane_to_window};
 
+/// Refresh the status-bar prompt shown while the user is typing in copy-mode
+/// search (#335). Without this the screen looks frozen because the search
+/// input is otherwise invisible.
+fn refresh_search_prompt(app: &mut AppState) {
+    if let Mode::CopySearch { ref input, forward } = app.mode {
+        let arrow = if forward { "down" } else { "up" };
+        let prompt = format!("(search {}) {}", arrow, input);
+        // display-time = 0 keeps the message sticky until cleared.
+        app.status_message = Some((prompt, Instant::now(), Some(0)));
+    }
+}
+
 /// Write a mouse event to the child PTY using the encoding the child requested.
 fn write_mouse_event(master: &mut dyn std::io::Write, button: u8, col: u16, row: u16, press: bool, enc: vt100::MouseProtocolEncoding) {
     match enc {
@@ -803,9 +815,11 @@ pub fn handle_key(app: &mut AppState, key: KeyEvent) -> io::Result<bool> {
                 KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::ALT) => { yank_selection(app)?; exit_copy_mode(app); }
                 KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     app.mode = Mode::CopySearch { input: String::new(), forward: true };
+                    refresh_search_prompt(app);
                 }
                 KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     app.mode = Mode::CopySearch { input: String::new(), forward: false };
+                    refresh_search_prompt(app);
                 }
                 KeyCode::Char('g') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     exit_copy_mode(app);
@@ -908,9 +922,11 @@ pub fn handle_key(app: &mut AppState, key: KeyEvent) -> io::Result<bool> {
                 // --- copy-mode search ---
                 KeyCode::Char('/') => {
                     app.mode = Mode::CopySearch { input: String::new(), forward: true };
+                    refresh_search_prompt(app);
                 }
                 KeyCode::Char('?') => {
                     app.mode = Mode::CopySearch { input: String::new(), forward: false };
+                    refresh_search_prompt(app);
                 }
                 KeyCode::Char('n') => { search_next(app); }
                 KeyCode::Char('N') => { search_prev(app); }
@@ -940,6 +956,7 @@ pub fn handle_key(app: &mut AppState, key: KeyEvent) -> io::Result<bool> {
                 KeyCode::Esc => {
                     // Cancel search, return to copy mode
                     app.mode = Mode::CopyMode;
+                    app.status_message = None;
                 }
                 KeyCode::Enter => {
                     // Execute search
@@ -956,12 +973,15 @@ pub fn handle_key(app: &mut AppState, key: KeyEvent) -> io::Result<bool> {
                         }
                     }
                     app.mode = Mode::CopyMode;
+                    app.status_message = None;
                 }
                 KeyCode::Backspace => {
                     if let Mode::CopySearch { ref mut input, .. } = app.mode { let _ = input.pop(); }
+                    refresh_search_prompt(app);
                 }
                 KeyCode::Char(c) => {
                     if let Mode::CopySearch { ref mut input, .. } = app.mode { input.push(c); }
+                    refresh_search_prompt(app);
                 }
                 _ => {}
             }
@@ -2904,6 +2924,7 @@ pub fn send_text_to_active(app: &mut AppState, text: &str) -> io::Result<()> {
                 input.push(c);
             }
         }
+        refresh_search_prompt(app);
         return Ok(());
     }
 
@@ -3021,8 +3042,8 @@ fn handle_copy_mode_char(app: &mut AppState, c: char) -> io::Result<()> {
             }
         }
         'y' => { yank_selection(app)?; exit_copy_mode(app); }
-        '/' => { app.mode = Mode::CopySearch { input: String::new(), forward: true }; }
-        '?' => { app.mode = Mode::CopySearch { input: String::new(), forward: false }; }
+        '/' => { app.mode = Mode::CopySearch { input: String::new(), forward: true }; refresh_search_prompt(app); }
+        '?' => { app.mode = Mode::CopySearch { input: String::new(), forward: false }; refresh_search_prompt(app); }
         'n' => { search_next(app); }
         'N' => { search_prev(app); }
         'i' => { app.copy_text_object_pending = Some(1); }  // inner text object
@@ -3125,7 +3146,7 @@ pub fn send_key_to_active(app: &mut AppState, k: &str) -> io::Result<()> {
     // --- Copy-search mode: handle esc/enter/backspace ---
     if matches!(app.mode, Mode::CopySearch { .. }) {
         match k {
-            "esc" => { app.mode = Mode::CopyMode; }
+            "esc" => { app.mode = Mode::CopyMode; app.status_message = None; }
             "enter" => {
                 if let Mode::CopySearch { ref input, forward } = app.mode {
                     let query = input.clone();
@@ -3139,9 +3160,11 @@ pub fn send_key_to_active(app: &mut AppState, k: &str) -> io::Result<()> {
                     }
                 }
                 app.mode = Mode::CopyMode;
+                app.status_message = None;
             }
             "backspace" => {
                 if let Mode::CopySearch { ref mut input, .. } = app.mode { input.pop(); }
+                refresh_search_prompt(app);
             }
             _ => {}
         }
@@ -3195,8 +3218,8 @@ pub fn send_key_to_active(app: &mut AppState, k: &str) -> io::Result<()> {
             "M-f" | "m-f" => { crate::copy_mode::move_word_forward(app); }
             "M-b" | "m-b" => { crate::copy_mode::move_word_backward(app); }
             "M-w" | "m-w" => { yank_selection(app)?; exit_copy_mode(app); }
-            "C-s" | "c-s" => { app.mode = Mode::CopySearch { input: String::new(), forward: true }; }
-            "C-r" | "c-r" => { app.mode = Mode::CopySearch { input: String::new(), forward: false }; }
+            "C-s" | "c-s" => { app.mode = Mode::CopySearch { input: String::new(), forward: true }; refresh_search_prompt(app); }
+            "C-r" | "c-r" => { app.mode = Mode::CopySearch { input: String::new(), forward: false }; refresh_search_prompt(app); }
             "C-c" | "c-c" => {
                 exit_copy_mode(app);
             }
