@@ -112,6 +112,14 @@ pub(crate) fn combined_data_version(app: &AppState) -> u64 {
     if let Some(win) = app.windows.get(app.active_idx) {
         walk(&win.root, &mut v);
     }
+    // Include per-window status flags so non-active windows changing their
+    // bell/activity/silence state forces a frame emission. Without this, the
+    // status bar shows the bell or activity indicator only after some
+    // incidental repaint trigger like a mouse move or window switch (#162).
+    for (i, w) in app.windows.iter().enumerate() {
+        let bits = (w.bell_flag as u64) | ((w.activity_flag as u64) << 1) | ((w.silence_flag as u64) << 2);
+        v = v.wrapping_add(bits.wrapping_mul(0x50011).wrapping_add(i as u64));
+    }
     // Include mode discriminant so overlay state changes (PopupMode, MenuMode,
     // ConfirmMode, PaneChooser, ClockMode) always invalidate the cached version.
     // Without this, the NC optimization could return stale frames that lack
