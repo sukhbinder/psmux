@@ -2984,11 +2984,19 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                                 KeyCode::Char(c) if renaming && !key.modifiers.contains(KeyModifiers::CONTROL) && !paste_burst_active => { rename_buf.push(c); }
                                 KeyCode::Char(c) if pane_renaming && !key.modifiers.contains(KeyModifiers::CONTROL) && !paste_burst_active => { pane_title_buf.push(c); }
                                 KeyCode::Char(c) if window_idx_input && c.is_ascii_digit() && !paste_burst_active => { window_idx_buf.push(c); }
-                                KeyCode::Char(c) if command_input && !key.modifiers.contains(KeyModifiers::CONTROL) && !paste_burst_active => { command_buf.insert(command_cursor, c); command_cursor += 1; }
+                                KeyCode::Char(c) if command_input && !key.modifiers.contains(KeyModifiers::CONTROL) && !paste_burst_active => { command_buf.insert(command_cursor, c); command_cursor += c.len_utf8(); }
                                 KeyCode::Backspace if renaming => { let _ = rename_buf.pop(); }
                                 KeyCode::Backspace if pane_renaming => { let _ = pane_title_buf.pop(); }
                                 KeyCode::Backspace if window_idx_input => { let _ = window_idx_buf.pop(); }
-                                KeyCode::Backspace if command_input => { if command_cursor > 0 { command_buf.remove(command_cursor - 1); command_cursor -= 1; } }
+                                KeyCode::Backspace if command_input => {
+                                    if command_cursor > 0 {
+                                        // Walk back to the previous char boundary so we never split a UTF-8 sequence.
+                                        let prev_len = command_buf[..command_cursor].chars().next_back().map(|c| c.len_utf8()).unwrap_or(1);
+                                        let new_cursor = command_cursor - prev_len;
+                                        command_buf.replace_range(new_cursor..command_cursor, "");
+                                        command_cursor = new_cursor;
+                                    }
+                                }
                                 KeyCode::Enter if renaming => {
                                     if session_renaming {
                                         cmd_batch.push(format!("rename-session {}\n", quote_arg(&rename_buf)));
@@ -3100,8 +3108,18 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                                 KeyCode::Esc if command_input => { command_input = false; command_cursor = 0; }
 
                                 // Command prompt: cursor movement, history, and editing keys
-                                KeyCode::Left if command_input => { if command_cursor > 0 { command_cursor -= 1; } }
-                                KeyCode::Right if command_input => { if command_cursor < command_buf.len() { command_cursor += 1; } }
+                                KeyCode::Left if command_input => {
+                                    if command_cursor > 0 {
+                                        let prev_len = command_buf[..command_cursor].chars().next_back().map(|c| c.len_utf8()).unwrap_or(1);
+                                        command_cursor -= prev_len;
+                                    }
+                                }
+                                KeyCode::Right if command_input => {
+                                    if command_cursor < command_buf.len() {
+                                        let next_len = command_buf[command_cursor..].chars().next().map(|c| c.len_utf8()).unwrap_or(1);
+                                        command_cursor += next_len;
+                                    }
+                                }
                                 KeyCode::Home if command_input => { command_cursor = 0; }
                                 KeyCode::End if command_input => { command_cursor = command_buf.len(); }
                                 KeyCode::Delete if command_input => { if command_cursor < command_buf.len() { command_buf.remove(command_cursor); } }
@@ -5749,3 +5767,7 @@ mod test_zoom_bleed;
 #[cfg(test)]
 #[path = "../tests-rs/test_zoom_cursor_rect.rs"]
 mod test_zoom_cursor_rect;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue345_command_prompt_utf8.rs"]
+mod test_issue345_command_prompt_utf8;

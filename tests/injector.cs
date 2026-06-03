@@ -192,6 +192,21 @@ class Injector
                         Thread.Sleep(ms);
                         log.Add("  SLEEP " + ms + "ms");
                     }
+                    else if (token.StartsWith("U:"))
+                    {
+                        // {U:XXXX[,XXXX,...]} — inject one or more Unicode codepoints
+                        // (hex BMP) as KEY_EVENT records with vk=0 and UnicodeChar set.
+                        // crossterm's ReadConsoleInputW path delivers these as
+                        // KeyCode::Char(c) — the only reliable way to inject e.g.
+                        // CJK characters into the console input buffer.
+                        var hexes = token.Substring(2).Split(',');
+                        foreach (var hex in hexes)
+                        {
+                            char uc = (char)Convert.ToUInt16(hex, 16);
+                            if (SendKey(handle, 0, uc, 0, log)) injected++;
+                            Thread.Sleep(20);
+                        }
+                    }
                     else if (token.StartsWith("RAW:"))
                     {
                         // RAW:vkHex:charHex:ctrlHex  e.g. RAW:BF:1F:0008
