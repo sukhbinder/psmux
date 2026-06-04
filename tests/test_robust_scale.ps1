@@ -203,7 +203,12 @@ try {
     $S2 = "rbScale_pane"
 
     # Large geometry is required so 40 panes each clear the minimum pane size.
+    # Force a COLD spawn (PSMUX_NO_WARM) for this scenario: a warm-claimed session
+    # keeps the warm server's pre-spawn size and ignores -x/-y, which would cap the
+    # pane count. Cold spawn honors the requested 400x200 geometry.
+    $env:PSMUX_NO_WARM = "1"
     PxCode new-session -d -s $S2 -n p -x 400 -y 200 | Out-Null
+    $env:PSMUX_NO_WARM = $null
     Start-Sleep -Seconds 3
 
     $target = "$($S2):0"
