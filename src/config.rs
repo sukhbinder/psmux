@@ -1352,7 +1352,31 @@ pub fn parse_key_name(name: &str) -> Option<(KeyCode, KeyModifiers)> {
     None
 }
 
+thread_local! {
+    // Guards against runaway recursion when a config sources itself (directly or
+    // in a cycle). Without this a self-sourcing psmux.conf overflows the stack and
+    // crashes the server, so the session never comes up ("no server running").
+    static SOURCE_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+const MAX_SOURCE_DEPTH: u32 = 16;
+
+struct SourceDepthGuard;
+impl Drop for SourceDepthGuard {
+    fn drop(&mut self) {
+        SOURCE_DEPTH.with(|d| d.set(d.get().saturating_sub(1)));
+    }
+}
+
 pub fn source_file(app: &mut AppState, path: &str) {
+    let depth = SOURCE_DEPTH.with(|d| d.get());
+    if depth >= MAX_SOURCE_DEPTH {
+        eprintln!("psmux: source-file: maximum nesting depth ({}) exceeded; ignoring '{}' (recursive source-file?)", MAX_SOURCE_DEPTH, path);
+        return;
+    }
+    SOURCE_DEPTH.with(|d| d.set(depth + 1));
+    let _depth_guard = SourceDepthGuard; // decrements on every return path
+
     let path = path.trim().trim_matches('"').trim_matches('\'');
 
     // Handle -F flag: expand format strings in the path
