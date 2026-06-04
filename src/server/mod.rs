@@ -2490,10 +2490,14 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     if let Some(port) = app.control_port {
                         let _ = std::fs::remove_file(&old_path);
                         let _ = std::fs::write(&new_path, port.to_string());
-                        if let Ok(key) = std::fs::read_to_string(&old_keypath) {
-                            let _ = std::fs::remove_file(&old_keypath);
-                            let _ = std::fs::write(&new_keypath, key);
-                        }
+                        // Write this server's OWN in-memory key, NOT a copy of the
+                        // old .key file. Under warm-server replenish churn the
+                        // __warm__.key file may have been overwritten by a LATER warm
+                        // server, so copying it would give the renamed/claimed session
+                        // a key that does not match this server (seen as "Invalid
+                        // session key" on a later command). app.session_key is correct.
+                        let _ = std::fs::remove_file(&old_keypath);
+                        let _ = std::fs::write(&new_keypath, &app.session_key);
                         // Rename .sid file to match new session name
                         crate::session::remove_session_id_file(&app.port_file_base());
                         crate::session::write_session_id_file(&new_base, app.session_id);
@@ -2531,10 +2535,14 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     if let Some(port) = app.control_port {
                         let _ = std::fs::remove_file(&old_path);
                         let _ = std::fs::write(&new_path, port.to_string());
-                        if let Ok(key) = std::fs::read_to_string(&old_keypath) {
-                            let _ = std::fs::remove_file(&old_keypath);
-                            let _ = std::fs::write(&new_keypath, key);
-                        }
+                        // Write this server's OWN in-memory key, NOT a copy of the
+                        // old .key file. Under warm-server replenish churn the
+                        // __warm__.key file may have been overwritten by a LATER warm
+                        // server, so copying it would give the renamed/claimed session
+                        // a key that does not match this server (seen as "Invalid
+                        // session key" on a later command). app.session_key is correct.
+                        let _ = std::fs::remove_file(&old_keypath);
+                        let _ = std::fs::write(&new_keypath, &app.session_key);
                         // Rename .sid file to match new session name
                         crate::session::remove_session_id_file(&app.port_file_base());
                         crate::session::write_session_id_file(&new_base, app.session_id);
