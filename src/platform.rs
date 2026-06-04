@@ -1039,8 +1039,15 @@ pub mod mouse_inject {
     ///   2. Re-enabling ENABLE_PROCESSED_INPUT if it was cleared
     ///   3. Calling GenerateConsoleCtrlEvent(CTRL_C_EVENT, 0)
     ///
-    /// The combination ensures Ctrl+C always delivers a signal regardless of
-    /// what a previous TUI application did to the console mode.
+    /// The combination ensures Ctrl+C delivers a signal to shells and cooked
+    /// console apps regardless of what a previous TUI application did to the
+    /// console mode.
+    ///
+    /// EXCEPTION: when the pane's foreground process is a *live* raw-mode TUI
+    /// (e.g. Copilot CLI, vim) that has cleared ENABLE_PROCESSED_INPUT to read
+    /// Ctrl+C itself, this function skips the signal so the raw 0x03 byte the
+    /// caller already wrote reaches the app, which decides copy-vs-interrupt.
+    /// See `process_info::foreground_is_shell`.
     pub fn send_ctrl_c_event(child_pid: u32, reattach: bool) -> bool {
         const CTRL_C_EVENT: u32 = 0;
         const ENABLE_PROCESSED_INPUT: u32 = 0x0001;
@@ -1065,6 +1072,16 @@ pub mod mouse_inject {
         fn log(msg: &str) {
             debug_log(&format!("ctrl_c: {}", msg));
         }
+
+        // Decide up-front whether the pane's foreground process wants a console
+        // interrupt (shells / VT bridges / bare prompt) or is a live raw-mode
+        // TUI that should receive raw 0x03 itself (Copilot CLI, vim, ...).
+        // Unknown (snapshot failure) falls back to `true` so we preserve the
+        // established interrupt behavior (#338 line-cancel, #346 ping).  This
+        // process-tree walk does not touch our console, so it is done before
+        // the FreeConsole/AttachConsole dance below.
+        let fg_is_shell = crate::platform::process_info::foreground_is_shell(child_pid)
+            .unwrap_or(true);
 
         unsafe {
             let had_console = reattach && GetConsoleWindow() != 0;
@@ -1098,8 +1115,23 @@ pub mod mouse_inject {
             if handle != INVALID_HANDLE && handle != 0 {
                 let mut mode: u32 = 0;
                 if GetConsoleMode(handle as *mut c_void, &mut mode) != 0 {
-                    log(&format!("console mode=0x{:04X} PROCESSED_INPUT={}", mode, mode & ENABLE_PROCESSED_INPUT != 0));
+                    log(&format!("console mode=0x{:04X} PROCESSED_INPUT={} fg_is_shell={}", mode, mode & ENABLE_PROCESSED_INPUT != 0, fg_is_shell));
                     if mode & ENABLE_PROCESSED_INPUT == 0 {
+                        if !fg_is_shell {
+                            // Live raw-mode TUI (Copilot CLI, vim, ...): it
+                            // cleared ENABLE_PROCESSED_INPUT to read raw 0x03
+                            // itself and decide copy-vs-interrupt.  The caller
+                            // already wrote raw 0x03 to the pipe; firing
+                            // GenerateConsoleCtrlEvent would bypass the app and
+                            // kill it.  Skip the signal and detach cleanly.
+                            // (We have not installed the ignore-handler yet, so
+                            // there is nothing to restore here.)
+                            log(&format!("raw-mode non-shell foreground pid={}: deliver raw 0x03, skip CTRL_C_EVENT", child_pid));
+                            CloseHandle(handle);
+                            FreeConsole();
+                            if had_console { AttachConsole(ATTACH_PARENT_PROCESS); }
+                            return false;
+                        }
                         log(&format!("re-enabling ENABLE_PROCESSED_INPUT for pid={}", child_pid));
                         SetConsoleMode(handle as *mut c_void, mode | ENABLE_PROCESSED_INPUT);
                     }
@@ -2034,6 +2066,80 @@ pub mod process_info {
             || stem.starts_with("wsl")
     }
 
+    /// Native Windows shell executables.  Used by the Ctrl+C router to decide
+    /// whether a pane's foreground process expects a console interrupt signal
+    /// (shells) or should instead receive raw 0x03 and handle Ctrl+C itself
+    /// (live raw-mode TUIs like Copilot CLI, vim, nvim).
+    pub fn is_shell_exe(name: &str) -> bool {
+        let stem = name.strip_suffix(".exe").unwrap_or(name);
+        matches!(stem,
+            "pwsh" | "powershell" | "cmd" | "command"
+            | "bash" | "sh" | "dash" | "zsh" | "fish"
+            | "ksh" | "tcsh" | "csh" | "nu" | "elvish" | "xonsh" | "busybox"
+        )
+    }
+
+    /// Classify the foreground process of the pane rooted at `root_pid` for the
+    /// purpose of Ctrl+C routing.
+    ///
+    /// Walks the process tree from `root_pid` down to the deepest foreground
+    /// leaf (newest child at each level), so nested wrapper chains such as
+    /// `pwsh -> cmd -> node` resolve to the actual running program rather than
+    /// stopping at the first wrapper.
+    ///
+    /// Returns:
+    ///   `Some(true)`  — the foreground is a shell, a VT bridge (wsl/ssh), or a
+    ///                   bare prompt with no foreground child.  These expect a
+    ///                   console `CTRL_C_EVENT`.
+    ///   `Some(false)` — a live non-shell program (Copilot CLI, vim, ...) owns
+    ///                   the console; it should receive raw 0x03 and decide for
+    ///                   itself (copy selection vs. interrupt).
+    ///   `None`        — the process snapshot could not be taken; the caller
+    ///                   should fall back to its default behavior.
+    pub fn foreground_is_shell(root_pid: u32) -> Option<bool> {
+        unsafe {
+            let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+            if snap == INVALID_HANDLE || snap == 0 {
+                return None;
+            }
+
+            let mut entries: Vec<(u32, u32, String)> = Vec::with_capacity(512);
+            let mut pe: PROCESSENTRY32W = std::mem::zeroed();
+            pe.dw_size = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+            if Process32FirstW(snap, &mut pe) != 0 {
+                entries.push((pe.th32_process_id, pe.th32_parent_process_id, exe_name_from_entry(&pe)));
+                while Process32NextW(snap, &mut pe) != 0 {
+                    entries.push((pe.th32_process_id, pe.th32_parent_process_id, exe_name_from_entry(&pe)));
+                }
+            }
+            CloseHandle(snap);
+
+            // Descend to the deepest foreground leaf, skipping system processes.
+            // The iteration guard prevents pathological loops from PID-reuse
+            // cycles in the snapshot.
+            let mut cur = root_pid;
+            let mut leaf_name: Option<String> = None;
+            for _ in 0..64 {
+                let next = entries.iter()
+                    .filter(|(pid, ppid, name)| *ppid == cur && *pid != cur && !is_system_exe(name))
+                    .max_by_key(|(pid, _, _)| *pid);
+                match next {
+                    Some((pid, _, name)) => {
+                        cur = *pid;
+                        leaf_name = Some(name.clone());
+                    }
+                    None => break,
+                }
+            }
+
+            match leaf_name {
+                // No foreground child: bare shell prompt -> wants the signal.
+                None => Some(true),
+                Some(name) => Some(is_shell_exe(&name) || is_vt_bridge_exe(&name)),
+            }
+        }
+    }
+
     /// Walk the process tree from `root_pid` and check if any descendant
     /// is a VT bridge process (wsl.exe, ssh.exe, etc.).
     /// This is used for mouse injection: VT bridge processes need VT mouse
@@ -2489,3 +2595,8 @@ mod tests_issue265_argv_backslash;
 #[cfg(windows)]
 #[path = "../tests-rs/test_char_to_vk.rs"]
 mod tests_char_to_vk;
+
+#[cfg(test)]
+#[cfg(windows)]
+#[path = "../tests-rs/test_ctrlc_shell_classify.rs"]
+mod tests_ctrlc_shell_classify;
