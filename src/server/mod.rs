@@ -3814,46 +3814,32 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     let start_dir = start_dir.map(|d| expand_format(&d, &app)).filter(|d| !d.is_empty());
                     let saved_dir = if start_dir.is_some() { env::current_dir().ok() } else { None };
                     if let Some(dir) = &start_dir { let _ = env::set_current_dir(dir); }
-                    if !command.is_empty() {
-                        // Spawn popup as a real Pane via the popup module
-                        let inner_h = height.saturating_sub(2);
-                        let inner_w = width.saturating_sub(2);
-                        let pane_result = crate::popup::create_popup_pane(
-                            &command,
-                            start_dir.as_deref(),
-                            inner_h,
-                            inner_w,
-                            app.next_pane_id,
-                            &app.session_name,
-                            &app.environment,
-                        );
-                        if let Some(prev) = saved_dir { let _ = env::set_current_dir(prev); }
-                        
-                        app.mode = Mode::PopupMode {
-                            command: command.clone(),
-                            output: String::new(),
-                            process: None,
-                            width,
-                            height,
-                            close_on_exit,
-                            popup_pane: pane_result,
-                            scroll_offset: 0,
-                        };
-                        state_dirty = true;
-                    } else {
-                        if let Some(prev) = saved_dir { let _ = env::set_current_dir(prev); }
-                        app.mode = Mode::PopupMode {
-                            command: String::new(),
-                            output: "Press 'q' or Escape to close\n".to_string(),
-                            process: None,
-                            width,
-                            height,
-                            close_on_exit: true,
-                            popup_pane: None,
-                            scroll_offset: 0,
-                        };
-                        state_dirty = true;
-                    }
+                    // Spawn popup as a real Pane via the popup module. Empty
+                    // commands launch the default interactive shell.
+                    let inner_h = height.saturating_sub(2);
+                    let inner_w = width.saturating_sub(2);
+                    let pane_result = crate::popup::create_popup_pane(
+                        &command,
+                        start_dir.as_deref(),
+                        inner_h,
+                        inner_w,
+                        app.next_pane_id,
+                        &app.session_name,
+                        &app.environment,
+                    );
+                    if let Some(prev) = saved_dir { let _ = env::set_current_dir(prev); }
+
+                    app.mode = Mode::PopupMode {
+                        command: command.clone(),
+                        output: String::new(),
+                        process: None,
+                        width,
+                        height,
+                        close_on_exit,
+                        popup_pane: pane_result,
+                        scroll_offset: 0,
+                    };
+                    state_dirty = true;
                 }
                 CtrlReq::ConfirmBefore(prompt, cmd) => {
                     let prompt_text = if prompt.is_empty() {
