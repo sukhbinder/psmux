@@ -41,9 +41,19 @@ pub fn create_popup_pane(
     };
     let pair = pty_sys.openpty(pty_size).ok()?;
 
-    let mut cmd_builder = portable_pty::CommandBuilder::new(
-        if cfg!(windows) { "pwsh" } else { "sh" },
-    );
+    let mut cmd_builder = if command.trim().is_empty() {
+        crate::pane::build_command(None, true, false)
+    } else {
+        let mut builder = portable_pty::CommandBuilder::new(
+            if cfg!(windows) { "pwsh" } else { "sh" },
+        );
+        if cfg!(windows) {
+            builder.args(["-NoProfile", "-Command", command]);
+        } else {
+            builder.args(["-c", command]);
+        }
+        builder
+    };
     if let Some(dir) = start_dir {
         cmd_builder.cwd(dir);
     } else if let Ok(dir) = std::env::current_dir() {
@@ -54,11 +64,6 @@ pub fn create_popup_pane(
     cmd_builder.env("COLORTERM", "truecolor");
     cmd_builder.env("PSMUX_SESSION", session_name);
     crate::pane::apply_user_environment(&mut cmd_builder, environment);
-    if cfg!(windows) {
-        cmd_builder.args(["-NoProfile", "-Command", command]);
-    } else {
-        cmd_builder.args(["-c", command]);
-    }
 
     let child = pair.slave.spawn_command(cmd_builder).ok()?;
     drop(pair.slave); // required for ConPTY
