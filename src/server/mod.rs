@@ -168,7 +168,13 @@ fn spawn_warm_server(app: &AppState) {
     let warm_port_path = format!("{}\\.psmux\\{}.port", home, warm_base);
     warm_debug(&format!("spawn_warm_server entry base={} port_exists={}", warm_base, std::path::Path::new(&warm_port_path).exists()));
     if std::path::Path::new(&warm_port_path).exists() {
-        // Check if it's actually alive
+        // Check if it's actually a live, unclaimed warm server.
+        // TCP reachability alone is not sufficient: OS ephemeral-port reuse or
+        // duplicated-warm churn can leave __warm__.port pointing at a real
+        // claimed session.  That server answers TCP connects but is NOT warm,
+        // so returning early here means warm never re-establishes and every
+        // subsequent open stays cold (~1-5s) until the pointer is manually removed.
+        let mut is_genuine_warm = false;
         if let Ok(port_str) = std::fs::read_to_string(&warm_port_path) {
             if let Ok(port) = port_str.trim().parse::<u16>() {
                 let addr = format!("127.0.0.1:{}", port);
@@ -176,16 +182,47 @@ fn spawn_warm_server(app: &AppState) {
                     &addr.parse().unwrap(),
                     Duration::from_millis(100),
                 ).is_ok() {
-                    warm_debug("early-return: existing warm alive");
-                    return; // warm server already running
+                    // TCP is up — verify the session name via AUTH.
+                    let warm_key_path = format!("{}\\.psmux\\{}.key", home, warm_base);
+                    if let Ok(key) = std::fs::read_to_string(&warm_key_path) {
+                        let key = key.trim().to_string();
+                        if !key.is_empty() {
+                            // Ask the server what its session name is.
+                            // Response is the name followed by a newline.
+                            // Timeout is capped at 500ms inside send_auth_cmd_response.
+                            match crate::session::send_auth_cmd_response(
+                                &addr, &key,
+                                b"display-message -p '#{session_name}'\n",
+                            ) {
+                                Ok(resp) if resp.trim() == "__warm__" => {
+                                    warm_debug("early-return: existing warm verified alive");
+                                    is_genuine_warm = true;
+                                }
+                                Ok(resp) => {
+                                    warm_debug(&format!(
+                                        "warm port reachable but session='{}' (not __warm__) — treating as stale",
+                                        resp.trim()
+                                    ));
+                                }
+                                Err(_) => {
+                                    warm_debug("warm port reachable but auth/query failed — treating as stale");
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
-        // Stale port file — remove it (and matching key file)
-        warm_debug("removing STALE warm port/key (existed but connect failed)");
+        if is_genuine_warm {
+            return;
+        }
+        // Stale or wrong-server port file — remove it (and matching key/sid files)
+        warm_debug("removing STALE warm port/key/sid (unreachable or not a warm server)");
         let _ = std::fs::remove_file(&warm_port_path);
         let warm_key_path = format!("{}\\.psmux\\{}.key", home, warm_base);
         let _ = std::fs::remove_file(&warm_key_path);
+        let warm_sid_path = format!("{}\\.psmux\\{}.sid", home, warm_base);
+        let _ = std::fs::remove_file(&warm_sid_path);
     }
     warm_debug("SPAWNING new warm server");
     let exe = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("psmux"));
@@ -4604,7 +4641,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
             };
             let cursor_style_code = crate::rendering::configured_cursor_code();
             let _ = std::fmt::Write::write_fmt(&mut combined_buf, format_args!(
-                "{{\"layout\":{},\"windows\":{},\"prefix\":\"{}\",\"prefix2\":\"{}\",\"tree\":{},\"base_index\":{},\"pane_base_index\":{},\"prediction_dimming\":{},\"status_style\":\"{}\",\"status_left\":\"{}\",\"status_right\":\"{}\",\"pane_border_style\":\"{}\",\"pane_active_border_style\":\"{}\",\"pane_border_hover_style\":\"{}\",\"wsf\":\"{}\",\"wscf\":\"{}\",\"wss\":\"{}\",\"ws_style\":\"{}\",\"wsc_style\":\"{}\",\"clock_mode\":{},\"bindings\":{},\"status_left_length\":{},\"status_right_length\":{},\"status_lines\":{},\"status_format\":{},\"mode_style\":\"{}\",\"status_position\":\"{}\",\"status_justify\":\"{}\",\"cursor_style_code\":{},\"status_visible\":{},\"repeat_time\":{},\"zoomed\":{},\"pwsh_mouse_selection\":{},\"mouse_selection\":{},\"choose_tree_preview\":{},\"scroll_enter_copy_mode\":{}}}",
+                "{{\"layout\":{},\"windows\":{},\"prefix\":\"{}\",\"prefix2\":\"{}\",\"tree\":{},\"base_index\":{},\"pane_base_index\":{},\"prediction_dimming\":{},\"status_style\":\"{}\",\"status_left\":\"{}\",\"status_right\":\"{}\",\"pane_border_style\":\"{}\",\"pane_active_border_style\":\"{}\",\"pane_border_hover_style\":\"{}\",\"wsf\":\"{}\",\"wscf\":\"{}\",\"wss\":\"{}\",\"ws_style\":\"{}\",\"wsc_style\":\"{}\",\"clock_mode\":{},\"bindings\":{},\"status_left_length\":{},\"status_right_length\":{},\"status_lines\":{},\"status_format\":{},\"mode_style\":\"{}\",\"status_position\":\"{}\",\"status_justify\":\"{}\",\"cursor_style_code\":{},\"status_visible\":{},\"repeat_time\":{},\"zoomed\":{},\"pwsh_mouse_selection\":{},\"mouse_selection\":{},\"paste_detection\":{},\"choose_tree_preview\":{},\"scroll_enter_copy_mode\":{}}}",
                 layout_json, cached_windows_json, cached_prefix_str, cached_prefix2_str, cached_tree_json, cached_base_index, app.pane_base_index, cached_pred_dim, ss_escaped, sl_expanded, sr_expanded, pbs_escaped, pabs_escaped, pbhs_escaped, wsf_escaped, wscf_escaped, wss_escaped, ws_style_escaped, wsc_style_escaped,
                 matches!(app.mode, Mode::ClockMode), cached_bindings_json,
                 app.status_left_length, app.status_right_length, app.status_lines, status_format_json,
@@ -4613,6 +4650,7 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                 app.windows.get(app.active_idx).map_or(false, |w| w.zoom_saved.is_some()),
                 app.pwsh_mouse_selection,
                 app.mouse_selection,
+                app.paste_detection,
                 app.choose_tree_preview,
                 app.scroll_enter_copy_mode,
             ));

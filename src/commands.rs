@@ -644,6 +644,13 @@ pub fn parse_command_line(line: &str) -> Vec<String> {
     let mut current = String::new();
     let mut in_double_quotes = false;
     let mut in_single_quotes = false;
+    // Track whether the current token contained an explicit quote, so an
+    // intentionally-empty quoted argument (e.g. `select-pane -T ""`) is
+    // preserved as an empty string rather than dropped. Without this, an empty
+    // `""`/`''` token is silently discarded and a following flag value is lost
+    // (this was the root cause of #177: `select-pane -T ""` never cleared the
+    // pane title because the empty value never reached SetPaneTitle).
+    let mut had_quote = false;
     let chars: Vec<char> = line.chars().collect();
     let mut i = 0;
 
@@ -674,20 +681,23 @@ pub fn parse_command_line(line: &str) -> Vec<String> {
             }
         } else if c == '"' {
             in_double_quotes = !in_double_quotes;
+            had_quote = true;
         } else if c == '\'' && !in_double_quotes {
             in_single_quotes = true;
+            had_quote = true;
         } else if c.is_whitespace() && !in_double_quotes {
-            if !current.is_empty() {
+            if !current.is_empty() || had_quote {
                 args.push(current.clone());
                 current.clear();
             }
+            had_quote = false;
         } else {
             current.push(c);
         }
         i += 1;
     }
 
-    if !current.is_empty() {
+    if !current.is_empty() || had_quote {
         args.push(current);
     }
 

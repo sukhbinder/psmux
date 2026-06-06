@@ -1881,6 +1881,10 @@ mod tests_issue198_unbind_individual;
 mod tests_issue198_cv_persist;
 
 #[cfg(test)]
+#[path = "../tests-rs/test_issue198_pastedetect_frame_parity.rs"]
+mod tests_issue198_pastedetect_frame_parity;
+
+#[cfg(test)]
 #[path = "../tests-rs/test_config_exhaustive.rs"]
 mod tests_config_exhaustive;
 
