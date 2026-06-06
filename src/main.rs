@@ -978,6 +978,21 @@ fn run_main() -> io::Result<()> {
                                             }
                                             true
                                         }
+                                        // Explicit rejection: the server answered
+                                        // but it is NOT a warm server (e.g. a stale
+                                        // __warm__.port left pointing at an already-
+                                        // claimed session, or OS ephemeral-port reuse
+                                        // routing us to a live non-warm server). This
+                                        // claim will NEVER produce our session, so do
+                                        // NOT commit — fall through to a clean cold
+                                        // spawn. The stale handoff file was already
+                                        // consumed (renamed to .claiming then removed
+                                        // below), so the bad warm pointer self-heals
+                                        // and the next open is fast again. Without
+                                        // this, we would wait the full port-file
+                                        // timeout (~5s) for a session that never
+                                        // appears and then fail the open entirely.
+                                        Ok(resp) if resp.contains("ERR") => false,
                                         // We have ALREADY atomically claimed this
                                         // warm (won the .port rename) and sent
                                         // claim-session to a live server, so it WILL
@@ -3555,11 +3570,21 @@ fn run_main() -> io::Result<()> {
                                 // response so files are renamed before we
                                 // try to attach.
                                 let mut claim_line = String::new();
-                                if std::io::BufRead::read_line(&mut br, &mut claim_line).unwrap_or(0) > 0
-                                    && claim_line.contains("OK")
-                                {
+                                let got = std::io::BufRead::read_line(&mut br, &mut claim_line).unwrap_or(0) > 0;
+                                if got && claim_line.contains("OK") {
                                     warm_claimed = true;
+                                } else if got && claim_line.contains("ERR") {
+                                    // Explicit rejection: this server is NOT a warm
+                                    // server (stale __warm__.port -> already-claimed
+                                    // session, or OS port reuse). Do NOT commit; the
+                                    // handoff file was already consumed above, so the
+                                    // bad warm pointer self-heals. Cold-spawn instead
+                                    // of waiting ~5s for a session that never appears.
+                                    warm_claimed = false;
                                 }
+                                // No/garbled response: leave warm_claimed = true
+                                // (set above) to preserve the rapid-creation race
+                                // fix — we own a live warm that will complete.
                             }
                         }
                     }
