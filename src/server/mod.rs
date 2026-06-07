@@ -2484,6 +2484,18 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         // Last window: kill all children; reaper will detect empty session and exit
                         kill_all_children(&mut app.windows[0].root);
                     }
+                    // Killing a window changes the active window and the window
+                    // list, so resize the now-active window's panes and force a
+                    // status-bar/window-list rebuild + push to attached clients.
+                    // Without meta_dirty the cached window tabs stay stale and
+                    // without state_dirty the no-change fast path skips the frame,
+                    // leaving the bottom bar showing the killed window until the
+                    // next input (issue #359). Mirrors every other structural
+                    // mutation (new-window, kill-pane, select-window) and tmux's
+                    // server_kill_window -> server_redraw_session_group.
+                    resize_all_panes(&mut app);
+                    meta_dirty = true;
+                    state_dirty = true;
                     hook_event = Some("window-closed");
                 }
                 CtrlReq::KillSession => {
