@@ -1114,6 +1114,20 @@ pub mod mouse_inject {
                 std::ptr::null(),
             );
 
+            // If we temporarily flip ENABLE_PROCESSED_INPUT on to make
+            // GenerateConsoleCtrlEvent fire, remember the handle + original mode
+            // so we can restore the shell's raw console state afterwards.
+            //
+            // Leaving PROCESSED_INPUT permanently ON corrupts PSReadLine, which
+            // deliberately runs the console RAW (PROCESSED_INPUT cleared) so it
+            // can read Ctrl+C as a key event and cancel the input line.  Once the
+            // flag is stuck on, the raw 0x03 byte the caller writes is swallowed
+            // by the console as a no-op CTRL_C_EVENT at a bare prompt instead of
+            // reaching PSReadLine as a key, so only the *first* Ctrl+C cancels the
+            // line and every subsequent press is silently dropped (repeated-Ctrl+C
+            // regression).
+            let mut restore_mode: Option<(isize, u32)> = None;
+
             if handle != INVALID_HANDLE && handle != 0 {
                 let mut mode: u32 = 0;
                 if GetConsoleMode(handle as *mut c_void, &mut mode) != 0 {
@@ -1134,11 +1148,20 @@ pub mod mouse_inject {
                             if had_console { AttachConsole(ATTACH_PARENT_PROCESS); }
                             return false;
                         }
-                        log(&format!("re-enabling ENABLE_PROCESSED_INPUT for pid={}", child_pid));
+                        // Raw-mode shell prompt (e.g. PSReadLine).  Flip
+                        // PROCESSED_INPUT on *only* for the duration of the
+                        // signal, then restore the original raw mode below so the
+                        // NEXT Ctrl+C is still delivered to the shell as a key
+                        // event.  Keep the handle open until the restore.
+                        log(&format!("re-enabling ENABLE_PROCESSED_INPUT (temporary) for pid={}", child_pid));
                         SetConsoleMode(handle as *mut c_void, mode | ENABLE_PROCESSED_INPUT);
+                        restore_mode = Some((handle, mode));
+                    } else {
+                        CloseHandle(handle);
                     }
+                } else {
+                    CloseHandle(handle);
                 }
-                CloseHandle(handle);
             }
 
             // Ignore CTRL_C in our own process so GenerateConsoleCtrlEvent
@@ -1157,6 +1180,17 @@ pub mod mouse_inject {
             // to propagate through the console subsystem before we detach.
             // psmux is protected by the preceding SetConsoleCtrlHandler(None, 1).
             std::thread::sleep(std::time::Duration::from_millis(5));
+
+            // Restore the shell's original (raw) console input mode now that the
+            // signal has been delivered.  This is what keeps *repeated* Ctrl+C
+            // working: PSReadLine left PROCESSED_INPUT cleared so it could read
+            // Ctrl+C as a key, and the next press must still arrive that way.
+            // Leaving it cooked makes every Ctrl+C after the first a silent
+            // no-op at a bare prompt.
+            if let Some((h, orig)) = restore_mode {
+                SetConsoleMode(h as *mut c_void, orig);
+                CloseHandle(h);
+            }
 
             // Detach from the child's console BEFORE restoring Ctrl+C handling.
             // If we restore the default handler while still attached, the async
