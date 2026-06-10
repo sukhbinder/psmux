@@ -1,11 +1,19 @@
 use std::io::{self, ErrorKind, Write};
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 use std::env;
 
 const STALE_PORT_PROBE_ATTEMPTS: usize = 3;
 const STALE_PORT_CONNECT_TIMEOUT: Duration = Duration::from_millis(100);
 const STALE_PORT_RETRY_DELAY: Duration = Duration::from_millis(25);
+/// How long to wait for the server's AUTH ack (`OK` / `ERROR`) when verifying
+/// that the listener on a port file's port is actually *our* psmux server.
+const STALE_PORT_AUTH_READ_TIMEOUT: Duration = Duration::from_millis(120);
+/// Grace window subtracted from the system boot time before treating a
+/// registry file as "written before this boot". Absorbs clock jitter and the
+/// inherent imprecision of deriving boot wall-time from uptime, so a server
+/// that wrote its port file moments after boot is never falsely reaped.
+const BOOT_TIME_MARGIN: Duration = Duration::from_secs(10);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PortProbeResult {
@@ -130,29 +138,106 @@ pub fn cleanup_stale_port_files() {
 }
 
 fn cleanup_stale_port_files_in(psmux_dir: &Path) {
-    cleanup_stale_port_files_in_with(psmux_dir, probe_port_for_cleanup);
+    cleanup_stale_port_files_in_with(psmux_dir, probe_session_for_cleanup);
+}
+
+/// Resolve the session key stored alongside a `.port` file (the sibling
+/// `.key`). Returns an empty string when the key file is missing, which the
+/// identity probe treats as "cannot verify" (Inconclusive) rather than dead.
+fn read_key_for_port_path(port_path: &Path) -> String {
+    let key_path = port_path.with_extension("key");
+    std::fs::read_to_string(&key_path)
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default()
+}
+
+/// Best-effort wall-clock time the system last booted, derived from uptime.
+///
+/// Any registry file last written before this instant cannot belong to a
+/// server that has been running since the machine started — its owning
+/// process died with the previous boot (e.g. an OS-update reboot). This is
+/// the reliable signal for cleaning up sessions orphaned by a restart, and
+/// it does not depend on the network (the old port may now be free, occupied
+/// by an unrelated process, or even reused by a *different* live psmux
+/// server — all of which a bare TCP probe would misclassify).
+#[cfg(windows)]
+fn system_boot_time() -> Option<SystemTime> {
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetTickCount64() -> u64;
+    }
+    let uptime_ms = unsafe { GetTickCount64() };
+    SystemTime::now().checked_sub(Duration::from_millis(uptime_ms))
+}
+
+#[cfg(not(windows))]
+fn system_boot_time() -> Option<SystemTime> {
+    None
+}
+
+/// True when `mtime` is old enough (older than `boot - margin`) that the file
+/// must have been written by a process from a previous boot.
+fn is_pre_boot(mtime: SystemTime, boot: SystemTime, margin: Duration) -> bool {
+    match boot.checked_sub(margin) {
+        Some(cutoff) => mtime < cutoff,
+        None => false,
+    }
 }
 
 fn cleanup_stale_port_files_in_with<F>(psmux_dir: &Path, mut probe: F)
 where
-    F: FnMut(u16) -> PortProbeResult,
+    F: FnMut(&str, u16) -> PortProbeResult,
 {
+    let boot = system_boot_time();
     if let Ok(entries) = std::fs::read_dir(psmux_dir) {
         for entry in entries.flatten() {
             let path = entry.path();
             if path.extension().map(|e| e == "port").unwrap_or(false) {
+                // Boot-time guard: a port file last modified before this boot
+                // belongs to a server that died when the machine restarted.
+                // Reap it unconditionally — no network round-trip, and immune
+                // to the old port being reused by another process this boot.
+                if let Some(boot) = boot {
+                    if let Some(mtime) = entry.metadata().ok().and_then(|m| m.modified().ok()) {
+                        if is_pre_boot(mtime, boot, BOOT_TIME_MARGIN) {
+                            if crate::debug_log::session_log_enabled() {
+                                crate::debug_log::session_log("cleanup", &format!(
+                                    "reaping '{}': port file predates last boot (server died on restart)",
+                                    registry_base(&path)));
+                            }
+                            remove_session_registry_files(&path);
+                            continue;
+                        }
+                    }
+                }
                 if let Ok(port_str) = std::fs::read_to_string(&path) {
                     if let Ok(port) = port_str.trim().parse::<u16>() {
-                        if probe(port) == PortProbeResult::Stale {
+                        let key = read_key_for_port_path(&path);
+                        if probe(&key, port) == PortProbeResult::Stale {
+                            if crate::debug_log::session_log_enabled() {
+                                crate::debug_log::session_log("cleanup", &format!(
+                                    "reaping '{}' (port {}): no psmux server authenticated as ours (stale)",
+                                    registry_base(&path), port));
+                            }
                             remove_session_registry_files(&path);
                         }
                     } else {
+                        if crate::debug_log::session_log_enabled() {
+                            crate::debug_log::session_log("cleanup", &format!(
+                                "reaping '{}': unparseable port value {:?}",
+                                registry_base(&path), port_str.trim()));
+                        }
                         remove_session_registry_files(&path);
                     }
                 }
             }
         }
     }
+}
+
+/// Display name (file stem) of a registry path, for logging.
+fn registry_base(port_path: &Path) -> &str {
+    port_path.file_stem().and_then(|s| s.to_str()).unwrap_or("?")
 }
 
 fn remove_session_registry_files(port_path: &Path) {
@@ -163,20 +248,94 @@ fn remove_session_registry_files(port_path: &Path) {
     let _ = std::fs::remove_file(&sid_path);
 }
 
-fn probe_port_for_cleanup(port: u16) -> PortProbeResult {
+/// Outcome of a single AUTH handshake against the listener on a port.
+#[derive(Clone, Copy, PartialEq)]
+enum AuthProbe {
+    /// Server accepted our session key (`OK`) — this is genuinely our session.
+    Authenticated,
+    /// Server explicitly rejected the key (`ERROR ...`) — a *different* psmux
+    /// server has reused this port; the session this file names is dead.
+    Rejected,
+    /// Connected but the peer didn't complete our protocol (no reply, garbage,
+    /// or an unrelated process). Identity is unverifiable from the network.
+    Unknown,
+}
+
+/// Connect to `addr` and verify, via the AUTH handshake, that the listener is
+/// the psmux server that owns `key`.
+///
+/// Returns `Err(kind)` when the connection itself fails so the caller can tell
+/// "nothing is listening" (refused) from a transient network error.
+fn probe_auth_identity(addr: std::net::SocketAddr, key: &str) -> Result<AuthProbe, ErrorKind> {
+    let mut s = std::net::TcpStream::connect_timeout(&addr, STALE_PORT_CONNECT_TIMEOUT)
+        .map_err(|e| e.kind())?;
+    // A successful connect alone proves only that *something* listens. Without
+    // a key we cannot prove it is ours, so leave the verdict to the boot guard.
+    let key = match validate_auth_key(key) {
+        Some(k) => k,
+        None => return Ok(AuthProbe::Unknown),
+    };
+    let _ = s.set_read_timeout(Some(STALE_PORT_AUTH_READ_TIMEOUT));
+    let _ = s.set_nodelay(true);
+    if write!(s, "AUTH {}\n", key).is_err() {
+        return Ok(AuthProbe::Unknown);
+    }
+    let _ = s.flush();
+    let mut br = std::io::BufReader::new(std::io::Read::take(s, 4096));
+    let mut line = String::new();
+    match std::io::BufRead::read_line(&mut br, &mut line) {
+        Ok(0) => Ok(AuthProbe::Unknown),
+        Ok(_) => {
+            let t = line.trim();
+            if t == "OK" {
+                Ok(AuthProbe::Authenticated)
+            } else if t.starts_with("ERROR") {
+                Ok(AuthProbe::Rejected)
+            } else {
+                Ok(AuthProbe::Unknown)
+            }
+        }
+        Err(_) => Ok(AuthProbe::Unknown),
+    }
+}
+
+/// Identity-aware liveness probe used by stale-port cleanup.
+///
+/// A bare TCP connect cannot distinguish our server from any other process
+/// that grabbed the same port after a crash or reboot — that false "alive"
+/// is exactly what left dead sessions showing `(not responding)` in the
+/// picker. This probe instead requires the AUTH key to match:
+///   - connection refused on every attempt        -> `Stale`
+///   - server accepts our key (`OK`)              -> `Alive`
+///   - server rejects our key (`ERROR`, reused port) -> `Stale`
+///   - anything ambiguous (no reply, slow, foreign process) -> `Inconclusive`
+///
+/// Only definitive signals delete a file; ambiguous ones are left for the
+/// boot-time guard, so a live-but-busy server is never reaped by mistake.
+fn probe_session_for_cleanup(key: &str, port: u16) -> PortProbeResult {
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
     let mut saw_refused = false;
     let mut saw_inconclusive = false;
 
     for attempt in 0..STALE_PORT_PROBE_ATTEMPTS {
-        match std::net::TcpStream::connect_timeout(&addr, STALE_PORT_CONNECT_TIMEOUT) {
-            Ok(_) => return PortProbeResult::Alive,
-            Err(e) if e.kind() == ErrorKind::ConnectionRefused => {
-                saw_refused = true;
+        match probe_auth_identity(addr, key) {
+            Ok(AuthProbe::Authenticated) => {
+                if crate::debug_log::session_log_enabled() {
+                    crate::debug_log::session_log("probe",
+                        &format!("port {}: AUTH accepted -> alive", port));
+                }
+                return PortProbeResult::Alive;
             }
-            Err(_) => {
-                saw_inconclusive = true;
+            Ok(AuthProbe::Rejected) => {
+                if crate::debug_log::session_log_enabled() {
+                    crate::debug_log::session_log("probe", &format!(
+                        "port {}: AUTH rejected by a different server (reused port) -> stale", port));
+                }
+                return PortProbeResult::Stale;
             }
+            Ok(AuthProbe::Unknown) => saw_inconclusive = true,
+            Err(ErrorKind::ConnectionRefused) => saw_refused = true,
+            Err(_) => saw_inconclusive = true,
         }
 
         if attempt + 1 < STALE_PORT_PROBE_ATTEMPTS {
@@ -185,8 +344,16 @@ fn probe_port_for_cleanup(port: u16) -> PortProbeResult {
     }
 
     if saw_refused && !saw_inconclusive {
+        if crate::debug_log::session_log_enabled() {
+            crate::debug_log::session_log("probe",
+                &format!("port {}: connection refused on all attempts -> stale", port));
+        }
         PortProbeResult::Stale
     } else {
+        if crate::debug_log::session_log_enabled() {
+            crate::debug_log::session_log("probe",
+                &format!("port {}: no definitive answer -> inconclusive (kept)", port));
+        }
         PortProbeResult::Inconclusive
     }
 }
@@ -417,6 +584,10 @@ pub fn fetch_session_info(
 /// `inputs` is `(label, addr, key)`. Output preserves input order and
 /// pairs each label with the fetched info or the supplied `fallback`
 /// (typically `"<label>: (not responding)"`).
+///
+/// Retained for the #250 regression suite; the picker now uses
+/// `classify_sessions_parallel`, which both lists and prunes in one pass.
+#[allow(dead_code)]
 pub fn fetch_session_infos_parallel<F>(
     inputs: Vec<(String, String, String)>,
     connect_timeout: Duration,
@@ -454,6 +625,141 @@ where
         handles.into_iter().filter_map(|h| h.join().ok()).collect()
     });
     results
+}
+
+/// Liveness verdict for one session, produced by a single bounded probe.
+#[derive(Clone, Debug, PartialEq)]
+pub enum SessionLiveness {
+    /// Server authenticated and returned its session-info line (the payload).
+    Alive(String),
+    /// Definitively gone: the connection failed (refused / unreachable — on
+    /// loopback any connect failure means nothing is listening), an `ERROR`
+    /// auth rejection (a different server reused the port), or connected then
+    /// silent past the read timeout. Its registry files should be reaped. A
+    /// genuinely live server that was momentarily too slow self-heals: it
+    /// rewrites its `.port`/`.key`/`.sid` every 5s (see
+    /// `ensure_session_registry_files`).
+    Dead,
+    /// No usable AUTH key on disk, so identity cannot be verified at all.
+    /// Left in place and shown as `(not responding)` rather than deleted.
+    Unreachable,
+}
+
+/// Single bounded liveness probe: connect, AUTH with the session's own key,
+/// ask for `session-info`, and classify the reply. Never retries or blocks
+/// beyond `connect_timeout + read_timeout`.
+fn probe_session_liveness(
+    addr: &str,
+    key: &str,
+    connect_timeout: Duration,
+    read_timeout: Duration,
+) -> SessionLiveness {
+    let sock: std::net::SocketAddr = match addr.parse() {
+        Ok(a) => a,
+        Err(_) => return SessionLiveness::Dead,
+    };
+    let key = match validate_auth_key(key) {
+        Some(k) => k,
+        None => return SessionLiveness::Unreachable,
+    };
+    // On loopback a live server always completes the TCP handshake (the kernel
+    // accepts into the listen backlog even before the app calls accept()), so
+    // ANY connect failure means nothing usable is listening -> Dead. We do not
+    // branch on the error kind: Windows does not always surface a clean
+    // `ConnectionRefused` for a free port.
+    let mut s = match std::net::TcpStream::connect_timeout(&sock, connect_timeout) {
+        Ok(s) => s,
+        Err(_) => return SessionLiveness::Dead,
+    };
+    let _ = s.set_read_timeout(Some(read_timeout));
+    let _ = s.set_nodelay(true);
+    if write!(s, "AUTH {}\n", key).is_err() || s.write_all(b"session-info\n").is_err() {
+        // Connection broke right after connect -> not a healthy server.
+        return SessionLiveness::Dead;
+    }
+    let _ = s.flush();
+    let mut br = std::io::BufReader::new(std::io::Read::take(s, MAX_AUTHED_RESPONSE_BYTES));
+    let mut line = String::new();
+    match std::io::BufRead::read_line(&mut br, &mut line) {
+        Ok(0) => SessionLiveness::Dead,
+        Ok(_) => {
+            let t = line.trim();
+            if t.starts_with("ERROR") {
+                return SessionLiveness::Dead;
+            }
+            if t == "OK" {
+                // Ack consumed; the next line is the real payload.
+                line.clear();
+                match std::io::BufRead::read_line(&mut br, &mut line) {
+                    Ok(0) => SessionLiveness::Dead,
+                    Ok(_) => {
+                        let t2 = line.trim();
+                        if t2.is_empty() || t2 == "OK" || t2.starts_with("ERROR") {
+                            SessionLiveness::Dead
+                        } else {
+                            SessionLiveness::Alive(t2.to_string())
+                        }
+                    }
+                    Err(_) => SessionLiveness::Dead,
+                }
+            } else {
+                // Ack pipelined with the payload in one line.
+                SessionLiveness::Alive(t.to_string())
+            }
+        }
+        Err(_) => SessionLiveness::Dead,
+    }
+}
+
+/// Classify many sessions in parallel with a single bounded probe each.
+///
+/// Like `fetch_session_infos_parallel`, total wall time is ~one probe window
+/// regardless of N (each session runs on its own thread). Returns the liveness
+/// verdict per input label, preserving order, so the caller can reap the dead
+/// ones and render the rest. This is what keeps the session picker responsive:
+/// it replaces a sequential cleanup pass (O(N * timeout)) with one parallel
+/// round-trip that both lists and prunes.
+pub fn classify_sessions_parallel(
+    inputs: Vec<(String, String, String)>,
+    connect_timeout: Duration,
+    read_timeout: Duration,
+) -> Vec<(String, SessionLiveness)> {
+    if inputs.is_empty() {
+        return Vec::new();
+    }
+    if inputs.len() == 1 {
+        let (label, addr, key) = &inputs[0];
+        let v = probe_session_liveness(addr, key, connect_timeout, read_timeout);
+        return vec![(label.clone(), v)];
+    }
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = inputs
+            .iter()
+            .map(|(label, addr, key)| {
+                let label = label.clone();
+                let addr = addr.clone();
+                let key = key.clone();
+                scope.spawn(move || {
+                    let v = probe_session_liveness(&addr, &key, connect_timeout, read_timeout);
+                    (label, v)
+                })
+            })
+            .collect();
+        handles.into_iter().filter_map(|h| h.join().ok()).collect()
+    })
+}
+
+/// Reap a single session's registry files (`.port`/`.key`/`.sid`) by base name.
+///
+/// Used when a probe proves the session is dead. Safe against a live server:
+/// it re-creates these files on its next 5s registry tick.
+pub fn remove_session_registry(base: &str) {
+    let home = match env::var("USERPROFILE").or_else(|_| env::var("HOME")) {
+        Ok(h) => h,
+        Err(_) => return,
+    };
+    let port_path = format!("{}\\.psmux\\{}.port", home, base);
+    remove_session_registry_files(Path::new(&port_path));
 }
 
 pub fn send_control(line: String) -> io::Result<()> {
