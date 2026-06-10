@@ -586,6 +586,61 @@ fn read_fresh_startup_error_at(path: &str, since_epoch: u64) -> Option<(String, 
     Some((err_lines.join(" "), path.to_string()))
 }
 
+/// Absolute path to `~/.psmux/config-warnings.log`, or None if no home dir.
+pub(crate) fn config_warnings_log_path() -> Option<String> {
+    let home = std::env::var("USERPROFILE")
+        .or_else(|_| std::env::var("HOME"))
+        .unwrap_or_default();
+    if home.is_empty() {
+        return None;
+    }
+    Some(format!("{}\\.psmux\\config-warnings.log", home))
+}
+
+/// Persist non-fatal config parse warnings so the attaching client can echo
+/// them to the user's terminal (issue #370 follow-up). The detached server has
+/// no visible stderr, so an unknown option / malformed value / unknown command
+/// would otherwise be silently dropped. A leading `when (epoch s)` line lets
+/// the client ignore a stale file from an earlier run. Writing an empty list
+/// removes any prior log so resolved configs don't keep re-reporting.
+pub(crate) fn write_config_warnings_log(warnings: &[String]) {
+    let Some(path) = config_warnings_log_path() else { return };
+    if warnings.is_empty() {
+        let _ = std::fs::remove_file(&path);
+        return;
+    }
+    if let Some(parent) = std::path::Path::new(&path).parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let mut body = format!("when (epoch s): {}\n", now);
+    for w in warnings {
+        body.push_str(w);
+        body.push('\n');
+    }
+    let _ = std::fs::write(&path, body);
+}
+
+/// Read fresh config warnings written during the current startup attempt.
+/// `since_epoch` is when the attempt began; a log older than that (minus 2s of
+/// clock slack) is stale and ignored. Returns the warning lines.
+pub(crate) fn read_fresh_config_warnings(since_epoch: u64) -> Vec<String> {
+    let Some(path) = config_warnings_log_path() else { return Vec::new() };
+    let Ok(content) = std::fs::read_to_string(&path) else { return Vec::new() };
+    let mut lines = content.lines();
+    let when = lines
+        .next()
+        .and_then(|l| l.trim().strip_prefix("when (epoch s):").map(|v| v.trim().to_string()))
+        .and_then(|v| v.parse::<u64>().ok());
+    match when {
+        Some(w) if w + 2 >= since_epoch => lines.map(|l| l.to_string()).filter(|l| !l.is_empty()).collect(),
+        _ => Vec::new(),
+    }
+}
+
 pub fn run_server(session_name: String, socket_name: Option<String>, initial_command: Option<String>, raw_command: Option<Vec<String>>, start_dir: Option<String>, window_name: Option<String>, init_size: Option<(u16, u16)>, group_target: Option<String>, env_vars: Vec<(String, String)>) -> io::Result<()> {
     // Write crash info to a log file when stderr is unavailable (detached server)
     // and clean up port/key files so stale entries do not linger (issue #204).
@@ -750,6 +805,9 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
 
     crate::config::populate_default_bindings(&mut app);
     load_config(&mut app);
+    // Surface any non-fatal config parse warnings to the attaching client
+    // (issue #370 follow-up) instead of silently dropping them.
+    write_config_warnings_log(&app.config_warnings);
     // Config may set pane-border-status which changes content height (#288)
     resize_all_panes(&mut app);
 
@@ -2782,6 +2840,8 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     app.defaults_suppressed = false;
                     crate::config::populate_default_bindings(&mut app);
                     load_config(&mut app);
+                    // Surface config warnings to the claiming client (#370 follow-up).
+                    write_config_warnings_log(&app.config_warnings);
                     // Config may set pane-border-status (#288)
                     resize_all_panes(&mut app);
                     // Update shared aliases after config reload

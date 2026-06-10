@@ -630,6 +630,14 @@ pub struct AppState {
     pub copy_command: String,
     /// command-alias: map of alias name to expansion
     pub command_aliases: std::collections::HashMap<String, String>,
+    /// Config parse warnings (unknown command/option, malformed value, missing
+    /// args) collected during a config load or source-file, surfaced to the
+    /// user instead of being silently ignored (issue #370 follow-up).
+    pub config_warnings: Vec<String>,
+    /// 1-based line number currently being parsed, used to prefix warnings as
+    /// `file:line: message` (file comes from config::current_config_file()).
+    /// None when parsing a single runtime command.
+    pub config_warn_line: Option<usize>,
     /// set-clipboard: "on", "off", "external" (default "on")
     pub set_clipboard: String,
     /// One-shot clipboard text to be sent to the client via OSC 52 (set by yank, consumed by dump-state).
@@ -841,6 +849,8 @@ impl AppState {
             allow_passthrough: "off".to_string(),
             copy_command: String::new(),
             command_aliases: std::collections::HashMap::new(),
+            config_warnings: Vec::new(),
+            config_warn_line: None,
             set_clipboard: "on".to_string(),
             clipboard_osc52: None,
             bell_forward: false,
