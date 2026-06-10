@@ -225,7 +225,7 @@ fn stale_cleanup_removes_registry_only_when_probe_confirms_stale() {
     let dir = temp_psmux_dir("stale_cleanup_confirmed");
     let (port_path, key_path, sid_path) = write_registry_files(&dir, "dead", "54321");
 
-    cleanup_stale_port_files_in_with(&dir, |_| PortProbeResult::Stale);
+    cleanup_stale_port_files_in_with(&dir, |_, _| PortProbeResult::Stale);
 
     assert!(!port_path.exists(), "confirmed-stale .port file should be removed");
     assert!(!key_path.exists(), "matching .key file should be removed");
@@ -239,7 +239,7 @@ fn stale_cleanup_preserves_registry_when_probe_is_inconclusive() {
     let (port_path, key_path, sid_path) =
         write_registry_files(&dir, "maybe-live", "54322");
 
-    cleanup_stale_port_files_in_with(&dir, |_| PortProbeResult::Inconclusive);
+    cleanup_stale_port_files_in_with(&dir, |_, _| PortProbeResult::Inconclusive);
 
     assert!(port_path.exists(), "inconclusive probe must not remove .port");
     assert!(key_path.exists(), "inconclusive probe must not remove .key");
@@ -261,4 +261,166 @@ fn stale_cleanup_preserves_registry_for_live_listener() {
     assert!(sid_path.exists(), "live listener .sid should be preserved");
     drop(listener);
     let _ = fs::remove_dir_all(dir.parent().unwrap());
+}
+
+/// Read a single `\n`-terminated line from the stream (the probe's AUTH line),
+/// so the fake server's reply lands against the client's read.
+fn read_one_line(stream: &mut TcpStream) {
+    let mut buf = [0u8; 1];
+    loop {
+        match stream.read(&mut buf) {
+            Ok(0) => return,
+            Ok(_) if buf[0] == b'\n' => return,
+            Ok(_) => {}
+            Err(_) => return,
+        }
+    }
+}
+
+#[test]
+fn stale_cleanup_removes_session_when_port_reused_by_other_server() {
+    // After a crash/reboot the old port can be grabbed by a *different* live
+    // psmux server, which rejects our key. A bare TCP connect would call this
+    // "alive" and leave the dead session as a "(not responding)" zombie; the
+    // identity probe must classify the key rejection as Stale and reap it.
+    let (addr, done) = spawn_fake_server(|mut s| {
+        read_one_line(&mut s);
+        let _ = s.write_all(b"ERROR: Invalid session key\n");
+        let _ = s.flush();
+    });
+    let port = addr.rsplit(':').next().unwrap().to_string();
+    let dir = temp_psmux_dir("stale_cleanup_reused_port");
+    let (port_path, key_path, sid_path) = write_registry_files(&dir, "ghost", &port);
+
+    cleanup_stale_port_files_in(&dir);
+
+    assert!(!port_path.exists(), "key-rejected (reused) .port must be removed");
+    assert!(!key_path.exists(), "matching .key must be removed");
+    assert!(!sid_path.exists(), "matching .sid must be removed");
+    let _ = done.recv_timeout(Duration::from_secs(2));
+    let _ = fs::remove_dir_all(dir.parent().unwrap());
+}
+
+#[test]
+fn stale_cleanup_preserves_session_for_authenticated_server() {
+    // Our own live server accepts the key — it must never be reaped.
+    let (addr, done) = spawn_fake_server(|mut s| {
+        read_one_line(&mut s);
+        let _ = s.write_all(b"OK\n");
+        let _ = s.flush();
+        thread::sleep(Duration::from_millis(100));
+    });
+    let port = addr.rsplit(':').next().unwrap().to_string();
+    let dir = temp_psmux_dir("stale_cleanup_authed");
+    let (port_path, key_path, sid_path) = write_registry_files(&dir, "mine", &port);
+
+    cleanup_stale_port_files_in(&dir);
+
+    assert!(port_path.exists(), "authenticated .port must be preserved");
+    assert!(key_path.exists(), "authenticated .key must be preserved");
+    assert!(sid_path.exists(), "authenticated .sid must be preserved");
+    let _ = done.recv_timeout(Duration::from_secs(2));
+    let _ = fs::remove_dir_all(dir.parent().unwrap());
+}
+
+#[test]
+fn pre_boot_registry_is_reaped_regardless_of_port() {
+    use std::time::SystemTime;
+    let boot = SystemTime::now();
+    let margin = Duration::from_secs(10);
+
+    // Written well before boot (previous boot) -> reap.
+    let old = boot - Duration::from_secs(3600);
+    assert!(is_pre_boot(old, boot, margin), "pre-boot file must be reaped");
+
+    // Written within the boot grace window -> keep (could be a server that
+    // came up moments after boot).
+    let recent = boot - Duration::from_secs(2);
+    assert!(!is_pre_boot(recent, boot, margin), "just-after-boot file must be kept");
+
+    // Written after boot -> keep.
+    let fresh = boot + Duration::from_secs(30);
+    assert!(!is_pre_boot(fresh, boot, margin), "post-boot file must be kept");
+}
+
+#[test]
+fn liveness_authenticated_server_is_alive() {
+    let (addr, done) = spawn_fake_server(|mut s| {
+        drain_client_request(&mut s); // AUTH + session-info (two lines)
+        let _ = s.write_all(b"OK\n");
+        let _ = s.write_all(b"mysession: 2 windows (created Mon Apr 20 11:10:58 2026)\n");
+        let _ = s.flush();
+        thread::sleep(Duration::from_millis(50));
+    });
+
+    let v = probe_session_liveness(
+        &addr,
+        "key",
+        Duration::from_millis(300),
+        Duration::from_millis(400),
+    );
+
+    match v {
+        SessionLiveness::Alive(info) => assert!(info.contains("mysession"), "info: {info}"),
+        other => panic!("expected Alive, got {other:?}"),
+    }
+    let _ = done.recv_timeout(Duration::from_secs(2));
+}
+
+#[test]
+fn liveness_auth_rejection_is_dead() {
+    // The reboot/reused-port case: a different server rejects our key.
+    let (addr, done) = spawn_fake_server(|mut s| {
+        drain_client_request(&mut s);
+        let _ = s.write_all(b"ERROR: Invalid session key\n");
+        let _ = s.flush();
+    });
+
+    let v = probe_session_liveness(
+        &addr,
+        "stale-key",
+        Duration::from_millis(300),
+        Duration::from_millis(400),
+    );
+
+    assert_eq!(v, SessionLiveness::Dead, "auth rejection must be Dead");
+    let _ = done.recv_timeout(Duration::from_secs(2));
+}
+
+#[test]
+fn liveness_connection_refused_is_dead() {
+    // Bind then drop so the port is guaranteed free -> connect refused.
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind to grab a port");
+    let addr = listener.local_addr().unwrap().to_string();
+    drop(listener);
+
+    let v = probe_session_liveness(
+        &addr,
+        "key",
+        Duration::from_millis(300),
+        Duration::from_millis(200),
+    );
+
+    assert_eq!(v, SessionLiveness::Dead, "refused connect must be Dead");
+}
+
+#[test]
+fn liveness_connected_but_silent_is_dead() {
+    // A listener that accepts (via backlog) but never speaks our protocol.
+    // Bounded: we wait one read timeout, then declare it Dead (honors
+    // "no response within the timeout -> kill"); a real server self-heals.
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind silent listener");
+    let addr = listener.local_addr().unwrap().to_string();
+
+    let start = std::time::Instant::now();
+    let v = probe_session_liveness(
+        &addr,
+        "key",
+        Duration::from_millis(300),
+        Duration::from_millis(150),
+    );
+
+    assert_eq!(v, SessionLiveness::Dead, "silent peer must be Dead after timeout");
+    assert!(start.elapsed() < Duration::from_secs(2), "probe must stay bounded, not hang");
+    drop(listener);
 }
