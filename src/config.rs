@@ -8,6 +8,10 @@ use crate::commands::parse_command_to_action;
 // Track the current config file being parsed (for #{current_file}, #{d:current_file})
 thread_local! {
     static CURRENT_CONFIG_FILE: RefCell<String> = RefCell::new(String::new());
+    // True while a full startup/reload config batch is loading. Used so that a
+    // `source-file` directive *inside* the config does not also set a runtime
+    // status message — startup warnings are surfaced once via the log/client.
+    static IN_STARTUP_LOAD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// Get the current config file path being parsed.
@@ -18,6 +22,18 @@ pub fn current_config_file() -> String {
 /// Set the current config file path.
 fn set_current_config_file(path: &str) {
     CURRENT_CONFIG_FILE.with(|f| *f.borrow_mut() = path.to_string());
+}
+
+fn in_startup_load() -> bool {
+    IN_STARTUP_LOAD.with(|c| c.get())
+}
+
+/// RAII guard that marks the startup-config-load window.
+struct StartupLoadGuard;
+impl Drop for StartupLoadGuard {
+    fn drop(&mut self) {
+        IN_STARTUP_LOAD.with(|c| c.set(false));
+    }
 }
 
 /// Quick scan of the config file to check if `set -g warm off` is present.
@@ -136,6 +152,13 @@ pub fn populate_default_bindings(app: &mut AppState) {
 }
 
 pub fn load_config(app: &mut AppState) {
+    // Start a fresh warning batch for this load/reload and mark the window so
+    // nested `source-file` directives don't emit a runtime status message.
+    app.config_warnings.clear();
+    app.config_warn_line = None;
+    IN_STARTUP_LOAD.with(|c| c.set(true));
+    let _startup_guard = StartupLoadGuard;
+
     // If -f flag was used, load that specific config file instead of default search
     if let Ok(config_file) = env::var("PSMUX_CONFIG_FILE") {
         let expanded = if config_file.starts_with('~') {
@@ -194,26 +217,31 @@ pub fn parse_config_content(app: &mut AppState, content: &str) {
 
     let mut if_stack: Vec<IfState> = Vec::new();
 
-    // Join continuation lines (ending with \)
-    let mut lines: Vec<String> = Vec::new();
+    // Join continuation lines (ending with \). Track the original 1-based line
+    // number where each (possibly joined) logical line began, so config
+    // warnings can be reported as `file:line: message` (issue #370 follow-up).
+    let mut lines: Vec<(usize, String)> = Vec::new();
     let mut continuation = String::new();
-    for line in content.lines() {
+    let mut cont_start: usize = 0;
+    for (idx, line) in content.lines().enumerate() {
+        let lineno = idx + 1;
         let trimmed = line.trim_end();
         if trimmed.ends_with('\\') {
+            if continuation.is_empty() { cont_start = lineno; }
             continuation.push_str(trimmed.trim_end_matches('\\'));
             continuation.push(' ');
         } else {
             if !continuation.is_empty() {
                 continuation.push_str(trimmed);
-                lines.push(continuation.clone());
+                lines.push((cont_start, continuation.clone()));
                 continuation.clear();
             } else {
-                lines.push(trimmed.to_string());
+                lines.push((lineno, trimmed.to_string()));
             }
         }
     }
     if !continuation.is_empty() {
-        lines.push(continuation);
+        lines.push((cont_start, continuation));
     }
 
     // Brace-block collection state for if-shell 'cond' { ... } syntax.
@@ -224,7 +252,8 @@ pub fn parse_config_content(app: &mut AppState, content: &str) {
     use parse_config_content_types::BraceBlock;
     let mut brace_block: Option<BraceBlock> = None;
 
-    for line in &lines {
+    for (orig_lineno, line) in &lines {
+        app.config_warn_line = Some(*orig_lineno);
         let l = line.trim();
 
         // Skip empty lines and comments (but comments start with # not %)
@@ -377,6 +406,10 @@ pub fn parse_config_content(app: &mut AppState, content: &str) {
     if let Some(finished) = brace_block.take() {
         process_brace_if_shell(app, &finished);
     }
+
+    // Clear the line context so a later single runtime command does not inherit
+    // a stale `file:line:` prefix.
+    app.config_warn_line = None;
 }
 
 /// Process a collected if-shell brace block by evaluating the condition
@@ -535,6 +568,36 @@ fn is_truthy_config(s: &str) -> bool {
     !s.is_empty() && s != "0"
 }
 
+/// Record a config parse warning, prefixed with `file:line:` when that context
+/// is known (issue #370 follow-up — surface problems instead of swallowing).
+pub(crate) fn warn_config(app: &mut AppState, msg: impl Into<String>) {
+    let m = msg.into();
+    let file = current_config_file();
+    let full = match (file.is_empty(), app.config_warn_line) {
+        (false, Some(line)) => format!("{}:{}: {}", file, line, m),
+        (false, None) => format!("{}: {}", file, m),
+        _ => m,
+    };
+    app.config_warnings.push(full);
+}
+
+/// True if `name` is a recognized psmux command (canonical name or alias),
+/// per the TMUX_COMMANDS catalog plus any user-defined command-aliases.
+/// Used so the unknown-command warning does not fire on valid commands that
+/// the config parser itself does not route (e.g. `new-window`, `display-message`).
+pub(crate) fn is_known_command(app: &AppState, name: &str) -> bool {
+    if app.command_aliases.contains_key(name) {
+        return true;
+    }
+    crate::server::helpers::TMUX_COMMANDS.iter().any(|entry| {
+        let (cmd, alias) = match entry.split_once(" (") {
+            Some((c, a)) => (c, a.trim_end_matches(')')),
+            None => (*entry, ""),
+        };
+        cmd == name || (!alias.is_empty() && alias == name)
+    })
+}
+
 pub fn parse_config_line(app: &mut AppState, line: &str) {
     let l = line.trim();
     if l.is_empty() || l.starts_with('#') { return; }
@@ -624,13 +687,24 @@ pub fn parse_config_line(app: &mut AppState, line: &str) {
             app.environment.insert(parts[i].to_string(), val.clone());
             // Also set on the server process so child panes inherit via env block
             std::env::set_var(parts[i], &val);
+        } else {
+            warn_config(app, "set-environment requires a name and value");
+        }
+    }
+    else {
+        // Unrecognized directive. Warn only when the first token is not a known
+        // command (a known-but-unrouted command like `new-window` stays silent
+        // to match prior behavior; a genuine typo like `bnid-key` is surfaced).
+        let cmd = l.split_whitespace().next().unwrap_or("");
+        if !cmd.is_empty() && !is_known_command(app, cmd) {
+            warn_config(app, format!("unknown command: {}", cmd));
         }
     }
 }
 
 fn parse_set_option(app: &mut AppState, line: &str) {
     let parts: Vec<&str> = line.split_whitespace().collect();
-    if parts.len() < 2 { return; }
+    if parts.len() < 2 { warn_config(app, "set-option requires an option name"); return; }
     
     let mut i = 1;
     let mut is_global = false;
@@ -656,7 +730,7 @@ fn parse_set_option(app: &mut AppState, line: &str) {
         }
     }
     
-    if i >= parts.len() { return; }
+    if i >= parts.len() { warn_config(app, "set-option requires an option name"); return; }
 
     // Extract key and value
     let key = parts[i];
@@ -735,7 +809,40 @@ pub fn parse_option_value(app: &mut AppState, rest: &str, _is_global: bool) {
     } else {
         ""
     };
-    
+
+    // Validate the value against the option's declared type from the catalog
+    // (issue #370 follow-up). Only options that exist in the catalog are
+    // checked, so unmodeled/user options never produce a false warning.
+    if !value.is_empty() {
+        if let Some(def) = crate::server::option_catalog::OPTION_CATALOG
+            .iter()
+            .find(|d| d.name == key)
+        {
+            let v = value.trim();
+            match def.option_type {
+                "number" => {
+                    if v.parse::<i64>().is_err() {
+                        warn_config(app, format!(
+                            "invalid value '{}' for option '{}' (expected a number)", v, key));
+                    }
+                }
+                "boolean" => {
+                    // Accept the usual boolean tokens, and also any integer:
+                    // a few "boolean" options (e.g. `status`) also take counts.
+                    let lv = v.to_ascii_lowercase();
+                    let ok = matches!(lv.as_str(),
+                        "on"|"off"|"true"|"false"|"1"|"0"|"yes"|"no")
+                        || v.parse::<i64>().is_ok();
+                    if !ok {
+                        warn_config(app, format!(
+                            "invalid value '{}' for option '{}' (expected on/off)", v, key));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
     match key {
         "status-left" => app.status_left = value.to_string(),
         "status-right" => app.status_right = value.to_string(),
@@ -980,8 +1087,19 @@ pub fn parse_option_value(app: &mut AppState, rest: &str, _is_global: bool) {
                 // Options with hyphens are tmux config options, NOT environment
                 // variables.  Storing them in environment causes PowerShell
                 // ParserErrors when injected via $env:NAME syntax (#137).
+                // A non-@ hyphenated key that reached this arm is not a known
+                // option — surface it as a typo (#370 follow-up) but still
+                // store it so forward-compat / plugin behavior is unchanged.
+                // Skip array-style keys (`name[N]`) such as command-alias[0]
+                // or terminal-overrides[1], which are valid tmux syntax.
+                if !key.contains('[') {
+                    warn_config(app, format!("unknown option '{}'", key));
+                }
                 app.user_options.insert(key.to_string(), value.to_string());
             } else {
+                if !key.contains('[') {
+                    warn_config(app, format!("unknown option '{}'", key));
+                }
                 app.environment.insert(key.to_string(), value.to_string());
             }
 
@@ -1456,6 +1574,13 @@ pub fn source_file(app: &mut AppState, path: &str) {
         expanded_path
     };
 
+    // A runtime `source-file` (not part of a startup batch and not nested) owns
+    // its own warning batch and surfaces the result as a status message.
+    let outermost_runtime = depth == 0 && !in_startup_load();
+    if outermost_runtime {
+        app.config_warnings.clear();
+    }
+
     // Save and restore current_config_file around the nested parse
     let prev_file = current_config_file();
     set_current_config_file(&expanded_path);
@@ -1465,6 +1590,18 @@ pub fn source_file(app: &mut AppState, path: &str) {
     }
 
     set_current_config_file(&prev_file);
+
+    if outermost_runtime && !app.config_warnings.is_empty() {
+        let n = app.config_warnings.len();
+        let summary = if n == 1 {
+            format!("config warning: {}", app.config_warnings[0])
+        } else {
+            format!("{} config warnings (first: {})", n, app.config_warnings[0])
+        };
+        // Hold the message for 5s (vs the 750ms default) so a config problem is
+        // actually noticed rather than flashing past.
+        app.status_message = Some((summary, std::time::Instant::now(), Some(5000)));
+    }
 }
 
 /// Parse a key string like "C-a", "M-x", "F1", "Space" into (KeyCode, KeyModifiers)
@@ -1936,3 +2073,7 @@ mod tests_issue287_german_keyboard;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue362_config_new_session.rs"]
 mod tests_issue362_config_new_session;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue370_config_warnings.rs"]
+mod tests_issue370_config_warnings;

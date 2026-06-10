@@ -1244,6 +1244,19 @@ fn run_main() -> io::Result<()> {
                     std::process::exit(1);
                 }
 
+                // Session came up. Surface any non-fatal config parse warnings
+                // (unknown command/option, malformed value) the server recorded
+                // during config load, so a typo'd ~/.psmux.conf is not silently
+                // ignored (issue #370 follow-up). Printed before attaching so it
+                // is visible in the terminal / scrollback.
+                let cfg_warnings = crate::server::read_fresh_config_warnings(attempt_start_epoch);
+                if !cfg_warnings.is_empty() {
+                    eprintln!("psmux: {} config warning(s):", cfg_warnings.len());
+                    for w in &cfg_warnings {
+                        eprintln!("psmux:   {}", w);
+                    }
+                }
+
                 if detached {
                     // The readiness wait above already confirmed the initial
                     // window exists. If -P, print the pane info before returning.
