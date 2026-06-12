@@ -2594,7 +2594,7 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                                 // Query ALL sessions (like tmux choose-tree)
                                 let dir = format!("{}\\.psmux", home);
                                 if let Ok(entries) = std::fs::read_dir(&dir) {
-                                    let mut sessions: Vec<(String, Vec<(usize, String, Vec<(usize, String)>)>)> = Vec::new();
+                                    let mut sessions: Vec<(String, Vec<(usize, String, bool, Vec<(usize, String)>)>)> = Vec::new();
                                     for e in entries.flatten() {
                                         if let Some(fname) = e.file_name().to_str().map(|s| s.to_string()) {
                                             if let Some((base, ext)) = fname.rsplit_once('.') {
@@ -2617,7 +2617,7 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                                                                     let mut win_data = Vec::new();
                                                                     for w in &wins {
                                                                         let panes: Vec<(usize, String)> = w.panes.iter().map(|p| (p.id, p.title.clone())).collect();
-                                                                        win_data.push((w.id, w.name.clone(), panes));
+                                                                        win_data.push((w.id, w.name.clone(), w.active, panes));
                                                                     }
                                                                     sessions.push((base.to_string(), win_data));
                                                                 }
@@ -2633,6 +2633,11 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                                         else if b.0 == current_session { std::cmp::Ordering::Greater }
                                         else { a.0.cmp(&b.0) }
                                     });
+                                    // Row index of the current session's active window, so the
+                                    // chooser opens its cursor on it (issue #373) instead of the
+                                    // hardcoded top row. The active window is also marked with `*`,
+                                    // glyph-adjacent, matching list_windows_tmux and real tmux.
+                                    let mut active_tree_row: Option<usize> = None;
                                     for (sess_name, wins) in &sessions {
                                         let is_current = sess_name == &current_session;
                                         let attached = if is_current { " (attached)" } else { "" };
@@ -2641,10 +2646,11 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                                             format!("{}: {} windows{}", sess_name, nw, attached),
                                             sess_name.clone()));
                                         if is_current {
-                                            for (wi, (wid, wname, panes)) in wins.iter().enumerate() {
-                                                let flag = if panes.len() > 0 { "" } else { "" };
+                                            for (wi, (wid, wname, active, panes)) in wins.iter().enumerate() {
+                                                let marker = if *active { "*" } else { "" };
+                                                if *active { active_tree_row = Some(tree_entries.len()); }
                                                 tree_entries.push((true, *wid, 0,
-                                                    format!("  {}: {}{} ({} panes)", wi, wname, flag, panes.len()),
+                                                    format!("  {}: {}{} ({} panes)", wi, wname, marker, panes.len()),
                                                     sess_name.clone()));
                                                 for (pid, ptitle) in panes {
                                                     tree_entries.push((false, *wid, *pid,
@@ -2653,17 +2659,21 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                                                 }
                                             }
                                         } else {
-                                            for (wi, (wid, wname, panes)) in wins.iter().enumerate() {
+                                            for (wi, (wid, wname, active, panes)) in wins.iter().enumerate() {
+                                                let marker = if *active { "*" } else { "" };
                                                 tree_entries.push((true, *wid, 0,
-                                                    format!("  {}: {} ({} panes)", wi, wname, panes.len()),
+                                                    format!("  {}: {}{} ({} panes)", wi, wname, marker, panes.len()),
                                                     sess_name.clone()));
                                             }
                                         }
                                     }
+                                    if let Some(r) = active_tree_row { tree_selected = r; }
                                 }
                                 if tree_entries.is_empty() {
                                     for wi in &last_tree {
-                                        tree_entries.push((true, wi.id, 0, wi.name.clone(), current_session.clone()));
+                                        let marker = if wi.active { "*" } else { "" };
+                                        if wi.active { tree_selected = tree_entries.len(); }
+                                        tree_entries.push((true, wi.id, 0, format!("{}{}", wi.name, marker), current_session.clone()));
                                         for pi in &wi.panes {
                                             tree_entries.push((false, wi.id, pi.id, pi.title.clone(), current_session.clone()));
                                         }
