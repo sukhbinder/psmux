@@ -3431,7 +3431,16 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                                     cmd_batch.push("send-key C-v\n".to_string());
                                 }
                                 KeyCode::Char(c) if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                                    cmd_batch.push(format!("send-key C-{}\n", c.to_ascii_lowercase()));
+                                    // Preserve a held Shift so Ctrl+Shift+<letter> is not
+                                    // silently collapsed to a plain Ctrl+<letter> on the wire
+                                    // (issue #368).  tmux-style name: C-S-x.  The server
+                                    // injects a native KEY_EVENT carrying both modifiers so
+                                    // console-input apps can tell the two apart.
+                                    if key.modifiers.contains(KeyModifiers::SHIFT) {
+                                        cmd_batch.push(format!("send-key C-S-{}\n", c.to_ascii_lowercase()));
+                                    } else {
+                                        cmd_batch.push(format!("send-key C-{}\n", c.to_ascii_lowercase()));
+                                    }
                                 }
                                 KeyCode::Char(c) if (c as u32) >= 0x01 && (c as u32) <= 0x1A => {
                                     let ctrl_letter = ((c as u8) + b'a' - 1) as char;

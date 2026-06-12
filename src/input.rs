@@ -3291,6 +3291,39 @@ pub fn send_key_to_active(app: &mut AppState, k: &str) -> io::Result<()> {
                     if !seq.is_empty() { let _ = write!(p.writer, "{}", seq); }
                 }
             }
+            // Ctrl+Shift+<letter>: inject a native KEY_EVENT carrying BOTH the
+            // Ctrl and Shift modifier flags so console-input apps (ReadConsoleInputW)
+            // can distinguish it from a plain Ctrl+<letter> (issue #368: psmux used
+            // to collapse Ctrl+Shift+V to Ctrl+V, stripping Shift).  We deliberately
+            // do NOT also write the raw C0 byte: emitting both double-delivers the
+            // key (issue #363).  VT-pipe apps still receive ConPTY's translation of
+            // this single event.
+            s if (s.starts_with("C-S-") || s.starts_with("c-s-"))
+                && s.chars().count() == 5
+                && s.chars().nth(4).map_or(false, |c| c.is_ascii_alphabetic()) =>
+            {
+                let c = s.chars().nth(4).unwrap().to_ascii_lowercase();
+                let ctrl_char = (c as u8) & 0x1F;
+                #[cfg(windows)]
+                {
+                    let injected = if let Some(pid) = p.child_pid {
+                        crate::platform::mouse_inject::send_modified_key_event(pid, c, true, false, true)
+                    } else {
+                        false
+                    };
+                    if !injected {
+                        // No child pid / injection failed: fall back to the raw
+                        // control byte (Shift unrepresentable, but key still arrives).
+                        let _ = p.writer.write_all(&[ctrl_char]);
+                    }
+                }
+                #[cfg(not(windows))]
+                {
+                    // Non-Windows: no console-input modifier channel; legacy VT has
+                    // no distinct Ctrl+Shift+<letter> encoding, so deliver the byte.
+                    let _ = p.writer.write_all(&[ctrl_char]);
+                }
+            }
             s if s.starts_with("C-") && s.len() == 3 => {
                 let c = s.chars().nth(2).unwrap_or('c');
                 let ctrl_char = (c.to_ascii_lowercase() as u8) & 0x1F;
