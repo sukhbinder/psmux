@@ -1091,11 +1091,117 @@ pub fn swap_pane(app: &mut AppState, dir: FocusDir) {
     // Try direct neighbour first, then wrap to opposite edge (tmux parity #61)
     let target = crate::input::find_best_pane_in_direction(&rects, ai, arect, dir, &pane_ids, &win.pane_mru)
         .or_else(|| crate::input::find_wrap_target(&rects, ai, arect, dir, &pane_ids, &win.pane_mru));
+    let mut swapped = false;
     if let Some(ni) = target {
-        if let Some(new_pane_id) = pane_ids.get(ni) {
-            crate::tree::touch_mru(&mut win.pane_mru, *new_pane_id);
+        let active_path = rects[ai].0.clone();
+        let target_path = rects[ni].0.clone();
+        // Actually exchange the two panes in the layout tree (keeping the split
+        // sizes) instead of merely moving focus.  This is the real swap-pane
+        // behaviour expected from tmux.
+        if crate::tree::swap_nodes(&mut win.root, &active_path, &target_path) {
+            if let Some(new_pane_id) = pane_ids.get(ni) {
+                crate::tree::touch_mru(&mut win.pane_mru, *new_pane_id);
+            }
+            // Focus follows the pane that was just moved into the new slot.
+            win.active_path = target_path;
+            swapped = true;
         }
-        win.active_path = rects[ni].0.clone();
+    }
+    // Resize the moved panes' PTYs to fit their new slots (tmux re-lays-out
+    // after a swap).  Without this the program keeps its old terminal size.
+    if swapped { crate::tree::resize_all_panes(app); }
+}
+
+/// Swap the active pane with the pane at an explicit tree `path`
+/// (used by `swap-pane -t <target>`).  Geometry is preserved; focus follows
+/// the moved pane to its new slot.
+pub fn swap_pane_with_path(app: &mut AppState, target_path: Vec<usize>) {
+    let swapped = {
+        let win = &mut app.windows[app.active_idx];
+        let active_path = win.active_path.clone();
+        if active_path == target_path { false }
+        else {
+            let new_id = crate::tree::get_active_pane_id(&win.root, &target_path);
+            if crate::tree::swap_nodes(&mut win.root, &active_path, &target_path) {
+                if let Some(id) = new_id { crate::tree::touch_mru(&mut win.pane_mru, id); }
+                win.active_path = target_path;
+                true
+            } else { false }
+        }
+    };
+    // Resize moved panes to fit their new slots (see swap_pane).
+    if swapped { crate::tree::resize_all_panes(app); }
+}
+
+/// Resolve a tmux-style position token (e.g. `{top-right}`) to the path of the
+/// pane occupying that corner/edge of the current window.  Layout-independent:
+/// always finds whatever pane currently sits there.
+pub fn pane_path_at_position(app: &AppState, token: &str) -> Option<Vec<usize>> {
+    if app.windows.is_empty() { return None; }
+    let area = app.last_window_area;
+    let win = &app.windows[app.active_idx];
+    let mut rects: Vec<(Vec<usize>, Rect)> = Vec::new();
+    compute_rects(&win.root, area, &mut rects);
+    resolve_position_token(token, area, &rects)
+}
+
+/// Map a tmux-style position token to the path of the pane covering that
+/// corner/edge point.  Pure geometry, separated out so it can be unit-tested.
+pub fn resolve_position_token(token: &str, area: Rect, rects: &[(Vec<usize>, Rect)]) -> Option<Vec<usize>> {
+    if area.width == 0 || area.height == 0 { return None; }
+    let x0 = area.x;
+    let y0 = area.y;
+    let xmax = area.x + area.width - 1;
+    let ymax = area.y + area.height - 1;
+    let xmid = area.x + area.width / 2;
+    let ymid = area.y + area.height / 2;
+    let (px, py) = match token {
+        "{top-left}"     => (x0, y0),
+        "{top-right}"    => (xmax, y0),
+        "{bottom-left}"  => (x0, ymax),
+        "{bottom-right}" => (xmax, ymax),
+        "{top}"          => (xmid, y0),
+        "{bottom}"       => (xmid, ymax),
+        "{left}"         => (x0, ymid),
+        "{right}"        => (xmax, ymid),
+        _ => return None,
+    };
+    rects.iter()
+        .find(|(_, r)| px >= r.x && px < r.x + r.width && py >= r.y && py < r.y + r.height)
+        .map(|(p, _)| p.clone())
+}
+
+#[cfg(test)]
+mod position_token_tests {
+    use super::resolve_position_token;
+    use ratatui::layout::Rect;
+    fn layout() -> (Rect, Vec<(Vec<usize>, Rect)>) {
+        // ABTOP top-left, SMALL bottom-left, BIG right (mirrors the user's panel).
+        let area = Rect { x: 0, y: 0, width: 160, height: 40 };
+        let rects = vec![
+            (vec![0, 0], Rect { x: 0,  y: 0,  width: 79, height: 19 }),
+            (vec![0, 1], Rect { x: 0,  y: 20, width: 79, height: 20 }),
+            (vec![1],    Rect { x: 80, y: 0,  width: 80, height: 40 }),
+        ];
+        (area, rects)
+    }
+    #[test]
+    fn top_right_finds_big_pane() {
+        let (area, rects) = layout();
+        assert_eq!(resolve_position_token("{top-right}", area, &rects), Some(vec![1]));
+        assert_eq!(resolve_position_token("{bottom-right}", area, &rects), Some(vec![1]));
+        assert_eq!(resolve_position_token("{right}", area, &rects), Some(vec![1]));
+    }
+    #[test]
+    fn corners_left() {
+        let (area, rects) = layout();
+        assert_eq!(resolve_position_token("{top-left}", area, &rects), Some(vec![0, 0]));
+        assert_eq!(resolve_position_token("{bottom-left}", area, &rects), Some(vec![0, 1]));
+    }
+    #[test]
+    fn unknown_token_is_none() {
+        let (area, rects) = layout();
+        assert_eq!(resolve_position_token("{active}", area, &rects), None);
     }
 }
 

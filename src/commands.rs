@@ -1253,11 +1253,43 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
             }
         }
         "swap-pane" | "swapp" => {
-            if let Some(port) = app.control_port {
-                let dir = if parts.iter().any(|p| *p == "-U") { "-U" } else { "-D" };
+            // `-t <target>` swaps the active pane with an explicit target pane
+            // (e.g. `swap-pane -t :.4` or `swap-pane -t %2`).  Without -t, fall
+            // back to the directional -U/-D/-L/-R swap.
+            let target = parts.iter().position(|p| *p == "-t")
+                .and_then(|i| parts.get(i + 1)).map(|s| s.to_string());
+            if let Some(tgt) = target {
+                if let Some(port) = app.control_port {
+                    let _ = send_control_to_port(port, &format!("swap-pane -t {}\n", tgt), &app.session_key);
+                } else {
+                    let path = if tgt.starts_with('{') {
+                        // Layout position token like {top-right} — resolve to
+                        // whatever pane currently occupies that corner.
+                        crate::window_ops::pane_path_at_position(app, &tgt)
+                    } else {
+                        let parsed = crate::cli::parse_target(&tgt);
+                        let win = &app.windows[app.active_idx];
+                        match parsed.pane {
+                            Some(p) if parsed.pane_is_id => crate::tree::find_path_by_id(&win.root, p),
+                            Some(p) => crate::tree::path_by_position(&win.root, p.saturating_sub(app.pane_base_index)),
+                            None => None,
+                        }
+                    };
+                    if let Some(path) = path {
+                        crate::window_ops::swap_pane_with_path(app, path);
+                    }
+                }
+            } else if let Some(port) = app.control_port {
+                let dir = if parts.iter().any(|p| *p == "-U") { "-U" }
+                    else if parts.iter().any(|p| *p == "-L") { "-L" }
+                    else if parts.iter().any(|p| *p == "-R") { "-R" }
+                    else { "-D" };
                 let _ = send_control_to_port(port, &format!("swap-pane {}\n", dir), &app.session_key);
             } else {
-                let dir = if parts.iter().any(|p| *p == "-U") { FocusDir::Up } else { FocusDir::Down };
+                let dir = if parts.iter().any(|p| *p == "-L") { FocusDir::Left }
+                    else if parts.iter().any(|p| *p == "-R") { FocusDir::Right }
+                    else if parts.iter().any(|p| *p == "-U") { FocusDir::Up }
+                    else { FocusDir::Down };
                 crate::window_ops::swap_pane(app, dir);
             }
         }

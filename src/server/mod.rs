@@ -33,7 +33,7 @@ use crate::layout::{dump_layout_json, dump_layout_json_fast, apply_layout, cycle
     cycle_layout_reverse};
 use crate::window_ops::{toggle_zoom, remote_mouse_down, remote_mouse_drag, remote_mouse_up,
     remote_mouse_button, remote_mouse_motion, remote_scroll_up, remote_scroll_down,
-    swap_pane, break_pane_to_window, unzoom_if_zoomed, resize_pane_vertical,
+    swap_pane, swap_pane_with_path, break_pane_to_window, unzoom_if_zoomed, resize_pane_vertical,
     resize_pane_horizontal, resize_pane_absolute, rotate_panes, respawn_active_pane,
     handle_pane_mouse, handle_pane_scroll, handle_split_set_sizes, handle_split_resize_done};
 use crate::config::{load_config, parse_key_string, format_key_binding, normalize_key_for_binding,
@@ -2871,8 +2871,37 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     match dir.as_str() {
                         "U" => { swap_pane(&mut app, FocusDir::Up); }
                         "D" => { swap_pane(&mut app, FocusDir::Down); }
+                        "L" => { swap_pane(&mut app, FocusDir::Left); }
+                        "R" => { swap_pane(&mut app, FocusDir::Right); }
                         _ => { swap_pane(&mut app, FocusDir::Down); }
                     }
+                    meta_dirty = true;
+                    hook_event = Some("after-swap-pane");
+                }
+                CtrlReq::SwapPaneTarget(target, is_id) => {
+                    // tmux: swap-pane without -Z permanently unzooms (#82)
+                    unzoom_if_zoomed(&mut app);
+                    let path = {
+                        let win = &app.windows[app.active_idx];
+                        if is_id {
+                            crate::tree::find_path_by_id(&win.root, target)
+                        } else {
+                            crate::tree::path_by_position(&win.root, target.saturating_sub(app.pane_base_index))
+                        }
+                    };
+                    if let Some(path) = path {
+                        swap_pane_with_path(&mut app, path);
+                    }
+                    meta_dirty = true;
+                    hook_event = Some("after-swap-pane");
+                }
+                CtrlReq::SwapPanePosition(token) => {
+                    // tmux: swap-pane without -Z permanently unzooms (#82)
+                    unzoom_if_zoomed(&mut app);
+                    if let Some(path) = crate::window_ops::pane_path_at_position(&app, &token) {
+                        swap_pane_with_path(&mut app, path);
+                    }
+                    meta_dirty = true;
                     hook_event = Some("after-swap-pane");
                 }
                 CtrlReq::ResizePane(dir, amount) => {

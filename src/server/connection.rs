@@ -588,7 +588,10 @@ if control_echo || control_noecho {
                 } else {
                     let _ = tx_ctrl.send(CtrlReq::FocusPaneByIndex(pid));
                 }
-            } else {
+            } else if !matches!(cmd_name, "swap-pane" | "swapp") {
+                // swap-pane resolves its own target and swaps it with the *current*
+                // active pane.  Temporarily focusing the target here would make
+                // active == target, turning the swap into a no-op (so skip it).
                 if ctrl_pane_is_id {
                     let _ = tx_ctrl.send(CtrlReq::FocusPaneTemp(pid));
                 } else {
@@ -823,7 +826,9 @@ let targeted_kill_pane_id = if matches!(cmd, "kill-pane" | "killp") && pane_is_i
 } else {
     None
 };
-let skip_pane_focus = matches!(cmd, "display-message" | "display") || skip_target_focus;
+// swap-pane swaps the target with the *current* active pane; focusing the
+// target first would make active == target and turn the swap into a no-op.
+let skip_pane_focus = matches!(cmd, "display-message" | "display" | "swap-pane" | "swapp") || skip_target_focus;
 if !skip_pane_focus && targeted_kill_pane_id.is_none() {
     if let Some(pid) = target_pane {
         if is_focus_cmd {
@@ -1393,10 +1398,21 @@ match cmd {
         }
     }
     "swap-pane" | "swapp" => {
-        let dir = if args.iter().any(|a| *a == "-U") { "U" }
-            else if args.iter().any(|a| *a == "-D") { "D" }
-            else { "D" };
-        let _ = tx.send(CtrlReq::SwapPane(dir.to_string()));
+        let raw_t = args.iter().position(|a| *a == "-t")
+            .and_then(|i| args.get(i + 1).copied())
+            .or_else(|| raw_target.as_deref());
+        if let Some(tok) = raw_t.filter(|t| t.starts_with('{')) {
+            // Layout position token like {top-right} — layout-independent.
+            let _ = tx.send(CtrlReq::SwapPanePosition(tok.to_string()));
+        } else if let Some((p, is_id)) = raw_t.map(parse_target).and_then(|pt| pt.pane.map(|p| (p, pt.pane_is_id))) {
+            let _ = tx.send(CtrlReq::SwapPaneTarget(p, is_id));
+        } else {
+            let dir = if args.iter().any(|a| *a == "-U") { "U" }
+                else if args.iter().any(|a| *a == "-L") { "L" }
+                else if args.iter().any(|a| *a == "-R") { "R" }
+                else { "D" };
+            let _ = tx.send(CtrlReq::SwapPane(dir.to_string()));
+        }
     }
     "resize-pane" | "resizep" => {
         // Check for zoom toggle first (issue #35)
@@ -3423,10 +3439,27 @@ fn dispatch_control_command(
             true
         }
         "swap-pane" | "swapp" => {
-            let direction = if args.iter().any(|a| *a == "-U") { "-U".to_string() }
-                           else if args.iter().any(|a| *a == "-D") { "-D".to_string() }
-                           else { "-D".to_string() };
-            let _ = tx.send(CtrlReq::SwapPane(direction));
+            // A `{...}` position token (e.g. {top-right}) resolves to whatever
+            // pane currently sits there — layout-independent.  Otherwise resolve
+            // an inline `-t <target>` / pre-parsed control target; else directional.
+            if let Some(tok) = _raw_target.filter(|t| t.starts_with('{')) {
+                let _ = tx.send(CtrlReq::SwapPanePosition(tok.to_string()));
+            } else {
+                let inline = args.iter().position(|a| *a == "-t")
+                    .and_then(|i| args.get(i + 1).copied())
+                    .map(parse_target)
+                    .and_then(|pt| pt.pane.map(|p| (p, pt.pane_is_id)));
+                let resolved = inline.or_else(|| target_pane.map(|p| (p, pane_is_id)));
+                if let Some((p, is_id)) = resolved {
+                    let _ = tx.send(CtrlReq::SwapPaneTarget(p, is_id));
+                } else {
+                    let direction = if args.iter().any(|a| *a == "-U") { "U".to_string() }
+                                   else if args.iter().any(|a| *a == "-L") { "L".to_string() }
+                                   else if args.iter().any(|a| *a == "-R") { "R".to_string() }
+                                   else { "D".to_string() };
+                    let _ = tx.send(CtrlReq::SwapPane(direction));
+                }
+            }
             let _ = resp_tx.send(String::new());
             true
         }
