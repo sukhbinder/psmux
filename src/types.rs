@@ -1032,6 +1032,13 @@ pub enum CtrlReq {
     /// Fields: session name, optional client CWD, response sender.
     ClaimSession(String, Option<String>, mpsc::Sender<String>),
     SwapPane(String),
+    /// swap-pane -t <target>: swap the active pane with the pane identified by
+    /// (target, pane_is_id).  When `pane_is_id` is true the value is a pane id
+    /// (`%N`); otherwise it is a 0-based positional pane index.
+    SwapPaneTarget(usize, bool),
+    /// swap-pane -t <token>: swap the active pane with the pane at a layout
+    /// position token (e.g. `{top-right}`).  Layout-independent.
+    SwapPanePosition(String),
     ResizePane(String, u16),
     SetBuffer(String),
     /// Set a named buffer: (name, content)
