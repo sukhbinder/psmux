@@ -3699,6 +3699,11 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     if app.latest_client_id == Some(target_cid) {
                         app.latest_client_id = app.client_registry.keys().max().copied();
                     }
+                    // Send a clean DETACH directive first so the client exits cleanly
+                    // instead of treating the stream drop as a transient disconnect and
+                    // reconnecting. Give it a moment to act on the directive.
+                    crate::types::send_directive_to_client(target_cid, "DETACH");
+                    std::thread::sleep(Duration::from_millis(50));
                     // Shut down the TCP stream to force disconnect
                     crate::types::shutdown_client_stream(target_cid);
                     // Recompute effective size from remaining clients
@@ -3735,8 +3740,12 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     if let Some(cid) = target_cid {
                         if kill_parent {
                             crate::types::send_directive_to_client(cid, "DETACH-KILL-PARENT");
-                            std::thread::sleep(Duration::from_millis(50));
+                        } else {
+                            // Clean detach: tell the client to exit so it does not treat
+                            // the stream drop as a transient disconnect and reconnect.
+                            crate::types::send_directive_to_client(cid, "DETACH");
                         }
+                        std::thread::sleep(Duration::from_millis(50));
                         app.client_sizes.remove(&cid);
                         let was_present = app.client_registry.remove(&cid).is_some();
                         if was_present {
@@ -3766,9 +3775,13 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     for (cid, _tty) in &targets {
                         if kill_parent {
                             crate::types::send_directive_to_client(*cid, "DETACH-KILL-PARENT");
+                        } else {
+                            // Clean detach: tell each client to exit so it does not treat
+                            // the stream drop as a transient disconnect and reconnect.
+                            crate::types::send_directive_to_client(*cid, "DETACH");
                         }
                     }
-                    if kill_parent && !targets.is_empty() {
+                    if !targets.is_empty() {
                         std::thread::sleep(Duration::from_millis(50));
                     }
                     for (cid, tty) in &targets {
@@ -3815,9 +3828,13 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     for (cid, _) in &targets {
                         if kill_parent {
                             crate::types::send_directive_to_client(*cid, "DETACH-KILL-PARENT");
+                        } else {
+                            // Clean detach: tell each client to exit so it does not treat
+                            // the stream drop as a transient disconnect and reconnect.
+                            crate::types::send_directive_to_client(*cid, "DETACH");
                         }
                     }
-                    if kill_parent && !targets.is_empty() {
+                    if !targets.is_empty() {
                         std::thread::sleep(Duration::from_millis(50));
                     }
                     for (cid, tty) in &targets {
