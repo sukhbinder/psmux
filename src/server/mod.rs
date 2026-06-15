@@ -3702,8 +3702,10 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                     // Send a clean DETACH directive first so the client exits cleanly
                     // instead of treating the stream drop as a transient disconnect and
                     // reconnecting. Give it a moment to act on the directive.
-                    crate::types::send_directive_to_client(target_cid, "DETACH");
-                    std::thread::sleep(Duration::from_millis(50));
+let sent = crate::types::send_directive_to_client(target_cid, "DETACH");
+if sent {
+    std::thread::sleep(Duration::from_millis(50));
+}
                     // Shut down the TCP stream to force disconnect
                     crate::types::shutdown_client_stream(target_cid);
                     // Recompute effective size from remaining clients
