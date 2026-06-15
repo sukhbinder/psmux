@@ -4340,7 +4340,7 @@ fn is_ssh_session() -> bool {
 /// that must NOT be mistaken for a ready window list.
 fn detached_list_windows_ready(resp: &str) -> bool {
     let t = resp.trim();
-    !t.is_empty() && !t.starts_with("ERROR")
+    !t.is_empty() && !t.starts_with("ERROR:")
 }
 
 #[cfg(test)]
