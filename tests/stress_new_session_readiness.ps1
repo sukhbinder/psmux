@@ -31,9 +31,10 @@ $PsmuxExe = (Resolve-Path -LiteralPath $PsmuxExe).Path   # absolute, so the stra
 # so list-windows queries the ambient server instead of the one just created,
 # which reads back as a spurious 100% readiness race. Run from a clean shell, or
 # scrub those vars before invoking.
-if ($env:PSMUX_SESSION -or $env:TMUX) {
+if ($env:PSMUX_SESSION -or $env:TMUX -or $env:PSMUX_TARGET_SESSION -or $env:TMUX_PANE) {
     Write-Host "FATAL: refusing to run inside an active psmux/tmux session" -ForegroundColor Red
-    Write-Host "       (PSMUX_SESSION='$env:PSMUX_SESSION' TMUX='$env:TMUX')." -ForegroundColor Red
+    Write-Host ("       (PSMUX_SESSION='{0}' TMUX='{1}' PSMUX_TARGET_SESSION='{2}' TMUX_PANE='{3}')." -f `
+        $env:PSMUX_SESSION, $env:TMUX, $env:PSMUX_TARGET_SESSION, $env:TMUX_PANE) -ForegroundColor Red
     Write-Host "       Run from a clean shell, or clear PSMUX_SESSION/PSMUX_TARGET_SESSION/TMUX/TMUX_PANE first." -ForegroundColor Red
     exit 3
 }
