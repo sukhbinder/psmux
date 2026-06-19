@@ -528,6 +528,87 @@ fn collect_leaf_paths(node: &Node, path: &mut Vec<usize>, out: &mut Vec<(usize, 
     }
 }
 
+/// Return the tree path of the pane at positional index `pos` (DFS order).
+pub fn path_by_position(node: &Node, pos: usize) -> Option<Vec<usize>> {
+    let mut out: Vec<(usize, Vec<usize>)> = Vec::new();
+    collect_leaf_paths(node, &mut Vec::new(), &mut out);
+    out.get(pos).map(|(_, p)| p.clone())
+}
+
+/// Get a mutable reference to the node at `path` (following Split children).
+pub fn node_at_mut<'a>(node: &'a mut Node, path: &[usize]) -> Option<&'a mut Node> {
+    let mut cur = node;
+    for &idx in path {
+        match cur {
+            Node::Split { children, .. } => { cur = children.get_mut(idx)?; }
+            Node::Leaf(_) => return None,
+        }
+    }
+    Some(cur)
+}
+
+/// Swap the two subtrees located at `a` and `b` within `root`.
+/// Returns true on success.  The paths must be distinct and neither may be a
+/// prefix of the other — which always holds for two distinct leaf paths.
+/// The split `sizes` are untouched, so only the pane *contents* change slots.
+pub fn swap_nodes(root: &mut Node, a: &[usize], b: &[usize]) -> bool {
+    if a == b || a.is_empty() || b.is_empty() { return false; }
+    let min = a.len().min(b.len());
+    if a[..min] == b[..min] { return false; } // one path is an ancestor of the other
+    let pa = match node_at_mut(root, a) { Some(n) => n as *mut Node, None => return false };
+    let pb = match node_at_mut(root, b) { Some(n) => n as *mut Node, None => return false };
+    if pa == pb { return false; }
+    // SAFETY: `pa` and `pb` point to distinct, non-overlapping nodes (the paths
+    // are distinct and neither is a prefix of the other), so the swap cannot
+    // create aliasing.
+    unsafe { std::ptr::swap(pa, pb); }
+    true
+}
+
+#[cfg(test)]
+mod swap_node_tests {
+    use crate::types::{Node, LayoutKind};
+    // Use empty Splits as distinguishable markers (avoids constructing a Pane).
+    fn marker(n: u16) -> Node {
+        Node::Split { kind: LayoutKind::Vertical, sizes: vec![n], children: vec![] }
+    }
+    fn sz(n: &Node) -> Vec<u16> {
+        match n { Node::Split { sizes, .. } => sizes.clone(), _ => vec![] }
+    }
+    #[test]
+    fn swap_nonsibling_positions() {
+        // H[ A(10), V[ B(20), C(30) ] ] ; swap [0] <-> [1,1]
+        let mut root = Node::Split { kind: LayoutKind::Horizontal, sizes: vec![1, 1], children: vec![
+            marker(10),
+            Node::Split { kind: LayoutKind::Vertical, sizes: vec![1, 1], children: vec![marker(20), marker(30)] },
+        ]};
+        assert!(super::swap_nodes(&mut root, &[0], &[1, 1]));
+        if let Node::Split { children, .. } = &root {
+            assert_eq!(sz(&children[0]), vec![30], "slot [0] should now hold C(30)");
+            if let Node::Split { children: c2, .. } = &children[1] {
+                assert_eq!(sz(&c2[0]), vec![20], "B(20) unchanged");
+                assert_eq!(sz(&c2[1]), vec![10], "slot [1,1] should now hold A(10)");
+            } else { panic!("expected inner split"); }
+        } else { panic!("expected split"); }
+    }
+    #[test]
+    fn swap_siblings() {
+        let mut root = Node::Split { kind: LayoutKind::Horizontal, sizes: vec![1, 1], children: vec![marker(1), marker(2)] };
+        assert!(super::swap_nodes(&mut root, &[0], &[1]));
+        if let Node::Split { children, .. } = &root {
+            assert_eq!(sz(&children[0]), vec![2]);
+            assert_eq!(sz(&children[1]), vec![1]);
+        } else { panic!(); }
+    }
+    #[test]
+    fn swap_rejects_invalid() {
+        let mut root = Node::Split { kind: LayoutKind::Horizontal, sizes: vec![1], children: vec![marker(1)] };
+        assert!(!super::swap_nodes(&mut root, &[0], &[0]));    // identical paths
+        assert!(!super::swap_nodes(&mut root, &[], &[0]));     // empty path
+        assert!(!super::swap_nodes(&mut root, &[0], &[0, 0])); // ancestor/descendant
+    }
+}
+
 /// Public wrapper for collect_leaf_paths (used by join-pane to resolve pane index to path).
 pub fn collect_leaf_paths_pub(node: &Node, path: &mut Vec<usize>, out: &mut Vec<(usize, Vec<usize>)>) {
     collect_leaf_paths(node, path, out);
