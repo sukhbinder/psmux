@@ -158,6 +158,17 @@ pub(crate) fn is_fullscreen_tui(pane: &Pane) -> bool {
         if screen.alternate_screen() {
             return true;
         }
+
+        // Check if forground process is a shell program
+        let forground_is_shell = pane
+            .child_pid
+            .and_then(crate::platform::process_info::foreground_is_shell)
+            .is_some();
+
+        if forground_is_shell {
+            return false;
+        }
+
         // Heuristic: check if many of the last rows are non-blank AND the
         // cursor is near the bottom.  Fullscreen TUI apps fill the entire
         // screen and keep the cursor near the bottom (status bars, menus).
