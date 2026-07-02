@@ -3734,7 +3734,17 @@ fn run_main() -> io::Result<()> {
         if !warm_claimed {
             // Cold path: spawn a new background server
             let exe = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("psmux"));
-            let server_args: Vec<String> = vec!["server".into(), "-s".into(), session_name.clone()];
+            let mut server_args: Vec<String> = vec!["server".into(), "-s".into(), session_name.clone()];
+            // Propagate the -L socket namespace so the cold-spawned server writes
+            // its port/key files under the namespaced base (<ns>__<session>) that
+            // the client waits on below. Without this, bare `psmux -L <ns>` (no
+            // warm server to claim → always cold path) spawned a DEFAULT-namespace
+            // server, the namespaced port file never appeared, and the attach
+            // timed out then failed with "handle is invalid" / exit 1.
+            if let Some(ref l) = l_socket_name {
+                server_args.push("-L".into());
+                server_args.push(l.clone());
+            }
             #[cfg(windows)]
             crate::platform::spawn_server_hidden(&exe, &server_args)?;
             #[cfg(not(windows))]
