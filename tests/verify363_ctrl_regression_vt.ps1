@@ -14,7 +14,7 @@ function Ok($m){$script:pass++;Write-Host "  [PASS] $m" -ForegroundColor Green}
 function Bad($m){$script:fail++;Write-Host "  [FAIL] $m" -ForegroundColor Red}
 
 $csc = "C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
-& $csc /nologo /out:$childExe "C:\Users\godwin\Documents\workspace\psmux\tests\vtread_child.cs" 2>&1 | Out-Null
+& $csc /nologo /out:$childExe (Join-Path $PSScriptRoot "vtread_child.cs") 2>&1 | Out-Null
 & $PSMUX kill-session -t $SESSION 2>&1 | Out-Null; Start-Sleep -Milliseconds 400
 Remove-Item $logFile -Force -EA SilentlyContinue
 & $PSMUX new-session -d -s $SESSION $childExe 2>&1 | Out-Null

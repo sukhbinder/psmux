@@ -16,7 +16,7 @@ function Bad($m){ $script:fail++; Write-Host "  [FAIL] $m" -ForegroundColor Red 
 
 # (re)build keylog child
 $csc = "C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
-& $csc /nologo /out:$childExe "C:\Users\godwin\Documents\workspace\psmux\tests\keylog_child.cs" 2>&1 | Out-Null
+& $csc /nologo /out:$childExe (Join-Path $PSScriptRoot "keylog_child.cs") 2>&1 | Out-Null
 
 & $PSMUX kill-session -t $SESSION 2>&1 | Out-Null; Start-Sleep -Milliseconds 400
 Remove-Item $logFile -Force -EA SilentlyContinue

@@ -15,7 +15,7 @@ function Ok($m){$script:pass++;Write-Host "  [PASS] $m" -ForegroundColor Green}
 function Bad($m){$script:fail++;Write-Host "  [FAIL] $m" -ForegroundColor Red}
 
 $csc = "C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
-& $csc /nologo /out:$childExe "C:\Users\godwin\Documents\workspace\psmux\tests\brackpaste_child.cs" 2>&1 | Out-Null
+& $csc /nologo /out:$childExe (Join-Path $PSScriptRoot "brackpaste_child.cs") 2>&1 | Out-Null
 if (-not (Test-Path $childExe)) { Write-Host "[FATAL] child build failed" -ForegroundColor Red; exit 2 }
 
 & $PSMUX kill-server 2>&1 | Out-Null
