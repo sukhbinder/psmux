@@ -239,7 +239,7 @@ try {
 
     # --- Compile the injector ONCE ---------------------------------
     $injectorExe = "$env:TEMP\psmux_robust_injector.exe"
-    $injectorSrc = "C:\Users\godwin\Documents\workspace\psmux\tests\injector.cs"
+    $injectorSrc = Join-Path $PSScriptRoot "injector.cs"
     $csc = "C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
     if (-not (Test-Path $csc)) {
         $csc = Join-Path ([Runtime.InteropServices.RuntimeEnvironment]::GetRuntimeDirectory()) "csc.exe"

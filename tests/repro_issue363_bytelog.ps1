@@ -10,7 +10,7 @@ $logFile = "$env:TEMP\psmux_keylog.txt"
 
 # Compile child
 $csc = "C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
-& $csc /nologo /out:$childExe "C:\Users\godwin\Documents\workspace\psmux\tests\keylog_child.cs" 2>&1 | Select-Object -Last 3
+& $csc /nologo /out:$childExe (Join-Path $PSScriptRoot "keylog_child.cs") 2>&1 | Select-Object -Last 3
 if (-not (Test-Path $childExe)) { Write-Host "[FATAL] child build failed" -ForegroundColor Red; exit 2 }
 
 function Cleanup {
