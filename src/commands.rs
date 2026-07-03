@@ -1303,7 +1303,12 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
                 let _ = send_control_to_port(port, &format!("{}\n", cmd), &app.session_key);
             } else {
                 let kill = parts.iter().any(|p| *p == "-k");
-                crate::window_ops::respawn_active_pane(app, None, None, kill)?;
+                // Honor `-- <shell-command>` (issue #399).
+                let command = parts.iter().position(|p| *p == "--")
+                    .map(|i| parts[i + 1..].join(" "))
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty());
+                crate::window_ops::respawn_active_pane(app, None, None, kill, command.as_deref())?;
             }
         }
         "toggle-sync" => {
