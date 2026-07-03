@@ -661,6 +661,15 @@ impl VtParser {
                 self.osc.clear();
                 self.state = PS::Osc;
             }
+            '\r' | '\n' => {
+                // ESC+CR / ESC+LF → Alt+Enter, emitted as a single event.
+                // Windows Terminal sends ESC+CR for Shift+Enter; forwarding one
+                // \x1b\r (re-emitted by encode_key_event) lets TUI apps such as
+                // the Copilot and Claude CLIs insert a newline instead of
+                // submitting the prompt.
+                emit(make_key(KeyCode::Enter, KeyModifiers::ALT));
+                self.state = PS::Ground;
+            }
             c if c >= ' ' && c <= '~' => {
                 // Alt + printable character.
                 emit(make_key(KeyCode::Char(c), KeyModifiers::ALT));
