@@ -159,13 +159,25 @@ pub(crate) fn is_fullscreen_tui(pane: &Pane) -> bool {
             return true;
         }
 
-        // Check if forground process is a shell program
-        let forground_is_shell = pane
+        // Issue #381: a plain shell whose output has merely filled the screen
+        // is NOT a fullscreen TUI. Under git bash the fill heuristic below
+        // false-positives once enough output fills the bottom rows with the
+        // prompt at the cursor, so psmux forwarded mouse motion to the shell,
+        // which echoed it as raw SGR text ("15M65;61;..."). If the foreground
+        // process is a shell, skip the heuristic and report "not fullscreen".
+        //
+        // Gate on `== Some(true)`, NOT `.is_some()`: foreground_is_shell returns
+        // Some(false) for a genuine NON-shell fullscreen app (nvim, htop), and
+        // that case must still fall through to the heuristic that #285 relies on
+        // for mouse support on ConPTY builds that strip the mouse DECSETs. Using
+        // `.is_some()` here fires for Some(false) too and would suppress
+        // detection of real TUIs, regressing #285.
+        let foreground_is_shell = pane
             .child_pid
             .and_then(crate::platform::process_info::foreground_is_shell)
-            .is_some();
+            == Some(true);
 
-        if forground_is_shell {
+        if foreground_is_shell {
             return false;
         }
 
@@ -1556,3 +1568,7 @@ pub fn respawn_active_pane(app: &mut AppState, pty_system_ref: Option<&dyn porta
 #[cfg(test)]
 #[path = "../tests-rs/test_issue81_resize_direction.rs"]
 mod test_issue81_resize_direction;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue381_gitbash_fullscreen_falsepositive.rs"]
+mod test_issue381_gitbash_fullscreen_falsepositive;
