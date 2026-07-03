@@ -2133,6 +2133,24 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                                         }
                                     }
                                 }
+                                // Ctrl+Shift+<punctuation/digit> that collapses to a single
+                                // C0 byte, e.g. Ctrl+/ delivered by ConPTY terminals
+                                // (Alacritty, WezTerm) as "C-S--" (VK_OEM_MINUS + Ctrl +
+                                // Shift).  It must reach the child as 0x1f (^_), matching
+                                // Ctrl+_ and tmux, so neovim's Ctrl+/ comment toggle fires
+                                // (issue #394).  This MUST precede the generic C- arm below,
+                                // whose nth(2) extraction would otherwise read the 'S' and
+                                // mis-send Ctrl+S.
+                                s if (s.starts_with("C-S-") || s.starts_with("C-s-"))
+                                    && s.chars().count() == 5
+                                    && s.chars().nth(4).map_or(false, |c| !c.is_ascii_alphabetic()) =>
+                                {
+                                    if let Some(c) = s.chars().nth(4) {
+                                        if let Some(ctrl) = crate::input::ctrl_char_send_keys_byte(c) {
+                                            send_text_to_active(&mut app, &String::from(ctrl as char))?;
+                                        }
+                                    }
+                                }
                                 s if s.starts_with("C-") => {
                                     if let Some(c) = s.chars().nth(2) {
                                         let Some(ctrl) = crate::input::ctrl_char_send_keys_byte(c) else { continue };

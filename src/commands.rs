@@ -1402,6 +1402,24 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
                                         key.to_string()
                                     }
                                 }
+                                // Ctrl+Shift+<punctuation/digit> collapsing to a C0 byte,
+                                // e.g. Ctrl+/ arriving as "C-S--" -> 0x1f (^_), matching
+                                // Ctrl+_ and tmux (issue #394).  Must precede the generic
+                                // C- arm, whose nth(2) would read the 'S' and mis-send Ctrl+S.
+                                s if (s.starts_with("C-S-") || s.starts_with("C-s-"))
+                                    && s.chars().count() == 5
+                                    && s.chars().nth(4).map_or(false, |c| !c.is_ascii_alphabetic()) =>
+                                {
+                                    if let Some(c) = s.chars().nth(4) {
+                                        if let Some(ctrl) = crate::input::ctrl_char_send_keys_byte(c) {
+                                            String::from(ctrl as char)
+                                        } else {
+                                            String::new()
+                                        }
+                                    } else {
+                                        key.to_string()
+                                    }
+                                }
                                 s if s.starts_with("C-") => {
                                     if let Some(c) = s.chars().nth(2) {
                                         if let Some(ctrl) = crate::input::ctrl_char_send_keys_byte(c) {
