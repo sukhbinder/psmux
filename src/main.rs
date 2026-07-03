@@ -671,15 +671,26 @@ fn run_main() -> io::Result<()> {
                 // otherwise argv[0] (the exe path or subcommand name) gets
                 // picked up as the target session name.
                 let sub_args: Vec<&String> = cmd_args.iter().skip(1).copied().collect();
-                let name = sub_args
+                // Explicit -t target takes precedence over every fallback (issue #408).
+                // The global argument scan above STRIPS -t (and its value) out of
+                // cmd_args, so re-reading it from sub_args here always missed and the
+                // resolution fell through to resolve_last_session_name_ns — meaning
+                // `attach-session -t NAME` reattached to whatever session was used
+                // last instead of NAME. Read -t from the full, unstripped argv so the
+                // requested target always wins. Works for both subcommand-position
+                // (`attach-session -t s2`) and global-position (`-t s2 attach-session`).
+                let name = args
                     .iter()
-                    .position(|a| *a == "-t")
-                    .and_then(|i| sub_args.get(i + 1))
-                    .map(|s| {
+                    .position(|a| a == "-t")
+                    .and_then(|i| args.get(i + 1))
+                    .map(|target| {
+                        let session = crate::cli::parse_target(target)
+                            .session
+                            .unwrap_or_else(|| target.clone());
                         if let Some(ref l) = l_socket_name {
-                            format!("{}__{}", l, s)
+                            format!("{}__{}", l, session)
                         } else {
-                            (*s).clone()
+                            session
                         }
                     })
                     .or_else(|| {
