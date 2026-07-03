@@ -1797,7 +1797,12 @@ pub fn encode_key_event(key: &KeyEvent) -> Option<Vec<u8>> {
             format!("\x1b{}", c).into_bytes()
         }
         KeyCode::Char(c) if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            let ctrl_char = (c as u8) & 0x1F;
+            // Use the tmux-parity control mapping so punctuation collapses to the
+            // correct C0 byte: C-/ -> 0x1f (^_), C-- (Ctrl+Shift+-) -> 0x1f, etc.
+            // The naive `c & 0x1f` mis-mapped these (e.g. '/' -> 0x0f ^O, issue
+            // #226) and broke neovim's Ctrl+/ comment-toggle under ConPTY
+            // terminals like Alacritty/WezTerm (issue #394).
+            let ctrl_char = ctrl_char_send_keys_byte(c).unwrap_or((c as u8) & 0x1F);
             vec![ctrl_char]
         }
         KeyCode::Char(c) if (c as u32) >= 0x01 && (c as u32) <= 0x1A => {
@@ -3324,9 +3329,32 @@ pub fn send_key_to_active(app: &mut AppState, k: &str) -> io::Result<()> {
                     let _ = p.writer.write_all(&[ctrl_char]);
                 }
             }
+            // Ctrl+Shift+<punctuation/digit> that collapses to a single C0 byte.
+            // ConPTY terminals (Alacritty, WezTerm) deliver Ctrl+/ as VK_OEM_MINUS
+            // with Ctrl+Shift, so the client forwards it as "C-S--".  That must
+            // reach the child as 0x1f (^_) — identical to Ctrl+_ and to tmux — so
+            // neovim's Ctrl+/ comment-toggle fires.  Before this branch, "C-S--"
+            // matched neither the alphabetic C-S- arm nor the len==3 C- arm and
+            // was silently dropped (issue #394).  No native KEY_EVENT injection:
+            // the raw byte is enough (ConPTY reconstructs the key) and injecting
+            // both would double-deliver (issue #363).
+            s if (s.starts_with("C-S-") || s.starts_with("c-s-"))
+                && s.chars().count() == 5
+                && s.chars().nth(4).map_or(false, |c| !c.is_ascii_alphabetic()) =>
+            {
+                let c = s.chars().nth(4).unwrap();
+                if let Some(byte) = ctrl_char_send_keys_byte(c) {
+                    let _ = p.writer.write_all(&[byte]);
+                    let _ = p.writer.flush();
+                }
+            }
             s if s.starts_with("C-") && s.len() == 3 => {
                 let c = s.chars().nth(2).unwrap_or('c');
-                let ctrl_char = (c.to_ascii_lowercase() as u8) & 0x1F;
+                // tmux-parity mapping so C-/ -> 0x1f (^_), not the naive '/' & 0x1f
+                // == 0x0f (^O) collision with C-o (issue #226/#394).  Letters keep
+                // their usual byte (a->0x01 …), so Ctrl+<letter> is unaffected.
+                let ctrl_char = ctrl_char_send_keys_byte(c)
+                    .unwrap_or((c.to_ascii_lowercase() as u8) & 0x1F);
                 // Always write the raw control byte so ConPTY can generate
                 // console control events (e.g. CTRL_C_EVENT for \x03).
                 // Raw bytes do NOT start with \x1b so they never corrupt
@@ -3456,6 +3484,10 @@ mod tests;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue226_ctrl_slash.rs"]
 mod tests_issue226_ctrl_slash;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue394_ctrl_slash_conpty.rs"]
+mod tests_issue394_ctrl_slash_conpty;
 
 #[cfg(test)]
 #[path = "../tests-rs/test_issue284_pageup_wsl.rs"]
