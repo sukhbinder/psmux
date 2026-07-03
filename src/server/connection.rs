@@ -1681,7 +1681,15 @@ match cmd {
     "respawn-pane" | "respawnp" => {
         let workdir = args.windows(2).find(|w| w[0] == "-c").map(|w| w[1].to_string());
         let kill = args.iter().any(|a| *a == "-k");
-        let _ = tx.send(CtrlReq::RespawnPane(workdir, kill));
+        // Honor `-- <shell-command>` (issue #399): Claude Code agent-teams
+        // delivers the teammate launch via `respawn-pane -k -t %N -- "<cmd>"`.
+        // Without this the pane is respawned with the default shell and the
+        // teammate never boots (mailbox stays unread, task never runs).
+        let command = args.iter().position(|a| *a == "--")
+            .map(|i| args[i + 1..].join(" "))
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        let _ = tx.send(CtrlReq::RespawnPane(workdir, kill, command));
     }
     // ── Cross-session pane forwarding commands ──────────────────────
     "pane-forward-extract" => {
@@ -3651,7 +3659,12 @@ fn dispatch_control_command(
         "respawn-pane" | "respawnp" => {
             let workdir = args.windows(2).find(|w| w[0] == "-c").map(|w| w[1].to_string());
             let kill = args.iter().any(|a| *a == "-k");
-            let _ = tx.send(CtrlReq::RespawnPane(workdir, kill));
+            // Honor `-- <shell-command>` (issue #399): teammate launch delivery.
+            let command = args.iter().position(|a| *a == "--")
+                .map(|i| args[i + 1..].join(" "))
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
+            let _ = tx.send(CtrlReq::RespawnPane(workdir, kill, command));
             let _ = resp_tx.send(String::new());
             true
         }

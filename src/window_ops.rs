@@ -1469,7 +1469,7 @@ pub fn break_pane_to_window(app: &mut AppState) {
     }
 }
 
-pub fn respawn_active_pane(app: &mut AppState, pty_system_ref: Option<&dyn portable_pty::PtySystem>, workdir: Option<&str>, kill: bool) -> io::Result<()> {
+pub fn respawn_active_pane(app: &mut AppState, pty_system_ref: Option<&dyn portable_pty::PtySystem>, workdir: Option<&str>, kill: bool, command: Option<&str>) -> io::Result<()> {
     // tmux semantics: without -k, respawn only works on dead panes.
     // With -k, kill the running process first and respawn.
     {
@@ -1509,7 +1509,12 @@ pub fn respawn_active_pane(app: &mut AppState, pty_system_ref: Option<&dyn porta
     
     let size = PtySize { rows: pane.last_rows, cols: pane.last_cols, pixel_width: 0, pixel_height: 0 };
     let pair = pty_system.openpty(size).map_err(|e| io::Error::new(io::ErrorKind::Other, format!("openpty error: {e}")))?;
-    let mut shell_cmd = if !expanded_shell.is_empty() {
+    // Issue #399: honor an explicit `-- <command>` (e.g. Claude Code agent-teams
+    // respawning a pane with the teammate launch command). Without a command,
+    // fall back to the configured default shell (original behavior).
+    let mut shell_cmd = if command.is_some() {
+        crate::pane::build_command(command, app.env_shim, app.allow_predictions)
+    } else if !expanded_shell.is_empty() {
         build_default_shell(&expanded_shell, app.env_shim, app.allow_predictions)
     } else {
         detect_shell()

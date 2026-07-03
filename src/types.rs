@@ -1074,7 +1074,7 @@ pub enum CtrlReq {
         target_pane: Option<usize>,
         horizontal: bool,
     },
-    RespawnPane(Option<String>, bool),  // optional workdir (-c), kill flag (-k)
+    RespawnPane(Option<String>, bool, Option<String>),  // optional workdir (-c), kill flag (-k), command (-- shell-command)
     BindKey(String, String, String, bool),  // table, key, command, repeat
     UnbindKey(String, Option<String>),  // key, optional table (None = prefix)
     UnbindAll,
