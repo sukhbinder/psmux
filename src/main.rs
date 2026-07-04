@@ -1377,7 +1377,11 @@ fn run_main() -> io::Result<()> {
                 }
                 return Ok(());
             }
-            "split-window" | "splitw" => {
+            "split-window" | "splitw" | "split-pane" | "splitp" => {
+                // split-pane / splitp are tmux's default command-aliases for
+                // split-window (options-table.c). psmux handles them as arm
+                // synonyms, matching how info/server-info and choose-window/
+                // choose-session are already aliased. See issue #426.
                 // Strict getopt-style parsing for split-window flags.
                 // tmux template: "bc:de:F:fhIl:p:Pt:vZ"
                 let mut flag = "-v";
