@@ -123,7 +123,14 @@ pub fn render_window(f: &mut Frame, app: &mut AppState, area: Rect) {
     let window_style = app.user_options.get("window-style").map(|s| parse_tmux_style(s));
     let window_active_style = app.user_options.get("window-active-style").map(|s| parse_tmux_style(s));
     let border_status = app.user_options.get("pane-border-status").cloned().unwrap_or_else(|| "off".to_string());
-    let border_format = app.user_options.get("pane-border-format").cloned().unwrap_or_default();
+    // tmux ships a non-empty default for pane-border-format, so enabling
+    // `pane-border-status top` alone shows the pane title on the border. psmux
+    // stored it empty, which made the label gate (below) skip rendering, so the
+    // border drew blank. Fall back to the tmux default when unset/empty (#414).
+    let border_format = app.user_options.get("pane-border-format")
+        .filter(|s| !s.is_empty())
+        .cloned()
+        .unwrap_or_else(|| "#{pane_index} \"#{pane_title}\"".to_string());
     let win = &mut app.windows[app.active_idx];
     let active_rect = compute_active_rect(&win.root, &win.active_path, area);
     render_node(f, &mut win.root, &win.active_path, &mut Vec::new(), area, dim_preds, border_style, active_border_style, copy_cursor, active_rect, window_style, window_active_style, &border_status, &border_format, &mut 0);
