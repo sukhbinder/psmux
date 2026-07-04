@@ -1253,12 +1253,26 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
             }
         }
         "swap-pane" | "swapp" => {
-            // `-t <target>` swaps the active pane with an explicit target pane
-            // (e.g. `swap-pane -t :.4` or `swap-pane -t %2`).  Without -t, fall
-            // back to the directional -U/-D/-L/-R swap.
+            // `-s <src> -t <dst>` swaps the two explicit panes (#442).
+            // `-t <target>` alone swaps the active pane with an explicit target
+            // pane (e.g. `swap-pane -t :.4` or `swap-pane -t %2`).  Without -t,
+            // fall back to the directional -U/-D/-L/-R swap.
+            let source = parts.iter().position(|p| *p == "-s")
+                .and_then(|i| parts.get(i + 1)).map(|s| s.to_string());
             let target = parts.iter().position(|p| *p == "-t")
                 .and_then(|i| parts.get(i + 1)).map(|s| s.to_string());
-            if let Some(tgt) = target {
+            let detach = parts.iter().any(|p| *p == "-d");
+            if let (Some(src), Some(tgt)) = (source.as_ref(), target.as_ref()) {
+                if let Some(port) = app.control_port {
+                    let d = if detach { " -d" } else { "" };
+                    let _ = send_control_to_port(port, &format!("swap-pane{} -s {} -t {}\n", d, src, tgt), &app.session_key);
+                } else {
+                    match (resolve_swap_pane_target_path(app, src), resolve_swap_pane_target_path(app, tgt)) {
+                        (Some(sp), Some(dp)) => { crate::window_ops::swap_pane_between(app, sp, dp, detach); }
+                        _ => { app.status_message = Some(("swap-pane: can't find pane".to_string(), Instant::now(), None)); }
+                    }
+                }
+            } else if let Some(tgt) = target {
                 if let Some(port) = app.control_port {
                     let _ = send_control_to_port(port, &format!("swap-pane -t {}\n", tgt), &app.session_key);
                 } else {

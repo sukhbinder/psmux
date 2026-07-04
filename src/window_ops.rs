@@ -1171,6 +1171,44 @@ pub fn swap_pane_with_path(app: &mut AppState, target_path: Vec<usize>) -> bool 
     swapped
 }
 
+/// Swap two explicit panes named by their tree paths (`swap-pane -s <src>
+/// -t <dst>`, issue #442).  Neither pane needs to be the active one.  Geometry
+/// is preserved (the layout nodes exchange slots).  Focus follows tmux
+/// `cmd-swap-pane.c`: without `-d` the `-t` (dst) pane becomes active — after
+/// the swap it occupies the src slot, so focus lands on `src_path`.  With `-d`
+/// the previously active pane keeps focus, following it to its new slot.
+pub fn swap_pane_between(app: &mut AppState, src_path: Vec<usize>, dst_path: Vec<usize>, detach: bool) -> bool {
+    let swapped = {
+        let win = &mut app.windows[app.active_idx];
+        if src_path == dst_path { false }
+        else {
+            // Remember the focused pane id so `-d` can keep focus on it even if
+            // it was one of the two panes being swapped.
+            let active_id = crate::tree::get_active_pane_id(&win.root, &win.active_path);
+            if crate::tree::swap_nodes(&mut win.root, &src_path, &dst_path) {
+                if detach {
+                    if let Some(aid) = active_id {
+                        if let Some(p) = crate::tree::find_path_by_id(&win.root, aid) {
+                            win.active_path = p;
+                        }
+                    }
+                } else {
+                    // tmux default: the -t pane becomes active; it now sits in
+                    // the src slot after the exchange.
+                    win.active_path = src_path.clone();
+                }
+                if let Some(fid) = crate::tree::get_active_pane_id(&win.root, &win.active_path) {
+                    crate::tree::touch_mru(&mut win.pane_mru, fid);
+                }
+                true
+            } else { false }
+        }
+    };
+    // Resize moved panes to fit their new slots (see swap_pane).
+    if swapped { crate::tree::resize_all_panes(app); }
+    swapped
+}
+
 /// Resolve a tmux-style position token (e.g. `{top-right}`) to the path of the
 /// pane occupying that corner/edge of the current window.  Layout-independent:
 /// always finds whatever pane currently sits there.
@@ -1593,3 +1631,7 @@ mod test_issue381_gitbash_fullscreen_falsepositive;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue400_swap_pane_index_order.rs"]
 mod test_issue400_swap_pane_index_order;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue442_swap_pane_source.rs"]
+mod test_issue442_swap_pane_source;
