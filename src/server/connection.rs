@@ -1398,10 +1398,21 @@ match cmd {
         }
     }
     "swap-pane" | "swapp" => {
+        let detach = args.iter().any(|a| *a == "-d");
+        let raw_s = args.iter().position(|a| *a == "-s")
+            .and_then(|i| args.get(i + 1).copied());
         let raw_t = args.iter().position(|a| *a == "-t")
             .and_then(|i| args.get(i + 1).copied())
             .or_else(|| raw_target.as_deref());
-        if let Some(tok) = raw_t.filter(|t| t.starts_with('{')) {
+        // -s <src> -t <dst>: swap two explicit panes (#442). Only when BOTH
+        // resolve to a concrete pane (id or index); a `{position}` token is not
+        // a valid source. Otherwise fall through to the -t / directional forms.
+        let src = raw_s.map(parse_target).and_then(|pt| pt.pane.map(|p| (p, pt.pane_is_id)));
+        let dst = raw_t.filter(|t| !t.starts_with('{')).map(parse_target)
+            .and_then(|pt| pt.pane.map(|p| (p, pt.pane_is_id)));
+        if let (Some((sv, sid)), Some((dv, did))) = (src, dst) {
+            let _ = tx.send(CtrlReq::SwapPaneSrcDst { src: sv, src_is_id: sid, dst: dv, dst_is_id: did, detach });
+        } else if let Some(tok) = raw_t.filter(|t| t.starts_with('{')) {
             // Layout position token like {top-right} — layout-independent.
             let _ = tx.send(CtrlReq::SwapPanePosition(tok.to_string()));
         } else if let Some((p, is_id)) = raw_t.map(parse_target).and_then(|pt| pt.pane.map(|p| (p, pt.pane_is_id))) {
@@ -3450,14 +3461,24 @@ fn dispatch_control_command(
             // A `{...}` position token (e.g. {top-right}) resolves to whatever
             // pane currently sits there — layout-independent.  Otherwise resolve
             // an inline `-t <target>` / pre-parsed control target; else directional.
-            if let Some(tok) = _raw_target.filter(|t| t.starts_with('{')) {
+            // -s <src> -t <dst>: swap two explicit panes (#442). Only when both
+            // resolve to a concrete pane; otherwise fall through.
+            let detach = args.iter().any(|a| *a == "-d");
+            let src = args.iter().position(|a| *a == "-s")
+                .and_then(|i| args.get(i + 1).copied())
+                .map(parse_target)
+                .and_then(|pt| pt.pane.map(|p| (p, pt.pane_is_id)));
+            let dst_inline = args.iter().position(|a| *a == "-t")
+                .and_then(|i| args.get(i + 1).copied())
+                .map(parse_target)
+                .and_then(|pt| pt.pane.map(|p| (p, pt.pane_is_id)));
+            let dst = dst_inline.or_else(|| target_pane.map(|p| (p, pane_is_id)));
+            if let (Some((sv, sid)), Some((dv, did))) = (src, dst) {
+                let _ = tx.send(CtrlReq::SwapPaneSrcDst { src: sv, src_is_id: sid, dst: dv, dst_is_id: did, detach });
+            } else if let Some(tok) = _raw_target.filter(|t| t.starts_with('{')) {
                 let _ = tx.send(CtrlReq::SwapPanePosition(tok.to_string()));
             } else {
-                let inline = args.iter().position(|a| *a == "-t")
-                    .and_then(|i| args.get(i + 1).copied())
-                    .map(parse_target)
-                    .and_then(|pt| pt.pane.map(|p| (p, pt.pane_is_id)));
-                let resolved = inline.or_else(|| target_pane.map(|p| (p, pane_is_id)));
+                let resolved = dst;
                 if let Some((p, is_id)) = resolved {
                     let _ = tx.send(CtrlReq::SwapPaneTarget(p, is_id));
                 } else {

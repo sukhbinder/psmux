@@ -2924,6 +2924,33 @@ pub fn run_server(session_name: String, socket_name: Option<String>, initial_com
                         app.status_message = Some((format!("swap-pane: can't find pane: {}", target), std::time::Instant::now(), None));
                     }
                 }
+                CtrlReq::SwapPaneSrcDst { src, src_is_id, dst, dst_is_id, detach } => {
+                    // swap-pane -s <src> -t <dst>: swap two explicit panes (#442).
+                    // tmux: swap-pane without -Z permanently unzooms (#82)
+                    unzoom_if_zoomed(&mut app);
+                    fn resolve_pane_path(app: &AppState, val: usize, is_id: bool) -> Option<Vec<usize>> {
+                        let win = &app.windows[app.active_idx];
+                        if is_id {
+                            crate::tree::find_path_by_id(&win.root, val)
+                        } else {
+                            val.checked_sub(app.pane_base_index)
+                                .and_then(|idx| crate::tree::path_by_position(&win.root, idx))
+                        }
+                    }
+                    let sp = resolve_pane_path(&app, src, src_is_id);
+                    let dp = resolve_pane_path(&app, dst, dst_is_id);
+                    match (sp, dp) {
+                        (Some(sp), Some(dp)) => {
+                            if crate::window_ops::swap_pane_between(&mut app, sp, dp, detach) {
+                                meta_dirty = true;
+                                hook_event = Some("after-swap-pane");
+                            }
+                        }
+                        _ => {
+                            app.status_message = Some(("swap-pane: can't find pane".to_string(), std::time::Instant::now(), None));
+                        }
+                    }
+                }
                 CtrlReq::SwapPanePosition(token) => {
                     // tmux: swap-pane without -Z permanently unzooms (#82)
                     unzoom_if_zoomed(&mut app);

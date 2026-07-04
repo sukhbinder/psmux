@@ -1037,6 +1037,12 @@ pub enum CtrlReq {
     /// (`%N`); otherwise it is a user-facing pane index that is normalized
     /// using pane-base-index before resolving a positional pane path.
     SwapPaneTarget(usize, bool),
+    /// swap-pane -s <src> -t <dst>: swap the two explicit panes named by
+    /// `-s` and `-t` (issue #442).  Each pane is a (value, is_id) pair
+    /// resolved the same way as `SwapPaneTarget`.  `detach` is true when
+    /// `-d` was given: the active pane is left unchanged (following its pane
+    /// to the new slot); otherwise, per tmux, the `-t` pane becomes active.
+    SwapPaneSrcDst { src: usize, src_is_id: bool, dst: usize, dst_is_id: bool, detach: bool },
     /// swap-pane -t <token>: swap the active pane with the pane at a layout
     /// position token (e.g. `{top-right}`).  Layout-independent.
     SwapPanePosition(String),
