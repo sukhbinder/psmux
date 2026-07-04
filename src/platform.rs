@@ -2408,6 +2408,175 @@ impl Utf16ConsoleWriter {
     }
 }
 
+// ─── "Bold is bright" SGR restoration (issue #425) ──────────────────────────
+//
+// crossterm 0.29 serialises every one of the 16 basic ANSI colors as a
+// 256-indexed sequence (`38;5;N` for foreground, `48;5;N` for background —
+// see crossterm's `Colored` Display impl).  The 256-indexed form suppresses
+// the outer terminal's "bold is bright" behaviour: a bare shell emitting
+// `ESC[32;1m` reaches Windows Terminal as `ESC[32m`+`ESC[1m` and renders as
+// *bright* green, but the same text routed through psmux reached WT as
+// `ESC[38;5;2m`+`ESC[1m`, which WT renders as muted green with a heavier
+// font.  Restoring the standard SGR codes (30-37/90-97 fg, 40-47/100-107 bg)
+// for palette indices 0-15 makes psmux match a bare shell.
+
+/// Returns true when an SGR parameter list contains only ASCII digits and
+/// `;` separators (the shape crossterm emits).  Anything else (`:` subparams,
+/// private markers) is left untouched.
+#[cfg(windows)]
+fn sgr_params_simple(params: &[u8]) -> bool {
+    params.iter().all(|&c| c.is_ascii_digit() || c == b';')
+}
+
+/// Parse a short decimal token (0-999) into a u16, rejecting empty/oversized.
+#[cfg(windows)]
+fn parse_dec_u16(t: &[u8]) -> Option<u16> {
+    if t.is_empty() || t.len() > 3 {
+        return None;
+    }
+    let mut v: u16 = 0;
+    for &c in t {
+        if !c.is_ascii_digit() {
+            return None;
+        }
+        v = v * 10 + (c - b'0') as u16;
+    }
+    Some(v)
+}
+
+/// Append the decimal representation of `v` to `out` without allocating.
+#[cfg(windows)]
+fn push_dec_u16(out: &mut Vec<u8>, mut v: u16) {
+    if v == 0 {
+        out.push(b'0');
+        return;
+    }
+    let mut buf = [0u8; 5];
+    let mut i = buf.len();
+    while v > 0 {
+        i -= 1;
+        buf[i] = b'0' + (v % 10) as u8;
+        v /= 10;
+    }
+    out.extend_from_slice(&buf[i..]);
+}
+
+/// Rewrite the parameter list of a single SGR sequence, converting
+/// `38;5;N`/`48;5;N` (N <= 15) into the standard basic/bright color codes.
+/// Truecolor (`38;2;r;g;b`), 256-indexed N >= 16, and underline color
+/// (`58;...`) are copied through verbatim.
+#[cfg(windows)]
+fn rewrite_sgr_params(params: &[u8], out: &mut Vec<u8>) {
+    let tokens: Vec<&[u8]> = params.split(|&c| c == b';').collect();
+    let mut first = true;
+    let mut push = |tok: &[u8], out: &mut Vec<u8>, first: &mut bool| {
+        if !*first {
+            out.push(b';');
+        }
+        out.extend_from_slice(tok);
+        *first = false;
+    };
+    let mut k = 0;
+    while k < tokens.len() {
+        let t = tokens[k];
+        // fg/bg 256-indexed: 38;5;N / 48;5;N
+        if (t == b"38" || t == b"48") && k + 2 < tokens.len() && tokens[k + 1] == b"5" {
+            if let Some(n) = parse_dec_u16(tokens[k + 2]) {
+                if n < 16 {
+                    let code = if t == b"38" {
+                        if n < 8 { 30 + n } else { 90 + (n - 8) }
+                    } else if n < 8 {
+                        40 + n
+                    } else {
+                        100 + (n - 8)
+                    };
+                    if !first {
+                        out.push(b';');
+                    }
+                    push_dec_u16(out, code);
+                    first = false;
+                    k += 3;
+                    continue;
+                }
+            }
+            // N >= 16 or unparsable — copy the three tokens verbatim.
+            push(tokens[k], out, &mut first);
+            push(tokens[k + 1], out, &mut first);
+            push(tokens[k + 2], out, &mut first);
+            k += 3;
+            continue;
+        }
+        // fg/bg/underline truecolor: 38;2;r;g;b — skip past all 5 tokens.
+        if (t == b"38" || t == b"48" || t == b"58") && k + 1 < tokens.len() && tokens[k + 1] == b"2" {
+            let end = (k + 5).min(tokens.len());
+            for m in k..end {
+                push(tokens[m], out, &mut first);
+            }
+            k = end;
+            continue;
+        }
+        // underline 256-indexed: 58;5;N — leave untouched, skip 3 tokens.
+        if t == b"58" && k + 2 < tokens.len() && tokens[k + 1] == b"5" {
+            for m in k..k + 3 {
+                push(tokens[m], out, &mut first);
+            }
+            k += 3;
+            continue;
+        }
+        push(t, out, &mut first);
+        k += 1;
+    }
+}
+
+/// Scan `buf`, copying it into `out` while rewriting the basic-color SGR
+/// sequences (see [`rewrite_sgr_params`]).  Only complete escape sequences
+/// are processed; a trailing incomplete `ESC[...` (or lone `ESC`) is left
+/// unconsumed so the caller can defer it to the next flush.  Returns the
+/// number of input bytes consumed into `out`.
+#[cfg(windows)]
+fn rewrite_sgr_basic_colors(buf: &[u8], out: &mut Vec<u8>) -> usize {
+    let n = buf.len();
+    let mut i = 0;
+    while i < n {
+        let b = buf[i];
+        if b == 0x1B {
+            if i + 1 >= n {
+                return i; // lone trailing ESC — defer
+            }
+            if buf[i + 1] == b'[' {
+                // CSI: scan for the final byte in 0x40..=0x7E.
+                let mut j = i + 2;
+                while j < n && !(0x40..=0x7E).contains(&buf[j]) {
+                    j += 1;
+                }
+                if j >= n {
+                    return i; // incomplete CSI — defer
+                }
+                let final_byte = buf[j];
+                let params = &buf[i + 2..j];
+                if final_byte == b'm' && sgr_params_simple(params) {
+                    out.extend_from_slice(b"\x1b[");
+                    rewrite_sgr_params(params, out);
+                    out.push(b'm');
+                } else {
+                    out.extend_from_slice(&buf[i..=j]);
+                }
+                i = j + 1;
+                continue;
+            }
+            // Non-CSI escape (OSC/DCS/etc.): copy the ESC and continue.  Its
+            // payload is copied verbatim byte-by-byte and never matched as a
+            // CSI, so any embedded "38;5;" text is left untouched.
+            out.push(b);
+            i += 1;
+            continue;
+        }
+        out.push(b);
+        i += 1;
+    }
+    n
+}
+
 #[cfg(windows)]
 impl std::io::Write for Utf16ConsoleWriter {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
@@ -2423,9 +2592,25 @@ impl std::io::Write for Utf16ConsoleWriter {
             return Ok(());
         }
 
+        // Restore standard SGR codes for the 16 basic ANSI colors so the
+        // outer terminal's "bold is bright" rendering works (issue #425).
+        // Only pay the rewrite cost when a candidate `8;5;` token is present
+        // (covers both `38;5;` and `48;5;`); otherwise the buffer is used
+        // as-is.  `deferred` holds a trailing incomplete escape sequence to
+        // carry to the next flush (empty in the common case).
+        let needs_rewrite = self.frame_buf.windows(4).any(|w| w == b"8;5;");
+        let mut rewritten: Vec<u8> = Vec::new();
+        let (processed, deferred): (&[u8], &[u8]) = if needs_rewrite {
+            rewritten.reserve(self.frame_buf.len() + 16);
+            let consumed = rewrite_sgr_basic_colors(&self.frame_buf, &mut rewritten);
+            (&rewritten[..], &self.frame_buf[consumed..])
+        } else {
+            (&self.frame_buf[..], &[][..])
+        };
+
         // Convert the buffered UTF-8 to a valid string, handling any
         // incomplete trailing multi-byte sequence.
-        let (valid, remainder) = match std::str::from_utf8(&self.frame_buf) {
+        let (valid, remainder) = match std::str::from_utf8(processed) {
             Ok(s) => (s.len(), 0),
             Err(e) => {
                 let valid_end = e.valid_up_to();
@@ -2433,29 +2618,25 @@ impl std::io::Write for Utf16ConsoleWriter {
                 // sequence — they'll be completed by the next write.
                 // If it's Some, those bytes are genuinely invalid — skip.
                 let skip = e.error_len().unwrap_or(0);
-                (valid_end, self.frame_buf.len() - valid_end - skip)
+                (valid_end, processed.len() - valid_end - skip)
             }
         };
 
         if valid > 0 {
             // Safety: we just validated this range is valid UTF-8.
-            let s = unsafe { std::str::from_utf8_unchecked(&self.frame_buf[..valid]) };
+            let s = unsafe { std::str::from_utf8_unchecked(&processed[..valid]) };
             self.write_wide(s)?;
         }
 
-        // Keep any incomplete trailing bytes for the next flush.
+        // Rebuild the frame buffer: any pending UTF-8 tail first, then the
+        // deferred incomplete escape sequence.
+        let utf8_tail_start = processed.len() - remainder;
+        let mut next = Vec::with_capacity(remainder + deferred.len());
         if remainder > 0 {
-            let start = self.frame_buf.len() - remainder;
-            // Rotate trailing bytes to front.
-            let mut i = 0;
-            while i < remainder {
-                self.frame_buf[i] = self.frame_buf[start + i];
-                i += 1;
-            }
-            self.frame_buf.truncate(remainder);
-        } else {
-            self.frame_buf.clear();
+            next.extend_from_slice(&processed[utf8_tail_start..]);
         }
+        next.extend_from_slice(deferred);
+        self.frame_buf = next;
 
         Ok(())
     }
@@ -2477,6 +2658,115 @@ pub fn create_writer() -> PsmuxWriter {
     { Utf16ConsoleWriter::new() }
     #[cfg(not(windows))]
     { std::io::stdout() }
+}
+
+#[cfg(all(test, windows))]
+mod bold_is_bright_tests {
+    // Issue #425: crossterm serialises the 16 basic colors as 256-indexed
+    // `38;5;N`, which suppresses the outer terminal's "bold is bright".  These
+    // tests lock in the byte-level rewrite that restores the standard codes.
+    use super::{rewrite_sgr_basic_colors, rewrite_sgr_params};
+
+    fn rewrite(input: &str) -> String {
+        let mut out = Vec::new();
+        let consumed = rewrite_sgr_basic_colors(input.as_bytes(), &mut out);
+        assert_eq!(consumed, input.len(), "expected full consumption");
+        String::from_utf8(out).unwrap()
+    }
+
+    fn params(input: &str) -> String {
+        let mut out = Vec::new();
+        rewrite_sgr_params(input.as_bytes(), &mut out);
+        String::from_utf8(out).unwrap()
+    }
+
+    #[test]
+    fn basic_fg_becomes_standard() {
+        // 38;5;0..7 -> 30..37
+        for n in 0u8..8 {
+            assert_eq!(params(&format!("38;5;{n}")), format!("{}", 30 + n));
+        }
+        // 38;5;8..15 -> 90..97
+        for n in 8u8..16 {
+            assert_eq!(params(&format!("38;5;{n}")), format!("{}", 90 + (n - 8)));
+        }
+    }
+
+    #[test]
+    fn basic_bg_becomes_standard() {
+        for n in 0u8..8 {
+            assert_eq!(params(&format!("48;5;{n}")), format!("{}", 40 + n));
+        }
+        for n in 8u8..16 {
+            assert_eq!(params(&format!("48;5;{n}")), format!("{}", 100 + (n - 8)));
+        }
+    }
+
+    #[test]
+    fn green_bold_matches_bare_shell() {
+        // The exact issue scenario: crossterm emits fg then bold as separate
+        // SGRs.  After rewrite the green must be the standard `32` so WT
+        // brightens it, and the bold `1` must survive.
+        assert_eq!(rewrite("\x1b[38;5;2m\x1b[1m"), "\x1b[32m\x1b[1m");
+        // Combined form (color + bold in one SGR) is handled too.
+        assert_eq!(params("38;5;2;1"), "32;1");
+    }
+
+    #[test]
+    fn indexed_over_15_preserved() {
+        assert_eq!(params("38;5;240"), "38;5;240");
+        assert_eq!(params("48;5;250"), "48;5;250");
+        assert_eq!(params("38;5;16"), "38;5;16");
+    }
+
+    #[test]
+    fn truecolor_preserved() {
+        assert_eq!(params("38;2;255;0;0"), "38;2;255;0;0");
+        assert_eq!(params("48;2;1;2;3"), "48;2;1;2;3");
+        // A blue channel equal to "5" must not be misread as the 256 selector.
+        assert_eq!(params("38;2;5;5;5"), "38;2;5;5;5");
+    }
+
+    #[test]
+    fn underline_color_untouched() {
+        assert_eq!(params("58;5;2"), "58;5;2");
+        assert_eq!(params("58;2;1;2;3"), "58;2;1;2;3");
+    }
+
+    #[test]
+    fn already_standard_and_attrs_untouched() {
+        assert_eq!(params("32"), "32");
+        assert_eq!(params("1"), "1");
+        assert_eq!(params("0"), "0");
+        assert_eq!(params("32;1;4"), "32;1;4");
+        assert_eq!(params(""), "");
+    }
+
+    #[test]
+    fn non_sgr_sequences_and_text_preserved() {
+        // Cursor move ends in 'H', not 'm' — leave alone.
+        assert_eq!(rewrite("\x1b[10;20H"), "\x1b[10;20H");
+        // Private CSI (show cursor) untouched.
+        assert_eq!(rewrite("\x1b[?25h"), "\x1b[?25h");
+        // OSC payload containing "38;5;" text must not be rewritten.
+        assert_eq!(rewrite("\x1b]0;38;5;2\x07"), "\x1b]0;38;5;2\x07");
+        // Plain text passes through.
+        assert_eq!(rewrite("hello \x1b[38;5;1mred\x1b[0m"), "hello \x1b[31mred\x1b[0m");
+    }
+
+    #[test]
+    fn incomplete_trailing_escape_deferred() {
+        // A split CSI at the buffer end is left unconsumed for the next flush.
+        let input = b"ok\x1b[38;5";
+        let mut out = Vec::new();
+        let consumed = rewrite_sgr_basic_colors(input, &mut out);
+        assert_eq!(consumed, 2, "should defer from the ESC");
+        assert_eq!(out, b"ok");
+        // Lone trailing ESC deferred too.
+        let mut out2 = Vec::new();
+        assert_eq!(rewrite_sgr_basic_colors(b"hi\x1b", &mut out2), 2);
+        assert_eq!(out2, b"hi");
+    }
 }
 
 // ---------------------------------------------------------------------------
