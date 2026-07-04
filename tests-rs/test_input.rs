@@ -187,6 +187,11 @@ fn shift_enter_produces_correct_encoding() {
 fn ctrl_enter_produces_csi_13_5() {
     let ev = key(KeyCode::Enter, KeyModifiers::CONTROL);
     let bytes = encode_key_event(&ev).unwrap();
+    // #409: On Windows, plain Ctrl+Enter is LF (0x0A) to match Windows Terminal's
+    // regular input encoder; other platforms keep xterm CSI 13;5~.
+    #[cfg(windows)]
+    assert_eq!(bytes, b"\n", "Ctrl+Enter on Windows must produce LF");
+    #[cfg(not(windows))]
     assert_eq!(bytes, b"\x1b[13;5~", "Ctrl+Enter must produce CSI 13;5~");
 }
 
@@ -371,10 +376,13 @@ fn alt_enter_no_ctrl_uses_vt_not_csi() {
 }
 
 #[test]
-fn ctrl_enter_uses_csi_encoding() {
-    // Ctrl+Enter → CSI 13;5~ (must use CSI, not ESC+CR)
+fn ctrl_enter_uses_platform_encoding() {
+    // #409: plain Ctrl+Enter is LF on Windows Terminal, CSI 13;5~ elsewhere.
     let ev = key(KeyCode::Enter, KeyModifiers::CONTROL);
     let bytes = encode_key_event(&ev).unwrap();
+    #[cfg(windows)]
+    assert_eq!(bytes, b"\n", "Ctrl+Enter must use LF on Windows; got {:?}", bytes);
+    #[cfg(not(windows))]
     assert_eq!(bytes, b"\x1b[13;5~",
         "Ctrl+Enter must use CSI encoding; got {:?}", bytes);
 }
@@ -413,7 +421,7 @@ fn shift_alt_enter_on_non_windows_produces_csi() {
 /// sent BOTH \x1b\r (VT) and a native VK_RETURN injection for Shift+Enter,
 /// causing the child process to receive two Enter events.  After the fix,
 /// only VT encoding is used for Shift/Alt+Enter (no Ctrl), preventing double
-/// delivery.  Ctrl+Enter still uses native injection (with CSI fallback).
+/// delivery.  Plain Ctrl+Enter uses native injection with an LF fallback (#409).
 #[cfg(windows)]
 #[test]
 fn bug3_double_delivery_prevention() {
@@ -434,11 +442,11 @@ fn bug3_double_delivery_prevention() {
     assert_eq!(shift_bytes, b"\x1b\r");
     assert_eq!(alt_bytes, b"\x1b\r");
 
-    // Native injection path (Ctrl+Enter): produces CSI sequence
-    // In the live code, forward_key_to_active only calls
-    // send_modified_enter_event when ctrl==true.  This CSI encoding
-    // is the FALLBACK when native injection fails.
-    assert_eq!(ctrl_bytes, b"\x1b[13;5~");
+    // Plain Ctrl+Enter (#409): LF byte payload.  The live Windows path injects a
+    // VK_RETURN KEY_EVENT with this same LF payload; encode_key_event is the byte
+    // fallback.  LF stays distinct from Shift/Alt+Enter's ESC+CR, so no combination
+    // collapses into a plain CR double-delivery.
+    assert_eq!(ctrl_bytes, b"\n");
 
     // The critical guard in forward_key_to_active:
     //   let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);

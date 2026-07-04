@@ -1823,11 +1823,19 @@ pub fn encode_key_event(key: &KeyEvent) -> Option<Vec<u8>> {
                 #[cfg(windows)]
                 {
                     let has_ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+                    let has_alt = key.modifiers.contains(KeyModifiers::ALT);
+                    let has_shift = key.modifiers.contains(KeyModifiers::SHIFT);
                     if !has_ctrl {
                         return Some(b"\x1b\r".to_vec());
                     }
+                    // Plain Ctrl+Enter: LF (0x0A), matching Windows Terminal and the
+                    // native VK_RETURN injection payload (#409).  This is the byte
+                    // fallback used only when native injection is unavailable.
+                    if has_ctrl && !has_alt && !has_shift {
+                        return Some(b"\n".to_vec());
+                    }
                 }
-                // Non-Windows or Ctrl combos: xterm modified-Enter: CSI 13 ; mod ~
+                // Non-Windows or other Ctrl combos: xterm modified-Enter: CSI 13 ; mod ~
                 format!("\x1b[13;{}~", m).into_bytes()
             } else {
                 b"\r".to_vec()
@@ -1985,7 +1993,11 @@ pub fn forward_key_to_active(app: &mut AppState, key: KeyEvent) -> io::Result<()
             if ctrl {
                 let try_inject = |pane: &mut Pane| -> bool {
                     if let Some(pid) = pane.child_pid {
-                        crate::platform::mouse_inject::send_modified_key_event(pid, '\r', ctrl, alt, shift)
+                        // send_modified_enter_event injects VK_RETURN with the correct
+                        // modifier flags and (for plain Ctrl+Enter) an LF character
+                        // payload, matching Windows Terminal so VT/raw readers see LF
+                        // instead of CR (#409).
+                        crate::platform::mouse_inject::send_modified_enter_event(pid, ctrl, alt, shift)
                     } else {
                         false
                     }
@@ -1997,7 +2009,7 @@ pub fn forward_key_to_active(app: &mut AppState, key: KeyEvent) -> io::Result<()
                         match node {
                             Node::Leaf(p) if !p.dead => {
                                 if let Some(pid) = p.child_pid {
-                                    if !crate::platform::mouse_inject::send_modified_key_event(pid, '\r', ctrl, alt, shift) {
+                                    if !crate::platform::mouse_inject::send_modified_enter_event(pid, ctrl, alt, shift) {
                                         // Fallback: xterm CSI encoding for non-console apps
                                         let m: u8 = 1 + (shift as u8) + (alt as u8) * 2 + (ctrl as u8) * 4;
                                         let bytes = if m > 1 { format!("\x1b[13;{}~", m).into_bytes() } else { b"\r".to_vec() };
@@ -3425,9 +3437,11 @@ pub fn send_key_to_active(app: &mut AppState, k: &str) -> io::Result<()> {
                 let has_ctrl = upper.contains("C-");
                 let has_alt = upper.contains("M-");
                 let injected = if has_ctrl {
-                    // Only use native injection for Ctrl combos.
+                    // Only use native injection for Ctrl combos.  For plain
+                    // Ctrl+Enter this carries an LF payload (#409); Ctrl+Shift /
+                    // Ctrl+Alt keep CR.
                     if let Some(pid) = p.child_pid {
-                        crate::platform::mouse_inject::send_modified_key_event(pid, '\r', has_ctrl, has_alt, has_shift)
+                        crate::platform::mouse_inject::send_modified_enter_event(pid, has_ctrl, has_alt, has_shift)
                     } else {
                         false
                     }
@@ -3435,11 +3449,14 @@ pub fn send_key_to_active(app: &mut AppState, k: &str) -> io::Result<()> {
                     false
                 };
                 if !injected {
-                    if (has_shift || has_alt) && !has_ctrl {
+                    if has_ctrl && !has_shift && !has_alt {
+                        // Fallback: plain Ctrl+Enter is LF, matching WT (#409).
+                        let _ = p.writer.write_all(b"\n");
+                    } else if (has_shift || has_alt) && !has_ctrl {
                         // Fallback: ESC + CR for VT-native apps (Claude Code, etc.)
                         let _ = p.writer.write_all(b"\x1b\r");
                     } else {
-                        // Ctrl+Enter and other combos: CSI encoding
+                        // Ctrl+Shift/Ctrl+Alt+Enter and other combos: CSI encoding
                         if let Some(seq) = parse_modified_special_key(s) {
                             let _ = p.writer.write_all(seq.as_bytes());
                         }
