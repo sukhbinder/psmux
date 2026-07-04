@@ -2534,7 +2534,22 @@ match cmd {
         let background = args.iter().any(|a| *a == "-b");
         let cmd_parts: Vec<&str> = args.iter().filter(|a| !a.starts_with('-')).copied().collect();
         let shell_cmd = cmd_parts.join(" ");
-        let shell_cmd = shell_cmd.trim_matches(|c: char| c == '\'' || c == '"').to_string();
+        // Strip only a BALANCED pair of outer wrapping quotes, e.g.
+        // run-shell "'~/plugins/foo.tmux'" -> ~/plugins/foo.tmux.
+        // A blind trim_matches here was the root cause of #402: it also removed
+        // a lone TRAILING quote when the command's last argument was legitimately
+        // quoted (e.g. `psmux new-window -c 'C:\path'` or `pwsh -Command "..."`),
+        // producing an unterminated-string parse error in the spawned shell so the
+        // command silently never ran. Only unwrap when both ends match the same quote.
+        let trimmed = shell_cmd.trim();
+        let shell_cmd = if trimmed.len() >= 2
+            && ((trimmed.starts_with('\'') && trimmed.ends_with('\''))
+                || (trimmed.starts_with('"') && trimmed.ends_with('"')))
+        {
+            trimmed[1..trimmed.len() - 1].to_string()
+        } else {
+            trimmed.to_string()
+        };
         // Expand ~ to home directory + XDG fallback for plugin paths
         let shell_cmd = crate::util::expand_run_shell_path(&shell_cmd);
         if shell_cmd.is_empty() {
