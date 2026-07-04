@@ -3032,6 +3032,43 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
                                 KeyCode::Char('p') if tree_chooser => {
                                     preview_enabled = !preview_enabled;
                                 }
+                                // 'x' kills the highlighted window (mirrors the session
+                                // chooser's `x`). Scoped to a window row in the current
+                                // session: focus the window, then kill it. The digit-jump
+                                // buffer wins over the arrow cursor, same as Enter.
+                                KeyCode::Char('x') if tree_chooser => {
+                                    let target_idx: Option<usize> = if tree_num_buffer.is_empty() {
+                                        Some(tree_selected)
+                                    } else {
+                                        match tree_num_buffer.parse::<usize>() {
+                                            Ok(n) if n >= 1 && n <= tree_entries.len() => Some(n - 1),
+                                            _ => None,
+                                        }
+                                    };
+                                    if let Some(sel_idx) = target_idx {
+                                        // Copy out the fields we need so the immutable borrow
+                                        // ends before we mutate tree_entries below.
+                                        if let Some((is_win, wid, sess_name)) = tree_entries
+                                            .get(sel_idx)
+                                            .map(|(iw, w, _p, _l, s)| (*iw, *w, s.clone()))
+                                        {
+                                            if is_win && wid != usize::MAX && sess_name == current_session {
+                                                cmd_batch.push(format!("focus-window {}\n", wid));
+                                                cmd_batch.push("kill-window\n".into());
+                                                // Drop the killed row and clamp the cursor so
+                                                // the picker stays open for further kills.
+                                                tree_entries.remove(sel_idx);
+                                                if tree_selected >= tree_entries.len() && tree_selected > 0 {
+                                                    tree_selected -= 1;
+                                                }
+                                                if tree_entries.is_empty() {
+                                                    tree_chooser = false;
+                                                }
+                                                tree_num_buffer.clear();
+                                            }
+                                        }
+                                    }
+                                }
                                 KeyCode::Char(c) if tree_chooser && c.is_ascii_digit() => {
                                     // Append to the digit-jump buffer; Enter consumes it.
                                     if tree_num_buffer.len() < 6 {
