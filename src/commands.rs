@@ -2522,3 +2522,7 @@ mod tests_issue273_send_prefix;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue383_swap_pane_targets.rs"]
 mod tests_issue383_swap_pane_targets;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue402_parse.rs"]
+mod tests_issue402_parse;
