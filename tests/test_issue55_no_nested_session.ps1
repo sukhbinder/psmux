@@ -4,14 +4,17 @@
 #      and exits without spawning anything.
 #
 # Guard locations in main.rs:
-#   PATH A (bare psmux / TUI): lines ~3627-3634  — only reached when stdin IS a terminal.
-#     When stdin is NOT a terminal psmux hits the is_terminal() gate at line 3617 first
-#     and exits via print_version() — a subprocess test cannot exercise PATH A.
-#   PATH B (new-session command): lines ~747-754 — no is_terminal() gate; always reachable.
+#   PATH A (bare psmux / TUI): only reached when stdin IS a terminal. When stdin is
+#     NOT a terminal psmux hits the is_terminal() gate first and exits via
+#     print_version() — a subprocess test cannot exercise PATH A.
+#   PATH B (new-session command): applied after flag parsing, no is_terminal() gate;
+#     always reachable. Per issue #424 the guard only fires for an ATTACHING
+#     new-session (no -d). A detached `new-session -d` is allowed nested because it
+#     never grabs the current terminal (see tests/test_issue424_proof.ps1).
 #
-# Tests:
-#   T1. PSMUX_ACTIVE=1   + new-session -d -s gap55_a  => warning on stderr, session NOT created
-#   T2. PSMUX_SESSION=x  + new-session -d -s gap55_b  => warning on stderr, session NOT created
+# Tests (T1/T2 use the ATTACHING form, no -d, which is the case the guard blocks):
+#   T1. PSMUX_ACTIVE=1   + new-session -s gap55_a  => warning on stderr, session NOT created
+#   T2. PSMUX_SESSION=x  + new-session -s gap55_b  => warning on stderr, session NOT created
 #   T3. PSMUX_ACTIVE=1   + bare psmux (non-tty subprocess) => hits is_terminal() gate,
 #       exits cleanly printing version — PATH A guard unreachable without a real tty;
 #       assert: exits <5s AND no nested session file created (no port file for a new session)
@@ -78,13 +81,14 @@ Start-Sleep -Milliseconds 300
 # -----------------------------------------------------------------------
 # T1: PSMUX_ACTIVE=1 blocks new-session (PATH B guard)
 # -----------------------------------------------------------------------
-Write-Host "`n[Test 1] PSMUX_ACTIVE=1 blocks new-session" -ForegroundColor Yellow
+Write-Host "`n[Test 1] PSMUX_ACTIVE=1 blocks attaching new-session" -ForegroundColor Yellow
 
 $env:PSMUX_ACTIVE = "1"
 Remove-Item Env:PSMUX_SESSION       -EA SilentlyContinue
 Remove-Item Env:PSMUX_ALLOW_NESTING -EA SilentlyContinue
 
-$out1     = & $PSMUX new-session -d -s gap55_a 2>&1 | Out-String
+# Attaching form (no -d): this is what the guard blocks per issue #424.
+$out1     = & $PSMUX new-session -s gap55_a 2>&1 | Out-String
 $created1 = Session-Exists "gap55_a"
 
 Write-Host "  output:          $($out1.Trim())"
@@ -101,13 +105,14 @@ Remove-Item Env:PSMUX_ACTIVE -EA SilentlyContinue
 # -----------------------------------------------------------------------
 # T2: PSMUX_SESSION=<non-empty> blocks new-session (PATH B guard)
 # -----------------------------------------------------------------------
-Write-Host "`n[Test 2] PSMUX_SESSION=running blocks new-session" -ForegroundColor Yellow
+Write-Host "`n[Test 2] PSMUX_SESSION=running blocks attaching new-session" -ForegroundColor Yellow
 
 $env:PSMUX_SESSION = "running"
 Remove-Item Env:PSMUX_ACTIVE        -EA SilentlyContinue
 Remove-Item Env:PSMUX_ALLOW_NESTING -EA SilentlyContinue
 
-$out2     = & $PSMUX new-session -d -s gap55_b 2>&1 | Out-String
+# Attaching form (no -d): this is what the guard blocks per issue #424.
+$out2     = & $PSMUX new-session -s gap55_b 2>&1 | Out-String
 $created2 = Session-Exists "gap55_b"
 
 Write-Host "  output:          $($out2.Trim())"

@@ -776,15 +776,11 @@ fn run_main() -> io::Result<()> {
                 return run_server(name, server_socket_name, initial_cmd, raw_cmd, srv_start_dir, srv_window_name, srv_init_size, srv_group_target, srv_env_vars);
             }
             "new-session" | "new" => {
-                // Prevent nesting: block new-session inside an existing psmux session
-                if env::var("PSMUX_ALLOW_NESTING").ok().as_deref() != Some("1") {
-                    if env::var("PSMUX_ACTIVE").ok().as_deref() == Some("1")
-                        || env::var("PSMUX_SESSION").ok().filter(|v| !v.is_empty()).is_some()
-                    {
-                        eprintln!("psmux: sessions should be nested with care, unset PSMUX_SESSION to force");
-                        return Ok(());
-                    }
-                }
+                // Nesting guard is applied AFTER flag parsing below, once we know
+                // whether -d (detached) was requested. A detached session never
+                // grabs the current terminal, so nesting it is harmless and must
+                // be allowed (issue #424). Only an attaching new-session takes
+                // over the terminal and warrants the nesting warning.
                 // Strict getopt-style parsing for new-session flags.
                 // tmux template: "Ac:dDe:EF:f:n:Ps:t:x:Xy:"
                 // Flags that take a value (letter followed by ':'):
@@ -884,6 +880,19 @@ fn run_main() -> io::Result<()> {
                             k += 1;
                         }
                         i += 1;
+                    }
+                }
+
+                // Prevent nesting only for an ATTACHING new-session (issue #424).
+                // A detached (-d) session does not take over the current terminal,
+                // so it is allowed to be created from inside an existing session,
+                // matching tmux (which only warns for commands that grab the pty).
+                if !detached && env::var("PSMUX_ALLOW_NESTING").ok().as_deref() != Some("1") {
+                    if env::var("PSMUX_ACTIVE").ok().as_deref() == Some("1")
+                        || env::var("PSMUX_SESSION").ok().filter(|v| !v.is_empty()).is_some()
+                    {
+                        eprintln!("psmux: sessions should be nested with care, unset PSMUX_SESSION to force");
+                        return Ok(());
                     }
                 }
 
