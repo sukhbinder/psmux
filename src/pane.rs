@@ -916,6 +916,73 @@ fn parse_bash_env_script(script: &str) -> (Vec<String>, Vec<(String, String)>, S
     (removes, sets, final_cmd)
 }
 
+/// Strip one layer of matching single or double quotes from a token.
+#[cfg(windows)]
+fn strip_quotes(s: &str) -> &str {
+    let s = s.trim();
+    if s.len() >= 2
+        && ((s.starts_with('\'') && s.ends_with('\'')) || (s.starts_with('"') && s.ends_with('"')))
+    {
+        &s[1..s.len() - 1]
+    } else {
+        s
+    }
+}
+
+/// Detect the POSIX `env VAR=val ... <program> <args>` launch idiom, optionally
+/// preceded by `cd <dir> &&`.  Tools written for real tmux (notably Claude Code
+/// agent-teams, which launches each teammate with
+/// `cd '<cwd>' && env CLAUDECODE=1 ... '<claude>' --agent-id ...`) use it.
+/// Under PowerShell `env` is not a command, so psmux would run the pane command
+/// through pwsh and it dies with "env: The term 'env' is not recognized"
+/// (intermittent: it only works when Git's usr\bin happens to be on PATH).
+///
+/// We parse the `cd` target and the `VAR=val` assignments out and return
+/// `(cwd_override, env_sets, remaining_command)` so the caller can apply cwd/env
+/// directly on the CommandBuilder and run the program without the `env` prefix,
+/// independent of PATH.  Returns None when the `env ` idiom is not present.
+/// (issue #399)
+#[cfg(windows)]
+fn detect_env_prefix_command(cmd: &str) -> Option<(Option<String>, Vec<(String, String)>, String)> {
+    let mut rest = cmd.trim();
+    let mut cwd_override: Option<String> = None;
+
+    // Optional leading `cd <dir> && `
+    if let Some(after_cd) = rest.strip_prefix("cd ") {
+        if let Some(amp) = after_cd.find("&&") {
+            cwd_override = Some(strip_quotes(after_cd[..amp].trim()).to_string());
+            rest = after_cd[amp + 2..].trim();
+        }
+    }
+
+    // Must be the `env ` idiom to apply this handling.
+    let after_env = rest.strip_prefix("env ")?;
+
+    // Consume leading `KEY=VALUE` tokens; the first non-assignment token begins
+    // the program + args.
+    let mut env_sets: Vec<(String, String)> = Vec::new();
+    let mut remainder = after_env.trim_start();
+    loop {
+        let token_end = remainder.find(char::is_whitespace).unwrap_or(remainder.len());
+        let token = &remainder[..token_end];
+        if let Some(eq) = token.find('=') {
+            let key = &token[..eq];
+            if !key.is_empty() && key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+                let val = strip_quotes(&token[eq + 1..]).to_string();
+                env_sets.push((key.to_string(), val));
+                remainder = remainder[token_end..].trim_start();
+                continue;
+            }
+        }
+        break;
+    }
+
+    if remainder.is_empty() {
+        return None;
+    }
+    Some((cwd_override, env_sets, remainder.to_string()))
+}
+
 pub fn build_command(command: Option<&str>, env_shim: bool, allow_predictions: bool) -> CommandBuilder {
     // Capture CWD early — portable_pty on Windows defaults to USERPROFILE
     // (home dir) when no cwd is set on CommandBuilder, so we must set it
@@ -930,7 +997,7 @@ pub fn build_command(command: Option<&str>, env_shim: bool, allow_predictions: b
         // on the CommandBuilder.  The final command is then passed to whatever
         // shell `cached_shell()` resolves to, env-manipulation-free.
         #[cfg(windows)]
-        let (env_removes, env_sets, cmd) = {
+        let (env_removes, env_sets, cmd, cwd_override) = {
             let trimmed = cmd.trim();
             if let Some((inner_script, _)) = detect_bash_c_wrapper(trimmed) {
                 let (removes, sets, final_cmd) = parse_bash_env_script(inner_script);
@@ -939,13 +1006,26 @@ pub fn build_command(command: Option<&str>, env_shim: bool, allow_predictions: b
                 } else {
                     resolve_unix_path(&final_cmd)
                 };
-                (removes, sets, final_cmd)
+                (removes, sets, final_cmd, None)
+            } else if let Some((cwd_dir, sets, final_cmd)) = detect_env_prefix_command(trimmed) {
+                // POSIX `env VAR=val <program>` idiom (issue #399: Claude Code
+                // agent-teams teammate launch). Apply env/cwd directly and run the
+                // program without the `env` prefix so it does not depend on the
+                // `env` binary being on PATH. The program is a path/exe token, so
+                // prefix the pwsh call operator `&` to invoke it rather than have
+                // pwsh treat the first token as a string to print.
+                (Vec::new(), sets, format!("& {}", final_cmd), cwd_dir)
             } else {
-                (Vec::new(), Vec::new(), resolve_unix_path(cmd))
+                (Vec::new(), Vec::new(), resolve_unix_path(cmd), None)
             }
         };
         #[cfg(not(windows))]
-        let (env_removes, env_sets, cmd) = (Vec::<String>::new(), Vec::<(String, String)>::new(), cmd.to_string());
+        let (env_removes, env_sets, cmd, cwd_override) = (Vec::<String>::new(), Vec::<(String, String)>::new(), cmd.to_string(), None::<String>);
+
+        // An explicit `cd <dir>` from the launch idiom overrides the inherited CWD.
+        let cwd = cwd_override
+            .map(std::path::PathBuf::from)
+            .or(cwd);
 
         let shell = cached_shell().map(|s| s.to_string());
 
@@ -1455,6 +1535,10 @@ pub fn spawn_reader_thread(
         }
     });
 }
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue399_env_prefix.rs"]
+mod test_issue399_env_prefix;
 
 #[cfg(test)]
 #[path = "../tests-rs/test_issue151_strict_mode.rs"]
