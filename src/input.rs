@@ -2978,40 +2978,65 @@ fn handle_copy_mode_char(app: &mut AppState, c: char) -> io::Result<()> {
         }
         return Ok(());
     }
-    // Handle find-char pending state (waiting for char after f/F/t/T)
+    // Handle find-char pending state (waiting for char after f/F/t/T).
+    // Consume any numeric prefix so e.g. "3fx" jumps to the 3rd 'x' (#413).
     if let Some(pending) = app.copy_find_char_pending.take() {
-        match pending {
-            0 => crate::copy_mode::find_char_forward(app, c),
-            1 => crate::copy_mode::find_char_backward(app, c),
-            2 => crate::copy_mode::find_char_to_forward(app, c),
-            3 => crate::copy_mode::find_char_to_backward(app, c),
-            _ => {}
+        let n = app.copy_count.take().unwrap_or(1);
+        for _ in 0..n {
+            match pending {
+                0 => crate::copy_mode::find_char_forward(app, c),
+                1 => crate::copy_mode::find_char_backward(app, c),
+                2 => crate::copy_mode::find_char_to_forward(app, c),
+                3 => crate::copy_mode::find_char_to_backward(app, c),
+                _ => {}
+            }
         }
         return Ok(());
     }
+    // Numeric prefix accumulation for vi-style motions (fixes #413). This path
+    // handles copy-mode chars arriving via send-text (the route the client uses
+    // for every plain printable key), which previously ignored counts entirely
+    // so "5j" moved a single line instead of five.
+    if c.is_ascii_digit() {
+        let digit = c.to_digit(10).unwrap() as usize;
+        if let Some(count) = app.copy_count {
+            // Extend the pending count: "1" then "2" -> 12 (cap at 9999).
+            app.copy_count = Some((count * 10 + digit).min(9999));
+            return Ok(());
+        } else if digit >= 1 {
+            // Start a new count with 1-9.
+            app.copy_count = Some(digit);
+            return Ok(());
+        }
+        // digit == 0 with no existing count -> fall through to the '0'
+        // line-start motion below.
+    }
+    // Any non-digit key consumes the pending count (default 1).
+    let n = app.copy_count.take().unwrap_or(1);
     match c {
         'q' | ']' | '\x1b' => {
             exit_copy_mode(app);
         }
-        'h' => { move_copy_cursor(app, -1, 0); }
-        'l' => { move_copy_cursor(app, 1, 0); }
-        'k' => { move_copy_cursor(app, 0, -1); }
-        'j' => { move_copy_cursor(app, 0, 1); }
+        'h' => { for _ in 0..n { move_copy_cursor(app, -1, 0); } }
+        'l' => { for _ in 0..n { move_copy_cursor(app, 1, 0); } }
+        'k' => { for _ in 0..n { move_copy_cursor(app, 0, -1); } }
+        'j' => { for _ in 0..n { move_copy_cursor(app, 0, 1); } }
         'g' => { scroll_to_top(app); }
         'G' => { scroll_to_bottom(app); }
-        'w' => { crate::copy_mode::move_word_forward(app); }
-        'b' => { crate::copy_mode::move_word_backward(app); }
-        'e' => { crate::copy_mode::move_word_end(app); }
-        'W' => { crate::copy_mode::move_word_forward_big(app); }
-        'B' => { crate::copy_mode::move_word_backward_big(app); }
-        'E' => { crate::copy_mode::move_word_end_big(app); }
+        'w' => { for _ in 0..n { crate::copy_mode::move_word_forward(app); } }
+        'b' => { for _ in 0..n { crate::copy_mode::move_word_backward(app); } }
+        'e' => { for _ in 0..n { crate::copy_mode::move_word_end(app); } }
+        'W' => { for _ in 0..n { crate::copy_mode::move_word_forward_big(app); } }
+        'B' => { for _ in 0..n { crate::copy_mode::move_word_backward_big(app); } }
+        'E' => { for _ in 0..n { crate::copy_mode::move_word_end_big(app); } }
         'H' => { crate::copy_mode::move_to_screen_top(app); }
         'M' => { crate::copy_mode::move_to_screen_middle(app); }
         'L' => { crate::copy_mode::move_to_screen_bottom(app); }
-        'f' => { app.copy_find_char_pending = Some(0); }
-        'F' => { app.copy_find_char_pending = Some(1); }
-        't' => { app.copy_find_char_pending = Some(2); }
-        'T' => { app.copy_find_char_pending = Some(3); }
+        // Preserve the count so e.g. "3fx" finds the 3rd 'x' (consumed above).
+        'f' => { app.copy_find_char_pending = Some(0); app.copy_count = Some(n); }
+        'F' => { app.copy_find_char_pending = Some(1); app.copy_count = Some(n); }
+        't' => { app.copy_find_char_pending = Some(2); app.copy_count = Some(n); }
+        'T' => { app.copy_find_char_pending = Some(3); app.copy_count = Some(n); }
         'D' => { crate::copy_mode::copy_end_of_line(app)?; exit_copy_mode(app); }
         '0' => { crate::copy_mode::move_to_line_start(app); }
         '$' => { crate::copy_mode::move_to_line_end(app); }
@@ -3517,3 +3542,7 @@ mod tests_pane_last_text_input;
 #[cfg(test)]
 #[path = "../tests-rs/test_pane_last_special_key.rs"]
 mod tests_pane_last_special_key;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue413_copy_count.rs"]
+mod tests_issue413_copy_count;
