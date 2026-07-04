@@ -4596,7 +4596,13 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
             let active_rect = compute_active_rect_json_zoom_aware(&root, content_chunk, state.zoomed);
             let clock_col = clock_colour_str.as_deref().map(|s| map_color(s)).unwrap_or(Color::Cyan);
             let border_status = state.pane_border_status.as_deref().unwrap_or("off");
-            let border_format = state.pane_border_format.as_deref().unwrap_or("");
+            // tmux defaults pane-border-format to a non-empty value, so enabling
+            // pane-border-status alone renders the pane title. Match that default
+            // when unset/empty (else the label gate skips and the border is blank) (#414).
+            let border_format = match state.pane_border_format.as_deref() {
+                Some(s) if !s.is_empty() => s,
+                _ => "#{pane_index} \"#{pane_title}\"",
+            };
             // O(N) per frame but pane counts are small in practice (typically < 20).
             let total_panes = if state.zoomed { 1 } else { root.count_leaves() };
             render_layout_json(f, &root, content_chunk, dim_preds, pane_border_fg, pane_active_border_fg, clock_active, clock_col, active_rect, &mode_style_str, state.zoomed, border_status, border_format, total_panes);
