@@ -868,7 +868,7 @@ match cmd {
             let _ = tx.send(CtrlReq::NewWindow(cmd_str, name, detached, start_dir));
         }
     }
-    "split-window" | "splitw" => {
+    "split-window" | "splitw" | "split-pane" | "splitp" => {
         let kind = if args.iter().any(|a| *a == "-h") { LayoutKind::Horizontal } else { LayoutKind::Vertical };
         let detached = args.iter().any(|a| *a == "-d");
         let print_info = args.iter().any(|a| *a == "-P");
@@ -3083,7 +3083,7 @@ fn dispatch_control_command(
                 true
             }
         }
-        "split-window" | "splitw" => {
+        "split-window" | "splitw" | "split-pane" | "splitp" => {
             let kind = if crate::cli::has_short_flag(&args, 'h') {
                 LayoutKind::Horizontal
             } else {

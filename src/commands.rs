@@ -473,11 +473,11 @@ pub fn parse_command_to_action(cmd: &str) -> Option<Action> {
                 Some(Action::NewWindow)
             }
         }
-        "split-window" | "splitw" => {
+        "split-window" | "splitw" | "split-pane" | "splitp" => {
             // If extra flags like -c, -d, -p, -F, or a shell command are present,
             // store as Command to preserve the full argument string.
             let has_extra = parts.iter().any(|p| matches!(*p, "-c" | "-d" | "-p" | "-l" | "-F" | "-P" | "-b" | "-f" | "-I" | "-Z" | "-e"))
-                || parts.iter().any(|p| !p.starts_with('-') && *p != "split-window" && *p != "splitw");
+                || parts.iter().any(|p| !p.starts_with('-') && *p != "split-window" && *p != "splitw" && *p != "split-pane" && *p != "splitp");
             if has_extra {
                 Some(Action::Command(cmd.to_string()))
             } else if parts.iter().any(|p| *p == "-h") {
@@ -906,7 +906,7 @@ pub fn execute_command_prompt(app: &mut AppState) -> io::Result<()> {
             let pty_system = portable_pty::native_pty_system();
             create_window(&*pty_system, app, None, None)?;
         }
-        "split-window" | "splitw" => {
+        "split-window" | "splitw" | "split-pane" | "splitp" => {
             let kind = if parts.iter().any(|p| *p == "-h") { LayoutKind::Horizontal } else { LayoutKind::Vertical };
             split_active(app, kind)?;
         }
@@ -949,7 +949,7 @@ fn execute_command_string_single(app: &mut AppState, cmd: &str) -> io::Result<()
                 let _ = send_control_to_port(port, "new-window\n", &app.session_key);
             }
         }
-        "split-window" | "splitw" => {
+        "split-window" | "splitw" | "split-pane" | "splitp" => {
             if let Some(port) = app.control_port {
                 // Forward the full command string to preserve -c, -d, -p etc. flags
                 let _ = send_control_to_port(port, &format!("{}\n", cmd), &app.session_key);
@@ -2526,3 +2526,7 @@ mod tests_issue383_swap_pane_targets;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue402_parse.rs"]
 mod tests_issue402_parse;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue426_split_pane_alias.rs"]
+mod tests_issue426_split_pane_alias;
