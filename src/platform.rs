@@ -1507,6 +1507,14 @@ pub mod mouse_inject {
             // MAPVK_VK_TO_VSC = 0
             let scan = MapVirtualKeyW(VK_RETURN as u32, 0) as u16;
 
+            // Plain Ctrl+Enter carries LF (0x0A) as the character payload, matching
+            // Windows Terminal's regular input encoder (TerminalInput::_encodeRegular).
+            // The VK_RETURN + LEFT_CTRL metadata is preserved so Console-API readers
+            // (PSReadLine) still see Ctrl+Enter, while VT/raw stdin readers (Node/libuv
+            // apps like pi, Claude Code) receive LF instead of CR (#409).  Shift/Alt
+            // Enter variants keep CR to preserve their existing behavior.
+            let u_char = if ctrl && !alt && !shift { '\n' as u16 } else { '\r' as u16 };
+
             let records = [
                 KEY_INPUT_RECORD {
                     event_type: KEY_EVENT,
@@ -1516,7 +1524,7 @@ pub mod mouse_inject {
                         repeat_count: 1,
                         virtual_key_code: VK_RETURN,
                         virtual_scan_code: scan,
-                        u_char: '\r' as u16,
+                        u_char,
                         control_key_state: flags,
                     },
                 },
@@ -1528,7 +1536,7 @@ pub mod mouse_inject {
                         repeat_count: 1,
                         virtual_key_code: VK_RETURN,
                         virtual_scan_code: scan,
-                        u_char: '\r' as u16,
+                        u_char,
                         control_key_state: flags,
                     },
                 },
@@ -1542,8 +1550,8 @@ pub mod mouse_inject {
                 &mut written,
             );
 
-            debug_log(&format!("send_modified_enter_event: pid={} ctrl={} alt={} shift={} scan=0x{:02X} flags=0x{:04X} => ok={} written={}",
-                child_pid, ctrl, alt, shift, scan, flags, result != 0, written));
+            debug_log(&format!("send_modified_enter_event: pid={} ctrl={} alt={} shift={} scan=0x{:02X} u_char=0x{:04X} flags=0x{:04X} => ok={} written={}",
+                child_pid, ctrl, alt, shift, scan, u_char, flags, result != 0, written));
 
             CloseHandle(handle);
             FreeConsole();
