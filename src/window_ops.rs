@@ -1111,9 +1111,21 @@ pub fn swap_pane(app: &mut AppState, dir: FocusDir) -> bool {
     let pane_ids: Vec<usize> = rects.iter().map(|(path, _)| {
         crate::tree::get_active_pane_id(&win.root, path).unwrap_or(usize::MAX)
     }).collect();
-    // Try direct neighbour first, then wrap to opposite edge (tmux parity #61)
-    let target = crate::input::find_best_pane_in_direction(&rects, ai, arect, dir, &pane_ids, &win.pane_mru)
-        .or_else(|| crate::input::find_wrap_target(&rects, ai, arect, dir, &pane_ids, &win.pane_mru));
+    // Pick the pane to swap with.  tmux defines `swap-pane -U`/`-D` by pane
+    // *index* order, not spatial geometry: -U swaps with the previous pane and
+    // -D with the next pane in the window's pane list, wrapping at the ends
+    // (cmd-swap-pane.c uses TAILQ_PREV / TAILQ_NEXT with wrap to LAST / FIRST).
+    // `rects` is already in pane-index order (DFS leaf order, same as
+    // pane_index_in_window), so prev/next is simply ai-1 / ai+1 with wrap.
+    // `-L`/`-R` have no tmux swap-pane equivalent (they are psmux extensions),
+    // so they keep the spatial neighbour search. (issue #400)
+    let n = rects.len();
+    let target = match dir {
+        FocusDir::Up   => Some(if ai == 0 { n - 1 } else { ai - 1 }),
+        FocusDir::Down => Some(if ai + 1 >= n { 0 } else { ai + 1 }),
+        _ => crate::input::find_best_pane_in_direction(&rects, ai, arect, dir, &pane_ids, &win.pane_mru)
+            .or_else(|| crate::input::find_wrap_target(&rects, ai, arect, dir, &pane_ids, &win.pane_mru)),
+    }.filter(|&ni| ni != ai); // single-pane window: nothing to swap with
     let mut swapped = false;
     if let Some(ni) = target {
         let active_path = rects[ai].0.clone();
@@ -1577,3 +1589,7 @@ mod test_issue81_resize_direction;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue381_gitbash_fullscreen_falsepositive.rs"]
 mod test_issue381_gitbash_fullscreen_falsepositive;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue400_swap_pane_index_order.rs"]
+mod test_issue400_swap_pane_index_order;
