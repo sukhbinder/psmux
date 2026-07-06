@@ -1399,6 +1399,7 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
     fn default_status_lines() -> usize { 1 }
     fn default_status_visible() -> bool { true }
     fn default_repeat_time() -> u64 { 500 }
+    fn default_bold_is_bright() -> bool { true }
     fn default_paste_detection() -> bool { true }
     fn default_mouse_selection() -> bool { true }
     fn default_scroll_enter_copy_mode() -> bool { true }
@@ -1573,6 +1574,12 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
         /// Repeat key timeout in ms (default: 500, synced from server)
         #[serde(default = "default_repeat_time")]
         repeat_time: u64,
+        /// bold-is-bright option (issue #425): controls whether the console
+        /// writer rewrites crossterm's 256-indexed basic colors to standard SGR.
+        /// The writer lives in this client process, so the value is synced from
+        /// the server and pushed into the writer's atomic each frame.
+        #[serde(default = "default_bold_is_bright")]
+        bold_is_bright: bool,
         /// Whether a pane is currently zoomed (borders should be hidden)
         #[serde(default)]
         zoomed: bool,
@@ -4489,6 +4496,10 @@ pub fn run_remote(terminal: &mut Terminal<CrosstermBackend<crate::platform::Psmu
         scroll_enter_copy_mode = state.scroll_enter_copy_mode;
         // Sync repeat-time from server
         repeat_time_ms = state.repeat_time;
+        // Sync bold-is-bright (issue #425) into the console writer's atomic.
+        // The writer lives in this client process, so the server-side option
+        // value must be pushed here for the rewrite toggle to take effect.
+        crate::platform::set_bold_is_bright(state.bold_is_bright);
         // Update status-left / status-right from server (already format-expanded)
         if let Some(sl) = state.status_left {
             // Pass full string — visual truncation is handled by ratatui

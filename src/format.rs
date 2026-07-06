@@ -856,6 +856,7 @@ fn lookup_option(name: &str, app: &AppState) -> Option<String> {
         "escape-time" => Some(app.escape_time_ms.to_string()),
         "history-limit" => Some(app.history_limit.to_string()),
         "mouse" => Some(if app.mouse_enabled { "on".into() } else { "off".into() }),
+        "bold-is-bright" => Some(if app.bold_is_bright { "on".into() } else { "off".into() }),
         "scroll-enter-copy-mode" => Some(if app.scroll_enter_copy_mode { "on".into() } else { "off".into() }),
         "choose-tree-preview" => Some(if app.choose_tree_preview { "on".into() } else { "off".into() }),
         "mode-keys" => Some(app.mode_keys.clone()),
@@ -1637,6 +1638,7 @@ pub fn expand_var(var: &str, app: &AppState, win_idx: usize) -> String {
 
         // ── Options as format variables ──
         "mouse" => if app.mouse_enabled { "on".into() } else { "off".into() },
+        "bold-is-bright" => if app.bold_is_bright { "on".into() } else { "off".into() },
         "scroll-enter-copy-mode" => if app.scroll_enter_copy_mode { "on".into() } else { "off".into() },
         "choose-tree-preview" => if app.choose_tree_preview { "on".into() } else { "off".into() },
         "prefix" => format_key_binding(&app.prefix_key),

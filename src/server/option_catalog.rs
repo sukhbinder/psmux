@@ -12,6 +12,7 @@ pub static OPTION_CATALOG: &[OptionDef] = &[
     // ── Server options ──
     OptionDef { name: "escape-time", scope: "server", option_type: "number", default: "500", description: "Time in ms to wait for escape sequence" },
     OptionDef { name: "focus-events", scope: "server", option_type: "boolean", default: "off", description: "Send focus events to applications" },
+    OptionDef { name: "bold-is-bright", scope: "server", option_type: "boolean", default: "on", description: "Rewrite crossterm's 256-indexed basic colors to standard SGR so the terminal applies bold-is-bright (issue #425); off keeps explicit 256-indexed low colors byte-accurate" },
     OptionDef { name: "history-limit", scope: "server", option_type: "number", default: "2000", description: "Maximum scrollback lines per pane" },
     OptionDef { name: "alternate-screen", scope: "server", option_type: "boolean", default: "on", description: "Honour DEC 47/1049 alt-screen mode (off = TUI output goes to scrollback, #88)" },
     OptionDef { name: "set-clipboard", scope: "server", option_type: "choice", default: "external", description: "OSC 52 clipboard integration" },

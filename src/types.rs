@@ -387,6 +387,13 @@ pub struct AppState {
     pub drag: Option<DragState>,
     pub last_window_area: Rect,
     pub mouse_enabled: bool,
+    /// bold-is-bright: when on (default), rewrite crossterm's 256-indexed
+    /// `38;5;N`/`48;5;N` (N<=15) back to the standard 30-37/90-97 SGR codes so
+    /// the outer terminal applies "bold is bright" to the 16 basic colors
+    /// (issue #425).  Turn off to pass crossterm's output through untouched,
+    /// which keeps explicit 256-indexed low colors byte-accurate at the cost of
+    /// losing bold-is-bright on basic colors.
+    pub bold_is_bright: bool,
     /// scroll-enter-copy-mode: when off, mouse scroll at a shell prompt does NOT
     /// auto-enter copy mode.  Default: on (tmux parity).
     pub scroll_enter_copy_mode: bool,
@@ -721,6 +728,7 @@ impl AppState {
             drag: None,
             last_window_area: Rect { x: 0, y: 0, width: 120, height: 30 },
             mouse_enabled: true,
+            bold_is_bright: true,
             scroll_enter_copy_mode: true,
             pwsh_mouse_selection: false,
             mouse_selection: true,
