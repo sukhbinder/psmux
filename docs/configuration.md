@@ -107,6 +107,7 @@ psmux split-window -- "C:/Program Files/Git/bin/bash.exe"
 | `pwsh-mouse-selection` | Bool | `off` | tmux-like release-copy selection with word/line multi-click and pane-clipped extraction |
 | `paste-detection` | Bool | `on` | Detect Ctrl+V paste from console host and send as bracketed paste (set `off` to let Ctrl+V reach child apps like neovim) |
 | `choose-tree-preview` | Bool | `off` | Open `choose-session` / `choose-tree` pickers with the live preview pane already visible (saves pressing `p`). See [preview.md](preview.md) |
+| `bold-is-bright` | Bool | `on` | Restore standard SGR codes for the 16 basic colors so the outer terminal renders `bold` as bright (matches a bare shell). Set `off` to keep explicit 256-indexed low colors byte-accurate. See [Bold Is Bright](#bold-is-bright-color-rendering) |
 | `status` | Bool/Int | `on` | Show status bar (number = line count) |
 | `status-position` | Str | `bottom` | `top` or `bottom` |
 | `status-justify` | Str | `left` | `left`, `centre`, `right`, `absolute-centre` |
@@ -332,6 +333,30 @@ set -g choose-tree-preview on
 
 You can still press `p` inside the chooser to hide it for the current session. The setting is read once when the chooser opens, so changes to the option take effect immediately on the next open. See [preview.md](preview.md) for the full feature documentation.
 
+### Bold Is Bright (color rendering)
+
+Many terminals, including Windows Terminal, render bold text in one of the 16 basic ANSI colors as the brighter variant of that color. This is the common "bold is bright" behavior, and a bare shell gets it because it emits the standard SGR codes (`ESC[32m` for green, brightened by `ESC[1m`).
+
+psmux renders its screen through ratatui and crossterm, and crossterm serializes all 16 basic colors as the 256-indexed form (`ESC[38;5;N`) instead of the standard `30`-`37` codes. Windows Terminal only applies "bold is bright" to the standard codes, not the 256-indexed form, so colored bold text like PowerShell's `$PSStyle` output looked muted with a heavier font ([#425](https://github.com/psmux/psmux/issues/425)). psmux rewrites those basic-color sequences back to the standard codes so bold renders bright, exactly matching a bare shell. This is on by default.
+
+```tmux
+# Default: basic colors get "bold is bright" (matches a bare shell)
+set -g bold-is-bright on
+
+# Opt out: pass crossterm output through untouched
+set -g bold-is-bright off
+```
+
+There is one tradeoff. crossterm collapses a basic color (`ESC[32m`) and an explicit 256-indexed low color (`ESC[38;5;2m`) into the identical bytes, so the rewrite cannot tell them apart and brightens both. If a program you use deliberately emits the 256-indexed colors 0 through 15 and you need them to stay exactly as sent, set `bold-is-bright off`. With it off, both basic and explicit 256-indexed low colors are byte-accurate, and you give up "bold is bright" on the basic colors. This is the inherent limitation of crossterm's lossy encoding; real tmux does not have it because it never collapses the two forms.
+
+The option applies from config, at runtime, and reports through `show-options` and `#{bold-is-bright}`:
+
+```powershell
+psmux set-option -g bold-is-bright off
+psmux show-options -g bold-is-bright
+psmux display-message -p '#{bold-is-bright}'
+```
+
 ### Command Chaining
 
 psmux supports tmux-style command chaining with the `;` operator. Multiple commands on a single line are executed sequentially:
@@ -375,6 +400,7 @@ bind-key C-Space send-prefix
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `prediction-dimming` | Bool | `off` | Dim predictive/speculative text |
+| `bold-is-bright` | Bool | `on` | Restore standard SGR codes for the 16 basic colors so bold renders bright (set `off` to keep explicit 256-indexed low colors byte-accurate). See [Bold Is Bright](#bold-is-bright-color-rendering) |
 | `paste-detection` | Bool | `on` | Detect Ctrl+V paste from console host (set `off` for neovim/vim Ctrl+V) |
 | `cursor-style` | Str | | Cursor shape: `block`, `underline`, or `bar` |
 | `cursor-blink` | Bool | `off` | Cursor blinking |
