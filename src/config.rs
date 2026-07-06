@@ -900,6 +900,10 @@ pub fn parse_option_value(app: &mut AppState, rest: &str, _is_global: bool) {
         "mouse-selection" => app.mouse_selection = matches!(value, "on" | "true" | "1"),
         "paste-detection" => app.paste_detection = matches!(value, "on" | "true" | "1"),
         "choose-tree-preview" => app.choose_tree_preview = matches!(value, "on" | "true" | "1"),
+        "bold-is-bright" => {
+            app.bold_is_bright = matches!(value, "on" | "true" | "1");
+            crate::platform::set_bold_is_bright(app.bold_is_bright);
+        }
         "prefix" => {
             if let Some(key) = parse_key_name(value) {
                 app.prefix_key = key;
@@ -2129,3 +2133,7 @@ mod tests_issue370_config_warnings;
 #[cfg(test)]
 #[path = "../tests-rs/test_issue416_inline_comments.rs"]
 mod tests_issue416_inline_comments;
+
+#[cfg(test)]
+#[path = "../tests-rs/test_issue425_bold_is_bright_option.rs"]
+mod tests_issue425_bold_is_bright_option;

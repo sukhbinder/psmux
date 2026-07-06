@@ -2420,6 +2420,20 @@ impl Utf16ConsoleWriter {
 // font.  Restoring the standard SGR codes (30-37/90-97 fg, 40-47/100-107 bg)
 // for palette indices 0-15 makes psmux match a bare shell.
 
+/// Global toggle for the "bold is bright" SGR rewrite (issue #425 option
+/// `bold-is-bright`, default on).  The console writer is a detached singleton
+/// with no access to `AppState`, so the option is mirrored into this atomic by
+/// whichever process applies the option (config parse or `set-option`).  When
+/// off, `flush()` skips the rewrite and passes crossterm's output through
+/// untouched.
+pub static BOLD_IS_BRIGHT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+/// Set the `bold-is-bright` rewrite toggle (cross-platform; only read by the
+/// Windows console writer).
+pub fn set_bold_is_bright(on: bool) {
+    BOLD_IS_BRIGHT.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// Returns true when an SGR parameter list contains only ASCII digits and
 /// `;` separators (the shape crossterm emits).  Anything else (`:` subparams,
 /// private markers) is left untouched.
@@ -2598,7 +2612,8 @@ impl std::io::Write for Utf16ConsoleWriter {
         // (covers both `38;5;` and `48;5;`); otherwise the buffer is used
         // as-is.  `deferred` holds a trailing incomplete escape sequence to
         // carry to the next flush (empty in the common case).
-        let needs_rewrite = self.frame_buf.windows(4).any(|w| w == b"8;5;");
+        let needs_rewrite = BOLD_IS_BRIGHT.load(std::sync::atomic::Ordering::Relaxed)
+            && self.frame_buf.windows(4).any(|w| w == b"8;5;");
         let mut rewritten: Vec<u8> = Vec::new();
         let (processed, deferred): (&[u8], &[u8]) = if needs_rewrite {
             rewritten.reserve(self.frame_buf.len() + 16);
