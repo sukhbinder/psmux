@@ -546,9 +546,17 @@ pub fn paste_latest(app: &mut AppState) -> io::Result<()> {
         }
         return Ok(());
     }
-    if let Some(buf) = app.paste_buffers.first() {
+    // Issue #428: fall back to the OS clipboard when the internal paste-buffer
+    // stack is empty, so prefix+] pastes externally-copied text.
+    let internal = app.paste_buffers.first().cloned().unwrap_or_default();
+    let text = if internal.is_empty() {
+        crate::clipboard::read_from_system_clipboard().unwrap_or_default()
+    } else {
+        internal
+    };
+    if !text.is_empty() {
         let win = &mut app.windows[app.active_idx];
-        if let Some(p) = active_pane_mut(&mut win.root, &win.active_path) { let _ = write!(p.writer, "{}", buf); }
+        if let Some(p) = active_pane_mut(&mut win.root, &win.active_path) { let _ = write!(p.writer, "{}", text); }
     }
     Ok(())
 }

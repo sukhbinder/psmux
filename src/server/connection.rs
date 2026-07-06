@@ -1500,11 +1500,21 @@ match cmd {
         } else {
             let _ = tx.send(CtrlReq::ShowBuffer(rtx));
         }
-        if let Ok(text) = rrx.recv() {
-            if paste_mode {
-                let _ = tx.send(CtrlReq::SendPaste(text));
-            } else {
-                let _ = tx.send(CtrlReq::SendText(text));
+        if let Ok(mut text) = rrx.recv() {
+            // Issue #428: when no explicit buffer is named and the internal
+            // paste-buffer stack is empty, fall back to the OS clipboard so
+            // prefix+] pastes externally-copied text (matching Ctrl+Shift+V).
+            if text.is_empty() && buf_name.is_none() {
+                if let Some(clip) = crate::clipboard::read_from_system_clipboard() {
+                    text = clip;
+                }
+            }
+            if !text.is_empty() {
+                if paste_mode {
+                    let _ = tx.send(CtrlReq::SendPaste(text));
+                } else {
+                    let _ = tx.send(CtrlReq::SendText(text));
+                }
             }
         }
     }
